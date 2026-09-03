@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # GitHub_Actions_Security_Cheat_Sheet.md — pinned commit SHAs (ci.yml) don't update themselves;
+  # this is what notices a new release exists and opens the PR to bump the pin.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 4 # let the community catch a freshly-published malicious/broken release first

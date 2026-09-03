@@ -103,9 +103,27 @@ nothing to configure.)
   generic "tests, eventually."
 - **Gate merges to `main` on these passing — made concrete 2026-09-04, checked against
   `owasp-cheatsheets/GitHub_Actions_Security_Cheat_Sheet.md` (not cited in this document before now).** "Gate"
-  wasn't previously specified as a real mechanism — it's **GitHub branch protection on `main`**: require pull
-  request review, and mark each job above as a *required status check* so the merge button stays locked until
-  they're green. Without this setting, the jobs above run and report but enforce nothing.
+  wasn't previously specified as a real mechanism — the intended one is **GitHub branch protection on `main`**:
+  required status checks so the merge button stays locked until they're green.
+  - The cheat sheet's full recommendation also includes required PR reviews, `CODEOWNERS` approval, and signed
+    commits — deliberately not pursued at all right now: those three defend against a second contributor's
+    changes (an unreviewed PR, an unowned path, a commit impersonating someone else), and there is no second
+    contributor yet.
+  - **Real platform gap, hit and confirmed 2026-09-04, not a config mistake:** both the classic
+    branch-protection API and the newer Rulesets API were tried against this actual repo and both returned
+    `403 — "Upgrade to GitHub Pro or make this repository public to enable this feature."` Branch protection is
+    a paid-plan feature for private repos on GitHub Free; public repos get it free regardless of plan. Explicitly
+    not worked around by paying for Pro or making the repo public (this is commercial source — visibility loss
+    isn't a security trade-off here, it's giving away the product) at pilot scale, solo-dev.
+  - **Temporary stand-in while that gap stands, decided 2026-09-04 — a procedural gate, not a platform one, and
+    explicitly a stopgap for the current phase only.** Right now every push to `main` goes through this
+    same working process: the project owner and Claude, together, on every push — nobody pushes directly and
+    walks away. Every push's CI run gets checked before the work is considered done; a red run is treated
+    exactly like a locked merge button — patched and re-pushed before moving on, never left standing. Stated
+    plainly so the difference is never assumed away: this is enforcement by discipline and a single shared
+    process, not a technical control — it has no effect the moment a second contributor pushes on their own.
+    **A second contributor joining is therefore the hard trigger to stop relying on this and either pay for
+    GitHub Pro or otherwise get a real platform-enforced gate** — not a nice-to-have revisit.
 - **Three more items from the same cheat sheet, none previously in this document:**
   - **Restrict the default `GITHUB_TOKEN` permissions to read-only** at the repo-settings level; grant write
     explicitly per-workflow only where a specific job actually needs it (none of the jobs above do).
@@ -115,7 +133,27 @@ nothing to configure.)
     push-protection secret scanning is free only on *public* repositories (verified via web search, not a
     project skill); a private repo needs paid GitHub Advanced Security, not worth it at pilot scale — same
     call already made on Supabase's breached-password check. Free equivalent: **gitleaks**, open-source, runs
-    as a plain CI step regardless of plan or repo visibility.
+    as a plain CI step regardless of plan or repo visibility — wired into a dedicated `security` job
+    2026-09-04 (was decided here first, sat undone until checked against the actual workflow file).
+  - **Static analysis on the workflow file itself, not just the app code — added 2026-09-04, same `security`
+    job.** `zizmor` (`uvx zizmor --format=github .github/workflows/`), free and open-source regardless of repo
+    visibility, unlike CodeQL's Actions scanning which hits the same private-repo paid wall as branch
+    protection. Catches the workflow-level risks this cheat sheet describes (dangerous triggers, impostor
+    commits) that ruff/pyright/eslint never look at, since those only see application code.
+  - **`.github/dependabot.yml` — added 2026-09-04.** Pinned commit SHAs (previous bullet) don't update
+    themselves; Dependabot is what notices a new release of `actions/checkout`/`setup-uv`/etc. exists and opens
+    the PR to bump the pin. Weekly, with a 4-day cooldown so a freshly-published release isn't pulled in before
+    the community has had a chance to flag it as broken or compromised. This is also what satisfies
+    `owasp-asvs-5` **15.1.1** below — a running mechanism, not just a stated intention.
+  - **`actions/checkout` now sets `persist-credentials: false` — added 2026-09-04.** None of these jobs push
+    back to the repo, so there's no reason for a git credential capable of doing so to sit in the runner's
+    workspace for the job's duration.
+- **Dependency remediation timeframe — `owasp-asvs-5` 15.1.1 (Level 1), checked 2026-09-04 and previously
+  absent from this document.** Stated plainly, not left implicit: a critical/high-severity CVE in a direct
+  dependency gets patched within 7 days of the fix being available; routine version bumps (the Dependabot PRs
+  above) are reviewed weekly, not left to accumulate. This is a policy statement, not a tool — the tool is
+  Dependabot itself, which is what actually surfaces the "a dependency needs attention" signal in the first
+  place.
 - **Deployment is not this pipeline's job** — Railway's own GitHub integration (§2) handles the actual build-and-deploy on green. Building a duplicate deploy step in Actions would just re-implement what the platform already does.
 
 ## 5. Desktop App Distribution — Tauri
