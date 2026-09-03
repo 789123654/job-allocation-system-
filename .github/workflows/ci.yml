@@ -114,3 +114,7 @@ jobs:
           # No GITLEAKS_LICENSE — free for personal-account repos, only orgs need one.
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - run: uvx zizmor --format=github .github/workflows/
+        env:
+          # Without this, zizmor stays in offline mode and skips GitHub-API-backed audits like
+          # impostor-commit — confirmed by the first CI run of this job, not assumed.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
