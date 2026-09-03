@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 
@@ -9,6 +10,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.main import api_router
 from app.core.config import settings
+
+logger = logging.getLogger("app")
 
 app = FastAPI(title="CA Firm Practice Management API")
 
@@ -71,6 +74,17 @@ async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     return _problem(422, "Request validation failed", str(request.url.path))
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Error_Handling_Cheat_Sheet.md: a bug must never fall through to a raw framework 500 —
+    genuine unhandled exceptions still get the app's own problem+json shape, with the real
+    exception logged server-side (this handler's job) and never echoed to the client (`_problem`'s
+    job, already true of every other handler here).
+    """
+    logger.exception("Unhandled exception on %s", request.url.path)
+    return _problem(500, "An unexpected error occurred", str(request.url.path))
 
 
 app.include_router(api_router)
