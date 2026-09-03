@@ -1,0 +1,40 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.19.1",
+    "fastapi[standard]>=0.141.1",
+    "psycopg[binary]>=3.3.5",
+    "pydantic-settings>=2.15.0",
+    "pyjwt[crypto]>=2.13.0",
+    "sqlmodel>=0.0.42",
+    "supabase-auth>=2.31.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "FAST"]
+
+[tool.ruff.lint.per-file-ignores]
+# S101: assert is the ponytail self-check pattern here, not production logic that dies under
+# `python -O`. S105: fixture strings like "temp-pw-123" are fake test data, not real secrets.
+"tests/**" = ["S101", "S105"]
+
+[tool.pyright]
+include = ["app", "tests"]
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

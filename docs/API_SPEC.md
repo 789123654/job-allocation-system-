@@ -1,0 +1,130 @@
+# CA Firm Practice Management Tool — API Specification
+
+> Follows `docs/PRD.md`, `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`, `docs/DEPLOYMENT.md`. Last planning document before code — searched `rest-api-guidelines`, `owasp-asvs-5`, `owasp-cheatsheets`, and `fastapi` directly before writing each section below, per the standing verification rule, not from memory.
+
+## 1. Conventions
+
+**Error format — Rule 176, `rest-api-guidelines/guidelines/http-status-codes-and-errors.md`:** every `4xx`/`5xx` response is `application/problem+json` (RFC 9457) — `type` (a relative URI like `/problems/task-not-submitted`, never resolved, never absolute per the skill's own stated preference), `title`, `status`, `detail`, `instance`. No stack traces in any response body (Rule 177, same file — also an ASVS/security concern, not just a style rule).
+
+**Status codes — Rule 150/220/243:** only standard HTTP codes, the most specific one that applies (`404` not a generic `400` for "task doesn't exist"), and only the common subset (`200`, `201`, `204`, `400`, `401`, `403`, `404`, `409`, `422`, `429`, `500`) — no obscure codes nobody on the team would recognize immediately.
+
+**Pagination — Rule 159/160, `pagination.md`:** required on every list endpoint. The skill recommends cursor-based over offset-based for high-volume/sharded data, but explicitly frames that as a trade-off, not an absolute — offset-based has better framework support and is simpler, and its known failure mode (duplicate/missing rows when data changes between page requests) doesn't bite at this project's actual scale (a firm's task list, not a "very large dataset" the skill is warning about). **Decision: offset-based pagination for Phase 1** — simpler, matches FastAPI's ecosystem better, revisit only if a specific list endpoint's data volume ever actually approaches the scale where the skill's cursor-based recommendation starts to matter.
+
+**Idempotency — Rule 229/230/231, verified earlier this session, restated here where it actually gets applied:** per-endpoint pattern assignments are in §3.
+
+**Workflow state validation — `REST_Security_Cheat_Sheet.md`, "Preventing Out-of-Order API Execution":** a real, direct requirement for this API, not a generic security nicety. Quote: *"If the backend does not explicitly validate workflow state transitions, attackers may invoke endpoints out of sequence to bypass intended controls... enforce workflow state validation on the server side for every request... reject invalid or out-of-order transitions with clear error responses."* Applied here: every task-mutating endpoint must check `tasks.status` server-side before acting — e.g., `POST /tasks/{id}/mark-billed` must reject (`409 Conflict`, problem+json) a task that isn't `assigned`/`in_progress` with `task_type='billing'`, not just perform the update and trust the frontend only shows that button when appropriate. This isn't optional polish — the cheat sheet frames it as the actual attack this project's status-machine-heavy design (§3, `DATA_MODEL.md`) is exposed to if skipped.
+
+**Generic web service requirements — ASVS 5 `v4-api-web-service.md`, V4.1:** every response with a body sets `Content-Type` with charset; only explicitly supported HTTP methods are allowed per route (no default-open `OPTIONS`/`TRACE`); headers an intermediary would set (`X-Forwarded-*`) are never trusted from the client directly.
+
+**Rate limiting — Rule 153, `rest-api-guidelines`:** `429` with a `Retry-After` header, not a bare rejection. Enforced at the Cloudflare edge layer (`DEPLOYMENT.md` §3) for coarse protection; not re-implemented in FastAPI itself at this scale.
+
+**Added 2026-09-03 — CORS was never addressed anywhere in this project's docs, checked across all of them.**
+A Tauri webview's requests to the FastAPI backend are cross-origin in the browser-security sense (the
+webview's own scheme origin — `tauri://localhost` or `https://tauri.localhost` depending on platform — is not
+the Railway-hosted API's origin), so FastAPI's CORS policy is a real, active setting, not a no-op to skip.
+Checked against `owasp-cheatsheets/REST_Security_Cheat_Sheet.md`'s CORS section directly: *"Disable CORS
+headers if cross-domain calls are not supported/expected... be as specific as possible."* This project's
+calls *are* expected, from exactly one client — so the fix is a specific allowlist (the Tauri app's own
+scheme origin), never a wildcard `*`, and never `*` combined with `allow_credentials=True` (a classic
+misconfiguration that defeats the same-origin protection CORS exists to provide). `DEPLOYMENT.md` should
+record the exact origin string once the Tauri app's production build settles on one.
+
+**Added 2026-09-05, while writing Phase 1's `main.py` — response security headers were never
+addressed anywhere either, same gap CORS was.** `REST_Security_Cheat_Sheet.md`'s Security Headers
+table names five headers required on *every* response a browser client sees — the Tauri webview
+qualifies, even though it isn't a general browser: `Cache-Control: no-store`, `X-Content-Type-Options:
+nosniff`, `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`,
+`Strict-Transport-Security`. Applied via one response middleware, not per-route. The sheet's
+HTML-only headers (`Permissions-Policy`, the broader `default-src` CSP, `Referrer-Policy`) are
+skipped — this API never returns HTML, only JSON/problem+json, which the sheet itself says those
+provide no protection for.
+
+## 2. Authentication on Every Endpoint
+
+Every endpoint below (except none — there are no public endpoints in this API) requires a valid JWT verified independently by FastAPI per request, per `ARCHITECTURE.md` §4. No endpoint list below repeats "requires auth" per-row; it's universal. Role gating (`require_owner`) is called out per-endpoint where it applies.
+
+## 3. Endpoints by Resource
+
+### Employees (`profiles`, PRD §2.1)
+| Method & path | Role | Idempotency pattern | Notes |
+|---|---|---|---|
+| `POST /employees` | Owner only | Secondary key (email, per Rule 231) | Request body: `full_name`, `email` only — no password field, per the 2026-09-02 provisioning decision in `ARCHITECTURE.md`. Server generates a random temporary password and calls `admin.createUser({ email, password, email_confirm: true, user_metadata: { firm_id, role: 'employee' } })` — `role` fixed to `'employee'` here (not owner-settable via this endpoint). `firm_id` is read from the calling Owner's own verified JWT (`CurrentProfile`), never accepted from the request body — per `owasp-cheatsheets/Authorization_Cheat_Sheet.md`'s IDOR/lookup-ID guidance and `saas-multitenant-architecture/ch07-multi-tenant-services.md`'s "tenant ID arrives as a JWT claim, not client input" pattern. **Response includes the generated password once** — the only time it's ever transmitted — for the Owner to relay to the employee directly; never logged, never retrievable again after this response. Also inserts an `audit_log` row (`action: employee_created`, `actor_id`: the Owner, `target_id`: the new employee) — `DATA_MODEL.md` |
+| `GET /employees` | Owner only | — (read) | Paginated (§1); includes pending-job workload count (PRD §2.4) |
+| `PATCH /employees/{id}` | Owner only | Conditional key (Rule 230-adjacent) | For deactivation (`is_active=false`) — never a hard delete, per PRD §2.1's "preserves history". Inserts an `audit_log` row (`action: employee_deactivated` or `employee_reactivated`, depending on the new `is_active` value) — `DATA_MODEL.md` |
+| `POST /employees/{id}/reset-password` | Owner only | `Idempotency-Key` | **Added 2026-09-03 — resolves the "Forgot-password flow" open question (§5).** No body. Calls `admin.updateUserById(id, { password })` with a newly generated password, sets `must_change_password=true` again, returns the password once — same shape as `POST /employees`'s response. No email involved, same reasoning as account creation. Also sets `profiles.last_reset_by`/`last_reset_at` and inserts an `audit_log` row (`action: password_reset`) — `DATA_MODEL.md` |
+**Set New Password is not a FastAPI route — corrected 2026-09-05.** Originally listed here as
+`POST /auth/set-new-password`, contradicting `ARCHITECTURE.md` §4/§13's own login/self-service
+pattern (frontend → Supabase directly, FastAPI never proxies a Supabase Auth call). Fixed: the
+frontend calls `supabase.auth.updateUser({ current_password, password })` directly, exactly like
+login and the ongoing "change my password" feature — `current_password` required per ASVS 6.2.3
+(L1), `new_password` validated against the minimum-length setting (ASVS 6.2.1) and, where the
+project's Supabase plan supports it, the breached-password check (ASVS 6.2.4, `ARCHITECTURE.md`
+§4's Phase 1 gap). FastAPI's only role is enforcement, not the call itself: `CurrentProfile`
+rejects (403, problem+json) every *other* request while `profiles.must_change_password` is still
+`true`, so the frontend's forced Set New Password screen (`FRONTEND_ARCHITECTURE.md` §1) is backed
+by a real server-side gate rather than a client-side redirect alone. Supabase itself clears
+`must_change_password` — no, it doesn't know that column exists; the frontend must call the
+regular self-service password-change flow and then a trivial FastAPI call is still needed to flip
+`profiles.must_change_password` to `false` server-side (an Employee could not be trusted to clear
+this themselves via direct DB access, but there is none — RLS + `fastapi_app`'s grants mean the
+only path to flip it is through FastAPI). **Open, flagged rather than guessed:** whether that flip
+is its own tiny endpoint (`POST /auth/confirm-password-changed`, no body) or folded into a broader
+"current user" resource — a Phase 4 (frontend) decision, not resolved here.
+
+**Not listed above — the first Owner of a new firm.** `POST /employees` requires an Owner's JWT to call, which doesn't exist yet for a brand-new firm. That case is deliberately outside this document's endpoint list — it's `ARCHITECTURE.md`'s Firm + Owner Provisioning section (a repo script, not an API call), using the same `admin.createUser()` + trigger primitive `POST /employees` uses here, just run before any `profiles` row exists at all.
+
+### Job Types (`job_types`, PRD §1.1/§2.2)
+| Method & path | Role | Idempotency pattern | Notes |
+|---|---|---|---|
+| `POST /job-types` | Owner only | Secondary key (`name`, matches `UNIQUE (firm_id, name)` from `DATA_MODEL.md`) | |
+| `GET /job-types` | Any authenticated | — (read) | Both roles need this for task creation/filtering |
+| `PATCH /job-types/{id}` | Owner only | Conditional key | Soft-delete via `is_active`, not hard delete — existing tasks may still reference it |
+
+### Tasks (`tasks`, PRD §2.2-2.8, §3, §4.1-4.2)
+| Method & path | Role | Idempotency pattern | Notes |
+|---|---|---|---|
+| `POST /tasks` | Owner only | `Idempotency-Key` header (Rule 230 — the strongest of the three patterns, since accidental duplicate task creation is the clearest harm here) | Status starts `created`, moves to `assigned` if `assigned_to` is set at creation |
+| `GET /tasks` | Any authenticated | — (read) | **Role-scoped, not just filtered** — Owner sees firm-wide (PRD §2.4), Employee sees only their own pending tasks (PRD §3.2), enforced in `crud.py` via `CurrentProfile`, not left to a query parameter the client could alter. **Query filters, Owner only** (an Employee's results are already scoped to themselves, so these would be redundant there): `?status=`, `?assigned_to=` (the employee-wise work view PRD §2.4 asks for — same workload-visibility requirement as the assignment picker, applied to the task list instead), `?job_type_id=`, `?task_type=billing` (the consolidated billing view, §5) — all against the existing `(firm_id, assigned_to, status)` / `(firm_id, task_type, status)` indexes `DATA_MODEL.md` §2 already has, no new index needed |
+| `GET /tasks/{id}` | Any authenticated | — (read) | Employee access restricted to their own assigned tasks — an employee requesting another's task by ID must `404`, not `403` (avoids confirming the ID exists to someone who shouldn't see it — ASVS access-control principle applied) |
+| `PATCH /tasks/{id}/deadline` | Owner only | Conditional key | PRD §2.2 "change task deadlines after assignment" |
+| `POST /tasks/{id}/submit` | Assigned employee only | `Idempotency-Key` | **Workflow-state-checked**: only valid from `assigned`/`in_progress` → `submitted`. Rejects (409) if already `submitted`/`completed`/`billed` |
+| `POST /tasks/{id}/review` | Owner only | `Idempotency-Key` | Body: `outcome` (`approved`/`reassigned`/`billing`) + outcome-specific fields. **Workflow-state-checked**: only valid from `submitted`. Writes a `task_reviews` row (`DATA_MODEL.md` §2); on `billing`, also creates the linked billing task **in the same transaction — both writes succeed or neither does, per `postgres-official`'s `chapters/transactions.md` (checked directly; this was general knowledge, unflagged, until that chapter was added)** |
+| `POST /tasks/{id}/mark-billed` | Assigned employee only | `Idempotency-Key` | **Workflow-state-checked**: only valid when `task_type='billing'` and status is `assigned`/`in_progress` — the exact out-of-order-execution case the cheat sheet warns about, named explicitly in §1 |
+| `POST /tasks/{id}/issues` | Assigned employee only | Secondary key or `Idempotency-Key` | Creates an `issues` row (PRD §2.7/§3.3) |
+
+### Issues (resolution side, PRD §2.6/§4.3)
+| Method & path | Role | Idempotency pattern | Notes |
+|---|---|---|---|
+| `POST /issues/{id}/resolve` | Owner only | `Idempotency-Key` | Body: `resolution_type` (`clarified`/`deadline_adjusted`/`reassigned`) + `resolution_notes`. `deadline_adjusted` also requires `new_deadline`, applied to `tasks.deadline` in the same transaction — **added 2026-09-02, found missing while grounding the Issue Resolution mockup**: the type existed but no field ever carried the actual new date. `reassigned` also accepts an optional `assigned_to` (§5) and updates the linked task's `last_reassignment_*` fields through the same path as a review-triggered reassignment (`DATA_MODEL.md` §2's stated convergence) — one code path, not two |
+
+### Notifications (PRD §2.5/§3.4/§4.4, polling per `ARCHITECTURE.md` §8)
+| Method & path | Role | Idempotency pattern | Notes |
+|---|---|---|---|
+| `GET /notifications` | Any authenticated | — (read) | Always filtered to `recipient_id = current profile` — never a parameter the client sets, since `notifications.recipient_id` existing at all is the schema-level "never broadcast" guarantee (`DATA_MODEL.md` §2) and an API that let a client pass a different `recipient_id` would undo it |
+| `PATCH /notifications/{id}/read` | Recipient only | Conditional key (naturally idempotent — marking read twice has the same effect) | |
+
+**Not an endpoint — login isn't part of this API at all.** Per `ARCHITECTURE.md` §4, the frontend talks to Supabase Auth directly. Nothing above duplicates that.
+
+## 4. Cross-Cutting Security Requirements (ASVS 5 + cheat sheets, applied per §1's citations)
+
+- Every mutating endpoint validates workflow state server-side (§1) — this is the single most load-bearing security requirement in this whole document, given how status-machine-driven the data model is.
+- `Input_Validation_Cheat_Sheet.md` and ASVS's validation chapter apply to every request body — Pydantic models (via FastAPI, `fastapi/project-structure.md`'s pattern) provide this at the framework level; nothing here reinvents it. **Made concrete 2026-09-03** — "Pydantic handles it" is true for *type* checking, but the cheat sheet's actual requirement goes further: *"minimum and maximum value range check for numerical parameters and dates, minimum and maximum length check for strings"* — these need to be deliberate `Field(...)` constraints, not something type validation alone provides:
+  - `tasks.billing_amount` — `gt=0` (a zero or negative billing amount is nonsensical, not just untyped)
+  - `tasks.title`/`description`, `issues.description`/`resolution_notes`, `task_reviews.notes` — an explicit `max_length` (the cheat sheet's own example uses `{1,25}`-style bounds; this project's fields are longer free text, but "unbounded" is still the wrong default — pick a real ceiling, e.g. a few thousand characters, not "whatever Postgres `text` allows")
+  - `tasks.deadline` / `POST /issues/{id}/resolve`'s `new_deadline` — semantic validation (cheat sheet: *"start date is before end date"* generalizes here to *"deadline is not in the past at creation/update time"*), not just a valid timestamp
+- `Authorization_Cheat_Sheet.md`: object-level authorization checked on every `{id}`-scoped endpoint, not just role-level — an Employee having a valid JWT proves *who* they are, not that they're allowed to touch *this specific* task (the "tenant authentication is not tenant isolation" principle from `ARCHITECTURE.md` §5, applied one layer down to object-level access within a firm).
+- **Added 2026-09-03 — `POST /tasks` / `POST /tasks/{id}/review`'s `assigned_to` needs a role check, not just a same-firm check.** The composite-FK fix in `DATA_MODEL.md` now guarantees `assigned_to` points at a profile in the *same firm* — but nothing yet stops it pointing at the *Owner's own* profile id, which isn't a data-model error (the FK is satisfied) but is a business-logic error PRD never intends (Owners assign, they aren't assignees). `crud.py` must additionally check the target profile's `role = 'employee'` — ASVS 2.2.3, "combinations of related data items checked for reasonableness."
+- **Added 2026-09-03 — an authorization-matrix test suite is required before launch, not left implicit.** Checked `owasp-cheatsheets/Authorization_Testing_Automation_Cheat_Sheet.md`: its recommended approach is exactly the table already in §3 above — endpoint × role × own-object-vs-another's-object, tested systematically rather than case-by-case as bugs get reported. Same discipline `ARCHITECTURE.md` §5 already requires for tenant isolation (the cross-tenant read/update/delete test), applied one layer down to object-level access within a single firm — e.g., Employee A calling every `{id}`-scoped endpoint against Employee B's task/issue IDs, asserting `404` throughout, not just spot-checked on `GET /tasks/{id}`.
+
+## 5. Open Questions Carried Forward
+
+Not silently resolved, same discipline as every prior document:
+
+- **Consolidated billing view** (`ARCHITECTURE.md` §13) — resolves here as a query parameter on `GET /tasks` (`?task_type=billing`), not a separate endpoint — no new resource needed, matching `DATA_MODEL.md` §6's earlier note that this needs no schema change.
+- **Reassignment target** — `POST /tasks/{id}/review` and `POST /issues/{id}/resolve` both accept an optional `assigned_to` in the body when the outcome is `reassigned`; omitting it keeps the current assignee. Satisfies "owner's choice" (PRD default) without a separate endpoint.
+- ~~**Employee performance metric**~~ — **Decided: out of scope for Phase 1** (`ARCHITECTURE.md` §13). No endpoint depends on it.
+- ~~**Forgot-password flow**~~ — **Decided: no self-service flow** (`ARCHITECTURE.md` §4/§13). Resolves as one new action instead: `POST /employees/{id}/reset-password` — Owner only, `Idempotency-Key`, no body. Same mechanism as `POST /employees` (generates a password server-side via `admin.updateUserById`, sets `must_change_password=true`, returns the generated password once for the Owner to relay) — reuses the account, doesn't recreate it.
+
+---
+
+Reference patterns pulled from this project's own skill library, searched before writing, not from memory: `rest-api-guidelines` (error format, pagination, idempotency), `owasp-asvs-5` v4-api-web-service, `owasp-cheatsheets` (`REST_Security_Cheat_Sheet.md`, `Input_Validation_Cheat_Sheet.md`, `Authorization_Cheat_Sheet.md`), `fastapi` project-structure guide (DI pattern, thin routes).

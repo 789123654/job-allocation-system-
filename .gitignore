@@ -1,0 +1,18 @@
+# Secrets — never committed (DEPLOYMENT.md secrets-handling requirement).
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Rust (src-tauri/, once scaffolded)
+target/
+
+# OS
+.DS_Store
+Thumbs.db
