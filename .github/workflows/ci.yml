@@ -51,6 +51,20 @@ jobs:
       - run: uv sync --frozen --dev
       - run: uv run ruff check .
       - run: uv run pyright
+      - name: Stub Supabase's auth.users (CI-only — the real project already has this)
+        run: |
+          uv run python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/postgres', autocommit=True)
+          conn.execute('CREATE SCHEMA IF NOT EXISTS auth')
+          conn.execute('''
+              CREATE TABLE IF NOT EXISTS auth.users (
+                  id uuid PRIMARY KEY,
+                  email text,
+                  raw_user_meta_data jsonb
+              )
+          ''')
+          "
       - run: uv run alembic upgrade head
       - name: Set fastapi_app's CI-only password
         run: |
