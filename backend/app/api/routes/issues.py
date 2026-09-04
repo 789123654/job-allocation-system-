@@ -1,13 +1,13 @@
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from app import crud
-from app.api.deps import RequireOwnerDep, SessionDep
+from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.api.routes.tasks import IssueOut
 from app.core.idempotency import with_idempotency
 
@@ -49,7 +49,7 @@ def resolve_issue(
     body: IssueResolveRequest,
     actor: RequireOwnerDep,
     session: SessionDep,
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    idempotency_key: IdempotencyKeyHeader,
 ) -> JSONResponse:
     # RLS already scopes this select to the caller's own firm (app.current_tenant); role is
     # Owner-only via RequireOwnerDep, so no separate "visible to" check is needed the way tasks'

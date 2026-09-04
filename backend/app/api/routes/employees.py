@@ -2,14 +2,14 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from supabase_auth.errors import AuthApiError
 
 from app import crud
-from app.api.deps import RequireOwnerDep, SessionDep
+from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.models import IdempotencyKey
 
 router = APIRouter(prefix="/employees", tags=["employees"])
@@ -107,7 +107,7 @@ def reset_password(
     employee_id: UUID,
     actor: RequireOwnerDep,
     session: SessionDep,
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    idempotency_key: IdempotencyKeyHeader,
 ) -> GeneratedPassword:
     """Deliberately NOT `with_idempotency` (core/idempotency.py) — caught 2026-09-04 re-auditing
     this exact endpoint: that helper caches and replays the exact response body, which would

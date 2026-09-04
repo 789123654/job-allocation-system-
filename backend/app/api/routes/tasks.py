@@ -2,16 +2,34 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from app import crud
-from app.api.deps import ActiveProfileDep, RequireOwnerDep, SessionDep
+from app.api.deps import ActiveProfileDep, IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.core.idempotency import with_idempotency
-from app.models import Issue, Task
+from app.models import Issue, Profile, Task
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+_TASK_NOT_FOUND = "Task not found"
+
+
+def _get_task_or_404(session: SessionDep, actor: Profile, task_id: UUID) -> Task:
+    task = crud.get_task(session, actor, task_id)
+    if task is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, _TASK_NOT_FOUND)
+    return task
+
+
+def _require_assignee(session: SessionDep, actor: Profile, task: Task, action: str) -> None:
+    # Visible-to (get_task's own rule) is broader than authorized-to-act-on — an Owner can see
+    # every task in the firm but isn't the "assigned employee" these actions are scoped to
+    # (API_SPEC.md). Real 403 here, not 404: the task's existence is already legitimately known.
+    if actor.role != "employee" or task.assigned_to != actor.id:
+        crud.record_access_denial(session, actor, "task", task.id, "not_assignee")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Only the assigned employee can {action}")
 
 
 class TaskCreate(BaseModel):
@@ -170,7 +188,7 @@ def create_task(
     body: TaskCreate,
     actor: RequireOwnerDep,
     session: SessionDep,
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    idempotency_key: IdempotencyKeyHeader,
 ) -> JSONResponse:
     def _handler() -> tuple[int, dict[str, Any]]:
         task = crud.create_task(
@@ -210,9 +228,7 @@ def list_tasks(
 
 @router.get("/{task_id}")
 def get_task(task_id: UUID, actor: ActiveProfileDep, session: SessionDep) -> TaskOut:
-    task = crud.get_task(session, actor, task_id)
-    if task is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
+    task = _get_task_or_404(session, actor, task_id)
     return TaskOut.from_task(task)
 
 
@@ -220,9 +236,7 @@ def get_task(task_id: UUID, actor: ActiveProfileDep, session: SessionDep) -> Tas
 def update_task_deadline(
     task_id: UUID, body: TaskDeadlineUpdate, actor: RequireOwnerDep, session: SessionDep
 ) -> TaskOut:
-    task = crud.get_task(session, actor, task_id)
-    if task is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
+    task = _get_task_or_404(session, actor, task_id)
     task = crud.update_task_deadline(session, task, body.deadline)
     return TaskOut.from_task(task)
 
@@ -232,19 +246,10 @@ def submit_task(
     task_id: UUID,
     actor: ActiveProfileDep,
     session: SessionDep,
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    idempotency_key: IdempotencyKeyHeader,
 ) -> JSONResponse:
-    task = crud.get_task(session, actor, task_id)
-    if task is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
-    # Visible-to (get_task's own rule) is broader than authorized-to-act-on — an Owner can see
-    # every task in the firm but isn't the "assigned employee" this action is scoped to
-    # (API_SPEC.md). Real 403 here, not 404: the task's existence is already legitimately known.
-    if actor.role != "employee" or task.assigned_to != actor.id:
-        crud.record_access_denial(session, actor, "task", task.id, "not_assignee")
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Only the assigned employee can submit this task"
-        )
+    task = _get_task_or_404(session, actor, task_id)
+    _require_assignee(session, actor, task, "submit this task")
 
     def _handler() -> tuple[int, dict[str, Any]]:
         try:
@@ -266,16 +271,10 @@ def mark_task_billed(
     task_id: UUID,
     actor: ActiveProfileDep,
     session: SessionDep,
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    idempotency_key: IdempotencyKeyHeader,
 ) -> JSONResponse:
-    task = crud.get_task(session, actor, task_id)
-    if task is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
-    if actor.role != "employee" or task.assigned_to != actor.id:
-        crud.record_access_denial(session, actor, "task", task.id, "not_assignee")
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Only the assigned employee can mark this task billed"
-        )
+    task = _get_task_or_404(session, actor, task_id)
+    _require_assignee(session, actor, task, "mark this task billed")
 
     def _handler() -> tuple[int, dict[str, Any]]:
         try:
@@ -299,11 +298,9 @@ def review_task(
     body: TaskReviewCreate,
     actor: RequireOwnerDep,
     session: SessionDep,
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    idempotency_key: IdempotencyKeyHeader,
 ) -> JSONResponse:
-    task = crud.get_task(session, actor, task_id)
-    if task is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
+    task = _get_task_or_404(session, actor, task_id)
 
     def _handler() -> tuple[int, dict[str, Any]]:
         try:
@@ -344,19 +341,10 @@ def create_task_issue(
     body: IssueCreate,
     actor: ActiveProfileDep,
     session: SessionDep,
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    idempotency_key: IdempotencyKeyHeader,
 ) -> JSONResponse:
-    task = crud.get_task(session, actor, task_id)
-    if task is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
-    # get_task's "visible to" rule (owner sees all) is broader than "may raise an issue on" — an
-    # Owner can see every task but only the assigned employee actually does the work an issue
-    # would be raised about (PRD §2.7). Real 403, not 404: the task's existence is already known.
-    if actor.role != "employee" or task.assigned_to != actor.id:
-        crud.record_access_denial(session, actor, "task", task.id, "not_assignee")
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Only the assigned employee can raise an issue on this task"
-        )
+    task = _get_task_or_404(session, actor, task_id)
+    _require_assignee(session, actor, task, "raise an issue on this task")
 
     def _handler() -> tuple[int, dict[str, Any]]:
         try:

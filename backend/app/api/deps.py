@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import Session, select
 from sqlmodel import text as sql_text
@@ -12,6 +12,9 @@ from app.core.security import InvalidTokenError, verify_access_token
 from app.models import Profile
 
 SessionDep = Annotated[Session, Depends(get_session)]
+# Shared across every Idempotency-Key route (tasks/issues/employees) — was the literal header
+# alias repeated 7 times across three files (SonarQube: define a constant instead of duplicating).
+IdempotencyKeyHeader = Annotated[str, Header(alias="Idempotency-Key")]
 _bearer_scheme = HTTPBearer()
 
 
