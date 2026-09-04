@@ -12,12 +12,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.core.supabase_admin import admin_auth
-from app.models import AuditLog, JobType, Profile
+from app.models import AuditLog, JobType, Profile, Task
 
 
 class DuplicateJobTypeNameError(Exception):
     """Raised when UNIQUE (firm_id, name) is violated — the 'Secondary key' idempotency pattern
     API_SPEC.md names for POST /job-types (same shape as Employees' email-uniqueness dedup).
+    """
+
+
+class InvalidTaskStateError(Exception):
+    """Raised when a workflow-state-checked task transition isn't valid from the task's current
+    status (API_SPEC.md: submit only from assigned/in_progress, mark-billed only for billing tasks
+    that are assigned/in_progress).
     """
 
 
@@ -27,9 +34,7 @@ def _generate_password() -> str:
     return secrets.token_urlsafe(16)
 
 
-def _write_audit_log(
-    session: Session, actor: Profile, action: str, target_id: UUID | None
-) -> None:
+def _write_audit_log(session: Session, actor: Profile, action: str, target_id: UUID | None) -> None:
     session.add(
         AuditLog(
             firm_id=actor.firm_id,
@@ -145,3 +150,109 @@ def set_job_type_active(session: Session, job_type: JobType, is_active: bool) ->
     session.commit()
     session.refresh(job_type)
     return job_type
+
+
+def create_task(
+    session: Session,
+    actor: Profile,
+    title: str,
+    description: str | None,
+    job_type_id: UUID | None,
+    assigned_to: UUID | None,
+    deadline: datetime | None,
+) -> Task:
+    """No `session.commit()` here — the caller wraps this in `with_idempotency`, which commits
+    once for both this row and the idempotency-cache row (one atomic transaction, rest-api-
+    guidelines Rule 230's "hard transaction semantics" requirement).
+    """
+    now = datetime.now(UTC)
+    task = Task(
+        firm_id=actor.firm_id,
+        job_type_id=job_type_id,
+        title=title,
+        description=description,
+        assigned_to=assigned_to,
+        deadline=deadline,
+        # PRD §4.1: Created and Assigned are distinct lifecycle steps — only skip straight to
+        # 'assigned' if the Owner assigned it at creation time.
+        status="assigned" if assigned_to else "created",
+        created_by=actor.id,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(task)
+    return task
+
+
+def list_tasks(
+    session: Session,
+    actor: Profile,
+    offset: int,
+    limit: int,
+    status_filter: str | None,
+    assigned_to_filter: UUID | None,
+    job_type_id_filter: UUID | None,
+    task_type_filter: str | None,
+) -> list[Task]:
+    """Role-scoped, not just filtered (API_SPEC.md): an Employee's results are always their own
+    regardless of what they pass — the query filters below only apply for an Owner, since an
+    Employee's results are already scoped to themselves (the same filters would be redundant).
+    """
+    stmt = select(Task)
+    if actor.role == "owner":
+        if status_filter is not None:
+            stmt = stmt.where(Task.status == status_filter)
+        if assigned_to_filter is not None:
+            stmt = stmt.where(Task.assigned_to == assigned_to_filter)
+        if job_type_id_filter is not None:
+            stmt = stmt.where(Task.job_type_id == job_type_id_filter)
+        if task_type_filter is not None:
+            stmt = stmt.where(Task.task_type == task_type_filter)
+    else:
+        stmt = stmt.where(Task.assigned_to == actor.id)
+    stmt = stmt.offset(offset).limit(limit)
+    return list(session.exec(stmt).all())
+
+
+def get_task(session: Session, actor: Profile, task_id: UUID) -> Task | None:
+    """Employee access restricted to their own assigned tasks — returning None (not the row) for
+    someone else's task is what makes the route's existing 404-not-403 pattern work unchanged
+    (API_SPEC.md: an Employee requesting another's task by ID must 404, not 403).
+    """
+    task = session.exec(select(Task).where(Task.id == task_id)).first()
+    if task is None:
+        return None
+    if actor.role != "owner" and task.assigned_to != actor.id:
+        return None
+    return task
+
+
+def update_task_deadline(session: Session, task: Task, deadline: datetime) -> Task:
+    task.deadline = deadline
+    task.updated_at = datetime.now(UTC)
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+
+
+def submit_task(session: Session, task: Task) -> Task:
+    """No `session.commit()` — wrapped in `with_idempotency` by the route, same reasoning as
+    create_task.
+    """
+    if task.status not in ("assigned", "in_progress"):
+        raise InvalidTaskStateError
+    task.status = "submitted"
+    task.updated_at = datetime.now(UTC)
+    session.add(task)
+    return task
+
+
+def mark_task_billed(session: Session, task: Task) -> Task:
+    """No `session.commit()` — wrapped in `with_idempotency` by the route."""
+    if task.task_type != "billing" or task.status not in ("assigned", "in_progress"):
+        raise InvalidTaskStateError
+    task.status = "billed"
+    task.updated_at = datetime.now(UTC)
+    session.add(task)
+    return task

@@ -3,8 +3,10 @@
 """
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 
@@ -45,6 +47,45 @@ class JobType(SQLModel, table=True):
     name: str
     is_active: bool = True
     created_by: UUID
+    created_at: datetime
+
+
+class Task(SQLModel, table=True):
+    __tablename__ = "tasks"  # type: ignore[assignment]  # known SQLModel/pyright interaction
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    firm_id: UUID = Field(primary_key=True, foreign_key="firms.id")
+    job_type_id: UUID | None = None
+    task_type: str = "standard"
+    parent_task_id: UUID | None = None
+    title: str
+    description: str | None = None
+    assigned_to: UUID | None = None
+    deadline: datetime | None = None
+    status: str = "created"
+    created_by: UUID
+    created_at: datetime
+    updated_at: datetime
+    last_reassignment_notes: str | None = None
+    last_reassignment_remaining_work: str | None = None
+    last_reassignment_source: str | None = None
+    last_reassignment_at: datetime | None = None
+    billing_amount: float | None = None
+    billing_recipient: str | None = None
+
+
+class IdempotencyKey(SQLModel, table=True):
+    __tablename__ = "idempotency_keys"  # type: ignore[assignment]  # known SQLModel/pyright interaction
+
+    # rest-api-guidelines Rule 230 — composite PK doubles as the natural uniqueness constraint
+    # (same client, same key, same endpoint can only ever map to one cached response).
+    firm_id: UUID = Field(primary_key=True, foreign_key="firms.id")
+    actor_id: UUID = Field(primary_key=True)
+    idempotency_key: str = Field(primary_key=True)
+    endpoint: str = Field(primary_key=True)
+    request_hash: str
+    response_status: int
+    response_body: dict[str, Any] = Field(sa_column=Column(JSON))
     created_at: datetime
 
 
