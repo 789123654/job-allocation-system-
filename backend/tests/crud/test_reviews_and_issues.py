@@ -12,7 +12,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app import crud
-from app.models import Issue, Profile, Task, TaskReview
+from app.models import Issue, Notification, Profile, Task, TaskReview
 
 _FIRM_ID = uuid4()
 
@@ -20,7 +20,14 @@ _FIRM_ID = uuid4()
 @pytest.fixture
 def session() -> Generator[Session]:
     engine = create_engine("sqlite://")
-    tables = [Task.__table__, TaskReview.__table__, Issue.__table__]  # pyright: ignore[reportAttributeAccessIssue]
+    # Profile/Notification needed too — create_task_review/create_issue now notify owners.
+    tables = [
+        Task.__table__,  # pyright: ignore[reportAttributeAccessIssue]
+        TaskReview.__table__,  # pyright: ignore[reportAttributeAccessIssue]
+        Issue.__table__,  # pyright: ignore[reportAttributeAccessIssue]
+        Profile.__table__,  # pyright: ignore[reportAttributeAccessIssue]
+        Notification.__table__,  # pyright: ignore[reportAttributeAccessIssue]
+    ]
     SQLModel.metadata.create_all(engine, tables=tables)  # pyright: ignore[reportUnknownArgumentType]
     with Session(engine) as s:
         yield s

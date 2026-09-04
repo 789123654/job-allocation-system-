@@ -14,7 +14,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
 from app import crud
-from app.models import Task
+from app.models import Notification, Profile, Task
 
 _FIRM_ID = uuid4()
 
@@ -22,8 +22,9 @@ _FIRM_ID = uuid4()
 @pytest.fixture
 def session() -> Generator[Session]:
     engine = create_engine("sqlite://")
-    table = Task.__table__  # pyright: ignore[reportAttributeAccessIssue]
-    SQLModel.metadata.create_all(engine, tables=[table])  # pyright: ignore[reportUnknownArgumentType]
+    # Profile/Notification needed too — submit_task now notifies owners (crud._notify_owners).
+    tables = [Task.__table__, Profile.__table__, Notification.__table__]  # pyright: ignore[reportAttributeAccessIssue]
+    SQLModel.metadata.create_all(engine, tables=tables)  # pyright: ignore[reportUnknownArgumentType]
     with Session(engine) as s:
         yield s
 

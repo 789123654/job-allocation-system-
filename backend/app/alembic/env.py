@@ -13,6 +13,7 @@ from app.models import (
     IdempotencyKey,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     Issue,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     JobType,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    Notification,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     Profile,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     Task,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     TaskReview,  # noqa: F401  # pyright: ignore[reportUnusedImport]

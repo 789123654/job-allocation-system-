@@ -5,14 +5,14 @@ division of responsibility (RLS = isolation, crud/routes = role-based authorizat
 """
 
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.core.supabase_admin import admin_auth
-from app.models import AuditLog, Issue, JobType, Profile, Task, TaskReview
+from app.models import AuditLog, Issue, JobType, Notification, Profile, Task, TaskReview
 
 
 class DuplicateJobTypeNameError(Exception):
@@ -130,6 +130,45 @@ def reset_employee_password(session: Session, actor: Profile, employee: Profile)
     return password
 
 
+def _notify(
+    session: Session,
+    firm_id: UUID,
+    recipient_id: UUID,
+    notif_type: str,
+    task_id: UUID | None,
+    issue_id: UUID | None,
+) -> None:
+    """DATA_MODEL.md §2: recipient_id is always exactly one profile (never broadcast). No
+    `session.commit()` here — every call site adds this alongside its own real write, in the same
+    transaction (ASVS 2.3.3), never as a standalone commit.
+    """
+    session.add(
+        Notification(
+            firm_id=firm_id,
+            recipient_id=recipient_id,
+            type=notif_type,
+            task_id=task_id,
+            issue_id=issue_id,
+            is_read=False,
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
+def _notify_owners(
+    session: Session,
+    firm_id: UUID,
+    notif_type: str,
+    task_id: UUID | None,
+    issue_id: UUID | None,
+) -> None:
+    owners = session.exec(
+        select(Profile).where(Profile.firm_id == firm_id, Profile.role == "owner")
+    ).all()
+    for owner in owners:
+        _notify(session, firm_id, owner.id, notif_type, task_id, issue_id)
+
+
 def create_job_type(session: Session, actor: Profile, name: str) -> JobType:
     # Not audit-logged — job_types already carries created_by/created_at, and ARCHITECTURE.md's
     # audit_log scope note is explicit that anything with its own actor/timestamp columns (like
@@ -193,6 +232,11 @@ def create_task(
         updated_at=now,
     )
     session.add(task)
+    if assigned_to is not None:
+        # PRD §3.4 / DATA_MODEL.md §5 `task_assigned` — only fires when assignment happens at
+        # creation time; a task created unassigned and assigned later has no PATCH endpoint yet
+        # (API_SPEC.md doesn't define one), so that path doesn't exist to notify from.
+        _notify(session, actor.firm_id, assigned_to, "task_assigned", task.id, None)
     return task
 
 
@@ -271,6 +315,7 @@ def submit_task(session: Session, task: Task) -> Task:
     locked.status = "submitted"
     locked.updated_at = datetime.now(UTC)
     session.add(locked)
+    _notify_owners(session, locked.firm_id, "task_submitted", locked.id, None)
     return locked
 
 
@@ -286,6 +331,7 @@ def mark_task_billed(session: Session, task: Task) -> Task:
 
 
 def _reassign_task(
+    session: Session,
     task: Task,
     source: str,
     notes: str | None,
@@ -306,6 +352,10 @@ def _reassign_task(
     task.updated_at = now
     if assigned_to is not None:
         task.assigned_to = assigned_to
+    # Notify whoever the task actually lands on now — the same or a different employee, since
+    # PRD §3.3 requires the assignee to see reassigned work regardless of which trigger path.
+    if task.assigned_to is not None:
+        _notify(session, task.firm_id, task.assigned_to, "task_reassigned", task.id, None)
 
 
 def create_task_review(
@@ -347,7 +397,7 @@ def create_task_review(
         locked.updated_at = now
     elif outcome == "reassigned":
         review.remaining_work_description = remaining_work_description
-        _reassign_task(locked, "review", notes, remaining_work_description, assigned_to)
+        _reassign_task(session, locked, "review", notes, remaining_work_description, assigned_to)
     else:  # billing
         locked.status = "completed"
         locked.updated_at = now
@@ -393,6 +443,7 @@ def create_issue(session: Session, actor: Profile, task: Task, description: str)
         created_at=datetime.now(UTC),
     )
     session.add(issue)
+    _notify_owners(session, actor.firm_id, "issue_raised", task.id, issue.id)
     return issue
 
 
@@ -443,8 +494,158 @@ def resolve_issue(
             task.updated_at = now
         else:  # reassigned — DATA_MODEL.md's convergence: same path as a review reassignment
             locked.remaining_work_description = remaining_work_description
-            _reassign_task(task, "issue", resolution_notes, remaining_work_description, assigned_to)
+            _reassign_task(
+                session, task, "issue", resolution_notes, remaining_work_description, assigned_to
+            )
         session.add(task)
 
     session.add(locked)
     return locked
+
+
+_ACTIVE_TASK_STATUSES = ("created", "assigned", "in_progress", "submitted")
+_APPROACHING_WINDOW = timedelta(days=3)  # PRD §3.4 names no number for "approaching" — judgment
+_URGENT_WINDOW = timedelta(days=1)  # PRD §2.5's own explicit "1 day from deadline"
+
+
+def _create_notification_if_missing(
+    session: Session,
+    firm_id: UUID,
+    recipient_id: UUID,
+    notif_type: str,
+    task_id: UUID,
+) -> None:
+    """Dedup key is (recipient, type, task_id) — each task fires each type at most once per
+    recipient, ever. ponytail: if a task's deadline changes after a type already fired for it, no
+    second notification fires until the existing row is cleared — acceptable at pilot scale
+    (~10 users, DATA_MODEL.md's own target), revisit with a deadline-aware key if this becomes a
+    real complaint.
+    """
+    existing = session.exec(
+        select(Notification).where(
+            Notification.firm_id == firm_id,
+            Notification.recipient_id == recipient_id,
+            Notification.type == notif_type,
+            Notification.task_id == task_id,
+        )
+    ).first()
+    if existing is None:
+        _notify(session, firm_id, recipient_id, notif_type, task_id, None)
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    """Postgres' `timestamptz` round-trips as tz-aware via psycopg, but don't trust that blindly —
+    SQLite (this project's own test backend) drops tzinfo on round-trip, and a naive-vs-aware
+    comparison raises a raw `TypeError`, not a clean 500. Caught by tests/crud/test_notifications.py
+    actually running this comparison against a real fetched row, not a mock.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _ensure_owner_deadline_notifications(session: Session, actor: Profile, now: datetime) -> None:
+    tasks = session.exec(
+        select(Task).where(
+            Task.firm_id == actor.firm_id,
+            col(Task.deadline).is_not(None),
+            col(Task.status).in_(_ACTIVE_TASK_STATUSES),
+        )
+    ).all()
+    owners = session.exec(
+        select(Profile).where(Profile.firm_id == actor.firm_id, Profile.role == "owner")
+    ).all()
+    for task in tasks:
+        if task.deadline is None:  # the query already filters this, narrows the type here
+            continue
+        deadline = _as_aware_utc(task.deadline)
+        for owner in owners:
+            if deadline < now:
+                _create_notification_if_missing(
+                    session, actor.firm_id, owner.id, "task_overdue", task.id
+                )
+            elif deadline <= now + _URGENT_WINDOW:
+                _create_notification_if_missing(
+                    session, actor.firm_id, owner.id, "task_deadline_1_day", task.id
+                )
+
+
+def _ensure_employee_deadline_notifications(
+    session: Session, actor: Profile, now: datetime
+) -> None:
+    tasks = session.exec(
+        select(Task).where(
+            Task.firm_id == actor.firm_id,
+            Task.assigned_to == actor.id,
+            col(Task.deadline).is_not(None),
+            col(Task.status).in_(_ACTIVE_TASK_STATUSES),
+        )
+    ).all()
+    for task in tasks:
+        if task.deadline is None:  # the query already filters this, narrows the type here
+            continue
+        deadline = _as_aware_utc(task.deadline)
+        if deadline < now:
+            _create_notification_if_missing(
+                session, actor.firm_id, actor.id, "task_overdue_own", task.id
+            )
+        elif deadline <= now + _APPROACHING_WINDOW:
+            _create_notification_if_missing(
+                session, actor.firm_id, actor.id, "task_deadline_approaching", task.id
+            )
+
+
+def _ensure_deadline_notifications(session: Session, actor: Profile) -> None:
+    """The 4 time-based notification types (`task_overdue`, `task_deadline_1_day`,
+    `task_deadline_approaching`, `task_overdue_own`) have no scheduler to generate them —
+    ARCHITECTURE.md explicitly rules out a task queue for Phase 1, and nothing in any doc names a
+    cron/scheduled job. Decided with the user (2026-09-04): generate them lazily here, since the
+    frontend already polls `GET /notifications` every 30-60s (ARCHITECTURE.md §8) — no new infra.
+
+    Deliberate deviation from rest-api-guidelines Rule 149 ("GET must be safe — no intended side
+    effects on server state"), checked directly, not overlooked: the alternatives (an external
+    cron hitting a protected endpoint, an in-process APScheduler thread) both add real deployment
+    complexity for a 10-user pilot: for a project this size, wrong to build ahead of an actual need
+    per the same "no task queue this phase" reasoning ARCHITECTURE.md already applied elsewhere.
+    The side effect is capped by the dedup above, so a client that only ever reads still can't
+    trigger unbounded writes.
+    """
+    now = datetime.now(UTC)
+    if actor.role == "owner":
+        _ensure_owner_deadline_notifications(session, actor, now)
+    else:
+        _ensure_employee_deadline_notifications(session, actor, now)
+    session.commit()
+
+
+def list_notifications(
+    session: Session, actor: Profile, offset: int, limit: int, unread_only: bool
+) -> list[Notification]:
+    """Always filtered to the caller's own `recipient_id` (API_SPEC.md — never a client-supplied
+    parameter, since that's the schema-level 'never broadcast' guarantee)."""
+    _ensure_deadline_notifications(session, actor)
+    stmt = select(Notification).where(Notification.recipient_id == actor.id)
+    if unread_only:
+        stmt = stmt.where(col(Notification.is_read).is_(False))
+    stmt = stmt.order_by(col(Notification.created_at).desc()).offset(offset).limit(limit)
+    return list(session.exec(stmt).all())
+
+
+def get_notification(
+    session: Session, actor: Profile, notification_id: UUID
+) -> Notification | None:
+    """Returns None for another recipient's notification — same 404-not-403 pattern as
+    get_task/get_job_type (IDOR: don't confirm the id exists to someone it doesn't belong to).
+    """
+    notification = session.exec(
+        select(Notification).where(Notification.id == notification_id)
+    ).first()
+    if notification is None or notification.recipient_id != actor.id:
+        return None
+    return notification
+
+
+def mark_notification_read(session: Session, notification: Notification) -> Notification:
+    notification.is_read = True
+    session.add(notification)
+    session.commit()
+    session.refresh(notification)
+    return notification

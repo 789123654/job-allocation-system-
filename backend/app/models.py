@@ -120,6 +120,19 @@ class Issue(SQLModel, table=True):
     created_at: datetime
 
 
+class Notification(SQLModel, table=True):
+    __tablename__ = "notifications"  # type: ignore[assignment]  # known SQLModel/pyright interaction
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    firm_id: UUID = Field(primary_key=True, foreign_key="firms.id")
+    recipient_id: UUID
+    type: str
+    task_id: UUID | None = None
+    issue_id: UUID | None = None
+    is_read: bool = False
+    created_at: datetime
+
+
 class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"  # type: ignore[assignment]  # known SQLModel/pyright interaction
 
