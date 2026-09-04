@@ -13,6 +13,7 @@ from supabase_auth.errors import AuthApiError
 
 from app import crud
 from app.api import deps
+from app.api.routes import employees as employees_route
 from app.main import app
 from app.models import Profile
 
@@ -34,7 +35,12 @@ def _fake_owner() -> Profile:
 
 
 @pytest.fixture
-def client() -> Generator[TestClient]:
+def client(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient]:
+    monkeypatch.setattr(
+        employees_route,
+        "with_idempotency",
+        lambda session, actor, key, endpoint, body, handler: handler(),
+    )
     app.dependency_overrides[deps.require_owner] = _fake_owner
     app.dependency_overrides[deps.get_session] = lambda: MagicMock()
     yield TestClient(app)
@@ -98,10 +104,17 @@ def test_reset_password_returns_password_once(
     monkeypatch.setattr(crud, "get_employee", lambda *a, **kw: fake_employee)
     monkeypatch.setattr(crud, "reset_employee_password", lambda *a, **kw: "new-temp-pw")
 
-    response = client.post(f"/employees/{employee_id}/reset-password")
+    response = client.post(
+        f"/employees/{employee_id}/reset-password", headers={"Idempotency-Key": "key-1"}
+    )
 
     assert response.status_code == 200
     assert response.json()["generated_password"] == "new-temp-pw"
+
+
+def test_reset_password_requires_idempotency_key_header(client: TestClient) -> None:
+    response = client.post(f"/employees/{uuid4()}/reset-password")
+    assert response.status_code == 422  # FastAPI's own required-header validation
 
 
 def test_non_owner_is_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:

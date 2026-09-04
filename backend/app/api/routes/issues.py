@@ -19,6 +19,9 @@ class IssueResolveRequest(BaseModel):
     resolution_notes: str = Field(min_length=1, max_length=2000)
     new_deadline: datetime | None = None
     assigned_to: UUID | None = None
+    # PRD §3.3: an issue-triggered reassignment must surface remaining-work same as a review-
+    # triggered one — required below, checked directly against the PRD 2026-09-04, not assumed.
+    remaining_work_description: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _validate_resolution_fields(self) -> "IssueResolveRequest":
@@ -29,6 +32,14 @@ class IssueResolveRequest(BaseModel):
             raise ValueError("new_deadline is only valid for resolution_type=deadline_adjusted")
         if self.resolution_type != "reassigned" and self.assigned_to is not None:
             raise ValueError("assigned_to is only valid for resolution_type=reassigned")
+        if self.resolution_type == "reassigned" and not self.remaining_work_description:
+            raise ValueError(
+                "remaining_work_description is required for resolution_type=reassigned"
+            )
+        if self.resolution_type != "reassigned" and self.remaining_work_description:
+            raise ValueError(
+                "remaining_work_description is only valid for resolution_type=reassigned"
+            )
         return self
 
 
@@ -55,6 +66,7 @@ def resolve_issue(
                 issue,
                 body.resolution_type,
                 body.resolution_notes,
+                body.remaining_work_description,
                 body.new_deadline,
                 body.assigned_to,
             )

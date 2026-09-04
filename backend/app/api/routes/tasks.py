@@ -137,6 +137,7 @@ class IssueOut(BaseModel):
     status: str
     resolution_type: str | None
     resolution_notes: str | None
+    remaining_work_description: str | None
     resolved_by: UUID | None
     resolved_at: datetime | None
     created_at: datetime
@@ -151,6 +152,7 @@ class IssueOut(BaseModel):
             status=issue.status,
             resolution_type=issue.resolution_type,
             resolution_notes=issue.resolution_notes,
+            remaining_work_description=issue.remaining_work_description,
             resolved_by=issue.resolved_by,
             resolved_at=issue.resolved_at,
             created_at=issue.created_at,

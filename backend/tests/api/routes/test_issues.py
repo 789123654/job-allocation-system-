@@ -147,3 +147,27 @@ def test_clarified_with_new_deadline_is_422(owner_client: TestClient) -> None:
         headers={"Idempotency-Key": "key-1"},
     )
     assert response.status_code == 422
+
+
+def test_reassigned_without_remaining_work_description_is_422(owner_client: TestClient) -> None:
+    # PRD §3.3 — checked directly 2026-09-04: an issue-triggered reassignment must be able to
+    # surface remaining work, same as a review-triggered one, so this field can't be optional.
+    response = owner_client.post(
+        f"/issues/{uuid4()}/resolve",
+        json={"resolution_type": "reassigned", "resolution_notes": "reassigning"},
+        headers={"Idempotency-Key": "key-1"},
+    )
+    assert response.status_code == 422
+
+
+def test_clarified_with_remaining_work_description_is_422(owner_client: TestClient) -> None:
+    response = owner_client.post(
+        f"/issues/{uuid4()}/resolve",
+        json={
+            "resolution_type": "clarified",
+            "resolution_notes": "explained",
+            "remaining_work_description": "shouldn't be here",
+        },
+        headers={"Idempotency-Key": "key-1"},
+    )
+    assert response.status_code == 422

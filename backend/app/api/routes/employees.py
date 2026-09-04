@@ -1,20 +1,23 @@
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from supabase_auth.errors import AuthApiError
 
 from app import crud
 from app.api.deps import RequireOwnerDep, SessionDep
+from app.core.idempotency import with_idempotency
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
-# ponytail: no idempotency-key store exists yet anywhere in this codebase (ARCHITECTURE.md §9
-# left the *mechanism* undecided, not just this endpoint) — a duplicate POST here or on
-# reset-password creates a second Supabase account / password reset rather than being deduped.
-# Real gap, not silently skipped: build the mechanism when a second endpoint needs it too, not a
-# bespoke one-off store for this single slice.
+# `POST ""` uses email's own uniqueness as its dedup key — API_SPEC.md's assigned "Secondary key"
+# pattern (rest-api-guidelines Rule 231, re-checked 2026-09-04, not assumed): a retry with the
+# same email hits Supabase's global auth.users uniqueness and gets mapped to 409 below, which is
+# exactly what Rule 229 asks a secondary key to do ("expose conflicts and prevent resource
+# duplicate") — it does not promise the retry replays the original success response, only that it
+# can't create a second account. No Idempotency-Key infra needed here, unlike reset-password below.
 
 
 class EmployeeCreate(BaseModel):
@@ -99,10 +102,27 @@ def update_employee(
 
 @router.post("/{employee_id}/reset-password")
 def reset_password(
-    employee_id: UUID, actor: RequireOwnerDep, session: SessionDep
-) -> GeneratedPassword:
+    employee_id: UUID,
+    actor: RequireOwnerDep,
+    session: SessionDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> JSONResponse:
     employee = crud.get_employee(session, employee_id)
     if employee is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found")
-    password = crud.reset_employee_password(session, actor, employee)
-    return GeneratedPassword(generated_password=password)
+
+    def _handler() -> tuple[int, dict[str, Any]]:
+        password = crud.reset_employee_password(session, actor, employee)
+        return status.HTTP_200_OK, GeneratedPassword(generated_password=password).model_dump(
+            mode="json"
+        )
+
+    status_code, response_body = with_idempotency(
+        session,
+        actor,
+        idempotency_key,
+        f"POST /employees/{employee_id}/reset-password",
+        {},
+        _handler,
+    )
+    return JSONResponse(status_code=status_code, content=response_body)

@@ -133,11 +133,12 @@ RLS: `tenant_isolation` pattern.
 | `status` | text, `check in ('open','resolved')` | |
 | `resolution_type` | text, nullable, `check in ('clarified','deadline_adjusted','reassigned')` | |
 | `resolution_notes` | text, nullable | |
+| `remaining_work_description` | text, nullable | **Added 2026-09-04, real gap not a stylistic one**: PRD §3.3 requires the employee to see "the owner's changes *and* remaining-work description" for *both* trigger paths — without this column, an issue-triggered reassignment could only ever populate `tasks.last_reassignment_notes`, never `tasks.last_reassignment_remaining_work`, half-failing the explicit "both must surface" requirement. Populated only when `resolution_type='reassigned'` — same rule as `task_reviews.remaining_work_description` |
 | `resolved_by` | uuid, nullable, composite FK `(firm_id, resolved_by) → profiles(firm_id, id)` | |
 | `resolved_at` | timestamptz, nullable | |
 | `created_at` | timestamptz | |
 
-**Explicit convergence, stated plainly so it doesn't need re-deriving later:** when `resolution_type='reassigned'`, this updates `tasks` through the *same* path as a review-triggered reassignment (same four `last_reassignment_*` columns, same `task_reviews`-style logging conceptually). This is what makes PRD's "two distinct triggers, same employee notification" requirement (§3.3/§4.3) fall out naturally from one code path instead of needing two.
+**Explicit convergence, stated plainly so it doesn't need re-deriving later:** when `resolution_type='reassigned'`, this updates `tasks` through the *same* path as a review-triggered reassignment (same four `last_reassignment_*` columns, sourced from `resolution_notes`/`remaining_work_description` exactly as `task_reviews` sources them from `notes`/`remaining_work_description`). This is what makes PRD's "two distinct triggers, same employee notification" requirement (§3.3/§4.3) fall out naturally from one code path instead of needing two.
 
 RLS: `tenant_isolation` pattern.
 

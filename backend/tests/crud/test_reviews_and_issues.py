@@ -178,7 +178,9 @@ def test_resolve_issue_clarified_does_not_touch_task(session: Session) -> None:
     issue = _issue(session, task)
     actor = _actor()
 
-    resolved = crud.resolve_issue(session, actor, issue, "clarified", "explained scope", None, None)
+    resolved = crud.resolve_issue(
+        session, actor, issue, "clarified", "explained scope", None, None, None
+    )
     session.commit()
     session.refresh(task)
 
@@ -192,7 +194,9 @@ def test_resolve_issue_deadline_adjusted_updates_task(session: Session) -> None:
     actor = _actor()
     new_deadline = datetime.now(UTC)
 
-    crud.resolve_issue(session, actor, issue, "deadline_adjusted", "extended", new_deadline, None)
+    crud.resolve_issue(
+        session, actor, issue, "deadline_adjusted", "extended", None, new_deadline, None
+    )
     session.commit()
     session.refresh(task)
 
@@ -209,13 +213,22 @@ def test_resolve_issue_reassigned_uses_shared_reassignment_path(session: Session
     new_employee = uuid4()
 
     crud.resolve_issue(
-        session, actor, issue, "reassigned", "give to someone else", None, new_employee
+        session,
+        actor,
+        issue,
+        "reassigned",
+        "give to someone else",
+        "finish the remaining checks",
+        None,
+        new_employee,
     )
     session.commit()
     session.refresh(task)
 
     assert task.assigned_to == new_employee
     assert task.last_reassignment_source == "issue"
+    assert task.last_reassignment_remaining_work == "finish the remaining checks"
+    assert issue.remaining_work_description == "finish the remaining checks"
     assert task.status == "in_progress"
 
 
@@ -225,4 +238,4 @@ def test_resolve_issue_already_resolved_raises(session: Session) -> None:
     actor = _actor()
 
     with pytest.raises(crud.InvalidIssueStateError):
-        crud.resolve_issue(session, actor, issue, "clarified", "too late", None, None)
+        crud.resolve_issue(session, actor, issue, "clarified", "too late", None, None, None)

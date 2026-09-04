@@ -110,6 +110,13 @@ def reset_employee_password(session: Session, actor: Profile, employee: Profile)
     """Generates a new password via the Admin API and marks it one-time-use, same as
     create_employee — `must_change_password` lives only in `profiles`, so it's a plain update
     here, not another Admin API call (ARCHITECTURE.md §4).
+
+    No `session.commit()` — wrapped in `with_idempotency` by the route (retrofitted 2026-09-04,
+    API_SPEC.md's own `Idempotency-Key` assignment for this endpoint, deferred since Phase 2 until
+    the mechanism existed). This is what makes a retry with the *same* key skip calling
+    `admin_auth.update_user_by_id` again — `with_idempotency` returns the cached response before
+    this function (or anything else in `_handler`) ever runs, so the real Supabase password reset
+    itself only happens once per key, not just the DB row.
     """
     password = _generate_password()
     admin_auth.update_user_by_id(str(employee.id), {"password": password})
@@ -120,7 +127,6 @@ def reset_employee_password(session: Session, actor: Profile, employee: Profile)
     employee.last_reset_at = now
     session.add(employee)
     _write_audit_log(session, actor, action="password_reset", target_id=employee.id)
-    session.commit()
     return password
 
 
@@ -409,14 +415,15 @@ def resolve_issue(
     issue: Issue,
     resolution_type: str,
     resolution_notes: str,
+    remaining_work_description: str | None,
     new_deadline: datetime | None,
     assigned_to: UUID | None,
 ) -> Issue:
-    """No `session.commit()` — wrapped in `with_idempotency` by the route.
-    ponytail: `issues` has no `remaining_work_description` column (DATA_MODEL.md) — an issue-
-    triggered reassignment sets `tasks.last_reassignment_remaining_work` to None, unlike a review-
-    triggered one. Add the column if/when this proves to be a real gap in practice, not
-    speculatively now.
+    """No `session.commit()` — wrapped in `with_idempotency` by the route. PRD §3.3: an issue-
+    triggered reassignment must surface both `last_reassignment_notes` and
+    `last_reassignment_remaining_work`, same as a review-triggered one — `remaining_work_
+    description` (routes/issues.py's own request-body validator requires it when
+    resolution_type='reassigned') is what makes that possible, mirroring task_reviews'.
     """
     locked = _lock_issue(session, issue.firm_id, issue.id)
     if locked.status != "open":
@@ -435,7 +442,8 @@ def resolve_issue(
             task.deadline = new_deadline
             task.updated_at = now
         else:  # reassigned — DATA_MODEL.md's convergence: same path as a review reassignment
-            _reassign_task(task, "issue", resolution_notes, None, assigned_to)
+            locked.remaining_work_description = remaining_work_description
+            _reassign_task(task, "issue", resolution_notes, remaining_work_description, assigned_to)
         session.add(task)
 
     session.add(locked)

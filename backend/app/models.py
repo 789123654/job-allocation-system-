@@ -114,6 +114,7 @@ class Issue(SQLModel, table=True):
     status: str = "open"
     resolution_type: str | None = None
     resolution_notes: str | None = None
+    remaining_work_description: str | None = None
     resolved_by: UUID | None = None
     resolved_at: datetime | None = None
     created_at: datetime
