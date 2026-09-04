@@ -5,7 +5,13 @@ from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 from app.core.config import settings
-from app.models import AuditLog, Firm, Profile  # noqa: F401  # registers tables on the metadata
+
+# Registers tables on SQLModel.metadata so autogenerate can see them — never referenced by name.
+from app.models import (
+    AuditLog,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    Firm,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    Profile,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

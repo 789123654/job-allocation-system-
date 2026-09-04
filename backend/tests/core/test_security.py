@@ -29,9 +29,13 @@ def _make_token(**overrides: object) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _mock_jwks(monkeypatch: pytest.MonkeyPatch) -> None:
+def _mock_jwks(  # pyright: ignore[reportUnusedFunction] — autouse pytest fixture, run by pytest
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reaching into the module-private client is the point of this test — swapping the real
+    # network call for a fixed key, not a leak to fix.
     monkeypatch.setattr(
-        security._jwks_client,
+        security._jwks_client,  # pyright: ignore[reportPrivateUsage]
         "get_signing_key_from_jwt",
         lambda token: SimpleNamespace(key=_PUBLIC_KEY),
     )

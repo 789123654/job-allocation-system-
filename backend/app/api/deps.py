@@ -42,7 +42,10 @@ def get_current_profile(
     # bare `SET LOCAL` statement, so the firm_id value is bound safely. `is_local=true` makes it
     # transaction-scoped exactly like `SET LOCAL` (ARCHITECTURE.md §5) — reset at commit/rollback
     # regardless of connection reuse under Supavisor pooling.
-    session.execute(
+    session.execute(  # pyright: ignore[reportDeprecated]
+        # SQLModel's exec() doesn't accept a raw TextClause (only Select/SelectOfScalar/UpdateBase
+        # per its overloads, checked 2026-09-04) — execute() is the only API that actually works
+        # for a bare `SELECT set_config(...)` call whose return value we don't use.
         sql_text("SELECT set_config('app.current_tenant', :firm_id, true)"),
         {"firm_id": str(firm_id)},
     )

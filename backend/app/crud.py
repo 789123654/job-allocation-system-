@@ -51,7 +51,10 @@ def create_employee(
             },
         }
     )
-    if result.user is None:
+    if result.user is None:  # pyright: ignore[reportUnnecessaryComparison]
+        # supabase_auth's stub types `.user` as non-optional, so pyright strict calls this
+        # unreachable — kept anyway: a type stub describes the declared shape, not a runtime
+        # guarantee from Supabase's actual HTTP response at this external API boundary.
         # create_user raises AuthApiError on a real failure — a None user here would mean
         # Supabase's own API contract changed, not a normal client-facing error.
         raise RuntimeError("Supabase admin.create_user returned no user")

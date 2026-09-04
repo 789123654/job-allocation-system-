@@ -12,7 +12,7 @@ Two required pre-launch checks, verbatim from ARCHITECTURE.md §5:
 
 import os
 from collections.abc import Generator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import Connection, Engine, create_engine, text
@@ -31,7 +31,7 @@ def _set_tenant(conn: Connection, firm_id: object) -> None:
 
 
 @pytest.fixture
-def two_firms(request: pytest.FixtureRequest) -> Generator[tuple[dict, dict]]:
+def two_firms(request: pytest.FixtureRequest) -> Generator[tuple[dict[str, UUID], dict[str, UUID]]]:
     """Inserted with the superuser connection (bypasses RLS by construction) — this fixture's job
     is to plant fixture data across two tenants, not to exercise the isolation being tested.
     """
@@ -81,7 +81,7 @@ def test_fastapi_app_does_not_bypass_rls(app_engine: Engine) -> None:
 
 
 def test_cross_tenant_read_returns_zero_rows(
-    app_engine: Engine, two_firms: tuple[dict, dict]
+    app_engine: Engine, two_firms: tuple[dict[str, UUID], dict[str, UUID]]
 ) -> None:
     firm_a, firm_b = two_firms
     with app_engine.connect() as conn:
@@ -93,7 +93,7 @@ def test_cross_tenant_read_returns_zero_rows(
 
 
 def test_cross_tenant_update_affects_zero_rows(
-    app_engine: Engine, two_firms: tuple[dict, dict]
+    app_engine: Engine, two_firms: tuple[dict[str, UUID], dict[str, UUID]]
 ) -> None:
     firm_a, firm_b = two_firms
     with app_engine.begin() as conn:

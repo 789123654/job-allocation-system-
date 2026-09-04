@@ -29,12 +29,25 @@ select = ["E", "F", "I", "UP", "B", "S", "FAST"]
 
 [tool.ruff.lint.per-file-ignores]
 # S101: assert is the ponytail self-check pattern here, not production logic that dies under
-# `python -O`. S105: fixture strings like "temp-pw-123" are fake test data, not real secrets.
-"tests/**" = ["S101", "S105"]
+# `python -O`. S105/S106: fixture strings like "temp-pw-123" (as a default or a kwarg) are fake
+# test data, not real secrets.
+"tests/**" = ["S101", "S105", "S106"]
 
 [tool.pyright]
 include = ["app", "tests"]
-typeCheckingMode = "basic"
+typeCheckingMode = "strict"
+
+# httpx's TestClient doesn't ship complete type stubs (every .get/.post/.json call resolves to
+# Unknown) — real noise from an untyped third party, not our code being wrong. app/ never trips
+# these rules (verified 2026-09-04), so scoping the relief to tests/ keeps strict mode's teeth
+# everywhere it can actually catch something.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+extraPaths = ["."] # defining executionEnvironments drops the implicit root path — put it back
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
