@@ -13,7 +13,6 @@ from supabase_auth.errors import AuthApiError
 
 from app import crud
 from app.api import deps
-from app.api.routes import employees as employees_route
 from app.main import app
 from app.models import Profile
 
@@ -35,16 +34,20 @@ def _fake_owner() -> Profile:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient]:
-    monkeypatch.setattr(
-        employees_route,
-        "with_idempotency",
-        lambda session, actor, key, endpoint, body, handler: handler(),
-    )
+def client() -> Generator[TestClient]:
     app.dependency_overrides[deps.require_owner] = _fake_owner
     app.dependency_overrides[deps.get_session] = lambda: MagicMock()
     yield TestClient(app)
     app.dependency_overrides.clear()
+
+
+def _session_with_no_existing_idempotency_key() -> MagicMock:
+    # reset_password's manual dedup check does session.exec(select(...)).first() — a bare
+    # MagicMock's .first() returns a truthy Mock, not None, which would make every call look
+    # like a replay. Configure it explicitly.
+    session = MagicMock()
+    session.exec.return_value.first.return_value = None
+    return session
 
 
 def test_create_employee_returns_password_once(
@@ -103,6 +106,7 @@ def test_reset_password_returns_password_once(
     )
     monkeypatch.setattr(crud, "get_employee", lambda *a, **kw: fake_employee)
     monkeypatch.setattr(crud, "reset_employee_password", lambda *a, **kw: "new-temp-pw")
+    app.dependency_overrides[deps.get_session] = _session_with_no_existing_idempotency_key
 
     response = client.post(
         f"/employees/{employee_id}/reset-password", headers={"Idempotency-Key": "key-1"}
@@ -115,6 +119,40 @@ def test_reset_password_returns_password_once(
 def test_reset_password_requires_idempotency_key_header(client: TestClient) -> None:
     response = client.post(f"/employees/{uuid4()}/reset-password")
     assert response.status_code == 422  # FastAPI's own required-header validation
+
+
+def test_reset_password_replay_is_409_and_never_returns_password(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The whole point of NOT using with_idempotency here (routes/employees.py) — a replay must
+    # never re-expose the one-time password, so it 409s instead of returning a cached response.
+    employee_id = uuid4()
+    fake_employee = Profile(
+        id=employee_id,
+        firm_id=_FIRM_ID,
+        role="employee",
+        full_name="Jane Doe",
+        email="jane@example.com",
+        is_active=True,
+        must_change_password=False,
+        created_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(crud, "get_employee", lambda *a, **kw: fake_employee)
+
+    def _fail_if_called(*a: object, **kw: object) -> str:
+        raise AssertionError("reset_employee_password must not run on a replay")
+
+    monkeypatch.setattr(crud, "reset_employee_password", _fail_if_called)
+    session = MagicMock()
+    session.exec.return_value.first.return_value = object()  # any non-None row
+    app.dependency_overrides[deps.get_session] = lambda: session
+
+    response = client.post(
+        f"/employees/{employee_id}/reset-password", headers={"Idempotency-Key": "key-1"}
+    )
+
+    assert response.status_code == 409
+    assert "generated_password" not in response.text
 
 
 def test_non_owner_is_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:

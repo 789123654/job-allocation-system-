@@ -1,14 +1,16 @@
-from typing import Annotated, Any
+from datetime import UTC, datetime
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import select
 from supabase_auth.errors import AuthApiError
 
 from app import crud
 from app.api.deps import RequireOwnerDep, SessionDep
-from app.core.idempotency import with_idempotency
+from app.models import IdempotencyKey
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -106,23 +108,57 @@ def reset_password(
     actor: RequireOwnerDep,
     session: SessionDep,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
-) -> JSONResponse:
+) -> GeneratedPassword:
+    """Deliberately NOT `with_idempotency` (core/idempotency.py) — caught 2026-09-04 re-auditing
+    this exact endpoint: that helper caches and replays the exact response body, which would
+    persist this one-time generated password in `idempotency_keys` for 24h and make it
+    retrievable a second time — directly contradicting this endpoint's own documented invariant
+    (API_SPEC.md §3: "the only time it's ever transmitted... never retrievable again after this
+    response"). Business_Logic_Security_Cheat_Sheet.md's "Reject Replays of Completed Steps"
+    supports rejecting a replay outright rather than serving a cached secret. Trade-off, stated
+    plainly: this endpoint no longer satisfies Rule 230's "exact same response" guarantee — a
+    retry gets an explanatory 409, not the original password — deliberate, not a default from
+    skipping the check.
+    """
     employee = crud.get_employee(session, employee_id)
     if employee is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found")
 
-    def _handler() -> tuple[int, dict[str, Any]]:
-        password = crud.reset_employee_password(session, actor, employee)
-        return status.HTTP_200_OK, GeneratedPassword(generated_password=password).model_dump(
-            mode="json"
+    endpoint = f"POST /employees/{employee_id}/reset-password"
+    existing = session.exec(
+        select(IdempotencyKey).where(
+            IdempotencyKey.firm_id == actor.firm_id,
+            IdempotencyKey.actor_id == actor.id,
+            IdempotencyKey.idempotency_key == idempotency_key,
+            IdempotencyKey.endpoint == endpoint,
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Already processed with this Idempotency-Key — the generated password was shown "
+            "once and cannot be retrieved again; retry with a new Idempotency-Key for a new one.",
         )
 
-    status_code, response_body = with_idempotency(
-        session,
-        actor,
-        idempotency_key,
-        f"POST /employees/{employee_id}/reset-password",
-        {},
-        _handler,
+    password = crud.reset_employee_password(session, actor, employee)
+    session.add(
+        IdempotencyKey(
+            firm_id=actor.firm_id,
+            actor_id=actor.id,
+            idempotency_key=idempotency_key,
+            endpoint=endpoint,
+            request_hash="",  # no request body ever varies on this bodyless POST
+            response_status=status.HTTP_200_OK,
+            response_body={"generated_password": "[redacted — shown once, not cached]"},
+            created_at=datetime.now(UTC),
+        )
     )
-    return JSONResponse(status_code=status_code, content=response_body)
+    try:
+        session.commit()
+    except IntegrityError:
+        # A concurrent identical retry won the insert race first — this call's own password is
+        # still real and still the only response this caller sees (same accepted true-concurrent-
+        # race caveat as with_idempotency's own docstring: sequential retries are fully protected,
+        # two genuinely simultaneous calls can still both reach Supabase).
+        session.rollback()
+    return GeneratedPassword(generated_password=password)

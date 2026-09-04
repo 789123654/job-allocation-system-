@@ -111,12 +111,12 @@ def reset_employee_password(session: Session, actor: Profile, employee: Profile)
     create_employee — `must_change_password` lives only in `profiles`, so it's a plain update
     here, not another Admin API call (ARCHITECTURE.md §4).
 
-    No `session.commit()` — wrapped in `with_idempotency` by the route (retrofitted 2026-09-04,
-    API_SPEC.md's own `Idempotency-Key` assignment for this endpoint, deferred since Phase 2 until
-    the mechanism existed). This is what makes a retry with the *same* key skip calling
-    `admin_auth.update_user_by_id` again — `with_idempotency` returns the cached response before
-    this function (or anything else in `_handler`) ever runs, so the real Supabase password reset
-    itself only happens once per key, not just the DB row.
+    No `session.commit()` — the route (routes/employees.py) checks for an existing
+    `IdempotencyKey` row *before* calling this function at all (so a genuine retry never reaches
+    `admin_auth.update_user_by_id` a second time), then commits this function's writes together
+    with its own redacted `IdempotencyKey` insert in one transaction. Not the shared
+    `with_idempotency` helper — that one caches and replays the exact response body, which would
+    persist this one-time password past its single intended transmission (API_SPEC.md §3).
     """
     password = _generate_password()
     admin_auth.update_user_by_id(str(employee.id), {"password": password})
