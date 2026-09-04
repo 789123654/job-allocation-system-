@@ -8,6 +8,7 @@ from app.core.config import settings
 
 # Registers tables on SQLModel.metadata so autogenerate can see them — never referenced by name.
 from app.models import (
+    AccessDenial,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     AuditLog,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     Firm,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     IdempotencyKey,  # noqa: F401  # pyright: ignore[reportUnusedImport]

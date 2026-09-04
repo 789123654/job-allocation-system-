@@ -176,6 +176,27 @@ RLS: `tenant_isolation` pattern, same as every other table — a firm sees only 
 
 **Why now instead of Phase 2, reversing the earlier call:** originally deferred (`ARCHITECTURE.md` §4) on the reasoning that a single, manually-onboarded firm has no lifecycle events worth logging yet. That reasoning breaks the moment a second firm is imminent, not once it actually lands — the cheapest time to add a table is before there's data in the tables around it, and waiting would mean either building it under pressure or missing the second firm's own onboarding, which is itself the first real event worth having in this log. Still deliberately narrow: no firm-lifecycle actions (`firm_deactivated`, `firm_deleted`) yet, because `firms.status` itself has no defined values yet (`ARCHITECTURE.md` §4 offboarding note) — those get added together, when offboarding is actually built, not speculatively now.
 
+### `access_denials` — failed authorization attempts, append-only (added 2026-09-05)
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid, composite PK w/ firm_id | |
+| `firm_id` | uuid, FK → `firms.id` | the *actor's* own firm — same convention as every other table, not the target's firm |
+| `actor_id` | uuid, composite FK `(firm_id, actor_id) → profiles(firm_id, id)` | who was denied |
+| `resource_type` | text, nullable, `check in ('task','notification')` | null for a pure role check with no specific resource in play (`require_owner`) |
+| `resource_id` | uuid, nullable, **deliberately not an FK** | the resource the actor tried to reach — no FK because the whole point is it may be something the actor can't see or that fails other constraints; an enforced FK here would defeat the reason the column exists |
+| `reason` | text, `check in ('wrong_role','not_assignee','wrong_owner')` | `wrong_role` = failed a role gate (e.g. Employee hitting an Owner-only route); `not_assignee` = visible to the actor but not theirs to act on (e.g. Owner can see a task but isn't its assignee for submit/mark-billed); `wrong_owner` = not even visible — same-tenant IDOR (e.g. an Employee requesting another's task/notification by id) |
+| `created_at` | timestamptz | |
+
+No `updated_at`, no soft-delete. Index: `(firm_id, created_at)`.
+
+RLS: `tenant_isolation` pattern, same as every other table.
+
+**Structural limit, stated so it isn't assumed to cover more than it does:** a true *cross-tenant* access attempt is invisible at this layer. `get_task`/`get_notification` query with no `firm_id` filter at all — RLS itself silently scopes the result to the actor's own tenant, so a task ID belonging to a different firm produces the exact same "not found" as an ID that never existed; the app code has no way to tell the two apart, and this table only receives what the app code can see. This table therefore records same-tenant IDOR and role-check denials, not cross-tenant probing — that case stays covered by RLS alone (`ARCHITECTURE.md` §5's defense-in-depth boundary), with no app-level record. Making cross-tenant attempts visible would require a privileged, RLS-bypassing lookup purely for detection — a materially different, more sensitive feature, not built here.
+
+**Deliberately excluded:** `require_password_set`'s 403 (`deps.py`) — a forced Set-New-Password gate every new employee hits on first login, not a violation attempt. Logging it would be noise, not signal (`Authorization_Cheat_Sheet.md`'s own caution against over-logging: CWE-778/CWE-779, both too little and too much logging are named weaknesses).
+
+**Why a separate table instead of extending `audit_log`, decided 2026-09-05:** `audit_log.target_id` is a composite FK scoped to `(firm_id, target_id) → profiles(firm_id, id)` — it can only reference a profile, and only within the same firm as the log row. A denial can target a non-profile resource (a task) and, structurally, could involve a target outside the actor's own firm — both break that FK outright. Forcing this in would mean either dropping the FK (weakening the guarantee on `audit_log`'s existing four actions too) or bolting on a second, unconstrained column — at which point it isn't really the same table. `audit_log`'s own stated scope ("who did this admin action" — a *success* record) is also a different semantic category from a denial record; mixing them means every future reader has to remember which kind of row they're looking at. Confirmed against `Multi_Tenant_Security_Cheat_Sheet.md` §8 ("Monitor for cross-tenant access attempts... tenant-isolated audit trails") and ASVS 16.3.2 (L2, failed authorization attempts logged) before building — both describe this as its own concern, not a rider on general audit logging.
+
 ## 3. Task Lifecycle State Machine
 
 ```

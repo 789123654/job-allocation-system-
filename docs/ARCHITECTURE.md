@@ -208,6 +208,14 @@ having in it — goes unrecorded. Deliberately narrow scope, not general request
 lifecycle actions (`firm_deactivated`, `firm_deleted`) stay out of it until offboarding itself is built —
 `firms.status` has no defined values yet, so there's nothing real to log on that side.
 
+**Write-only, no read endpoint — confirmed 2026-09-05, closing out the Phase 3 slice.** No
+`GET /audit-log` in `API_SPEC.md`, unlike every other resource here. Deliberate, not a gap: the
+table's own justification above is a forensic trail ahead of firm #2's provisioning, not a PRD
+requirement — no screen has ever been mocked for it, and at one firm the question "who did this,
+when" is answered directly via Postgres/Supabase Studio when it actually comes up. Cheap to add
+later since it needs no schema change (`GET /audit-log` would mirror `GET /notifications`'s
+pattern exactly) — deferred until a real need shows up, not built speculatively now.
+
 - **Deactivation and decommissioning are two separate events, not one** (`ch05-tenant-management.md`,
   directly applicable — this project's `profiles.is_active` pattern already draws exactly this distinction
   for employees, just not yet for firms). Deactivation: `firms.status` flips to a suspended-equivalent value,

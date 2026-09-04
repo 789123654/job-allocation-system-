@@ -137,13 +137,21 @@ def test_owner_cannot_submit_task(
     owner_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # "Assigned employee only" (API_SPEC.md) — an Owner can see the task but can't act on it.
-    monkeypatch.setattr(crud, "get_task", lambda *a, **kw: _fake_task())
+    task = _fake_task()
+    monkeypatch.setattr(crud, "get_task", lambda *a, **kw: task)
+    denials: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        crud, "record_access_denial", lambda *a, **kw: denials.append(a)
+    )
 
     response = owner_client.post(
-        f"/tasks/{uuid4()}/submit", headers={"Idempotency-Key": "key-1"}
+        f"/tasks/{task.id}/submit", headers={"Idempotency-Key": "key-1"}
     )
 
     assert response.status_code == 403
+    # (session, actor, resource_type, resource_id, reason) — access_denials wiring, DATA_MODEL.md
+    assert len(denials) == 1
+    assert denials[0][2:] == ("task", task.id, "not_assignee")
 
 
 def test_assigned_employee_can_submit_task(
@@ -296,6 +304,10 @@ def test_owner_cannot_raise_issue(
 ) -> None:
     task = _fake_task(status="in_progress")
     monkeypatch.setattr(crud, "get_task", lambda *a, **kw: task)
+    denials: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        crud, "record_access_denial", lambda *a, **kw: denials.append(a)
+    )
 
     response = owner_client.post(
         f"/tasks/{task.id}/issues",
@@ -304,6 +316,8 @@ def test_owner_cannot_raise_issue(
     )
 
     assert response.status_code == 403
+    assert len(denials) == 1
+    assert denials[0][2:] == ("task", task.id, "not_assignee")
 
 
 def test_employee_list_is_scoped_server_side(

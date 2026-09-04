@@ -6,6 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import Session, select
 from sqlmodel import text as sql_text
 
+from app import crud
 from app.core.db import get_session
 from app.core.security import InvalidTokenError, verify_access_token
 from app.models import Profile
@@ -73,8 +74,9 @@ def require_password_set(profile: CurrentProfileDep) -> Profile:
 ActiveProfileDep = Annotated[Profile, Depends(require_password_set)]
 
 
-def require_owner(profile: ActiveProfileDep) -> Profile:
+def require_owner(profile: ActiveProfileDep, session: SessionDep) -> Profile:
     if profile.role != "owner":
+        crud.record_access_denial(session, profile, None, None, "wrong_role")
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Owner role required")
     return profile
 

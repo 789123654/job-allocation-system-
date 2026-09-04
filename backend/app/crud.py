@@ -12,7 +12,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from app.core.supabase_admin import admin_auth
-from app.models import AuditLog, Issue, JobType, Notification, Profile, Task, TaskReview
+from app.models import (
+    AccessDenial,
+    AuditLog,
+    Issue,
+    JobType,
+    Notification,
+    Profile,
+    Task,
+    TaskReview,
+)
 
 
 class DuplicateJobTypeNameError(Exception):
@@ -50,6 +59,37 @@ def _write_audit_log(session: Session, actor: Profile, action: str, target_id: U
             created_at=datetime.now(UTC),
         )
     )
+
+
+def record_access_denial(
+    session: Session,
+    actor: Profile,
+    resource_type: str | None,
+    resource_id: UUID | None,
+    reason: str,
+) -> None:
+    """DATA_MODEL.md `access_denials` — records only what's actually visible to the app: same-
+    tenant IDOR (`wrong_owner`) and role-gate (`wrong_role`/`not_assignee`) denials. A true cross-
+    tenant attempt never reaches here — RLS filters it out before the caller can even tell the
+    resource exists (see the table's own "structural limit" note).
+
+    Commits itself, unlike `_write_audit_log` — every call site here is immediately followed by
+    request termination (a 404/403 raised right after), never a larger business-write transaction
+    to ride along with, and several call sites (get_task/get_notification) are read-only routes
+    that would otherwise never call session.commit() at all before the session closes and the
+    uncommitted row is silently rolled back.
+    """
+    session.add(
+        AccessDenial(
+            firm_id=actor.firm_id,
+            actor_id=actor.id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            reason=reason,
+            created_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
 
 
 def create_employee(
@@ -279,6 +319,7 @@ def get_task(session: Session, actor: Profile, task_id: UUID) -> Task | None:
     if task is None:
         return None
     if actor.role != "owner" and task.assigned_to != actor.id:
+        record_access_denial(session, actor, "task", task.id, "wrong_owner")
         return None
     return task
 
@@ -638,7 +679,10 @@ def get_notification(
     notification = session.exec(
         select(Notification).where(Notification.id == notification_id)
     ).first()
-    if notification is None or notification.recipient_id != actor.id:
+    if notification is None:
+        return None
+    if notification.recipient_id != actor.id:
+        record_access_denial(session, actor, "notification", notification.id, "wrong_owner")
         return None
     return notification
 

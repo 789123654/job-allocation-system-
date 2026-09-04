@@ -135,6 +135,18 @@ class Notification(SQLModel, table=True):
     created_at: datetime
 
 
+class AccessDenial(SQLModel, table=True):
+    __tablename__ = "access_denials"  # type: ignore[assignment]  # known SQLModel/pyright interaction
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    firm_id: UUID = Field(primary_key=True, foreign_key=_FIRMS_FK)
+    actor_id: UUID
+    resource_type: str | None = None
+    resource_id: UUID | None = None
+    reason: str
+    created_at: datetime
+
+
 class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"  # type: ignore[assignment]  # known SQLModel/pyright interaction
 

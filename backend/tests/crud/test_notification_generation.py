@@ -11,7 +11,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app import crud
-from app.models import Issue, Notification, Profile, Task
+from app.models import AccessDenial, Issue, Notification, Profile, Task
 
 _FIRM_ID = uuid4()
 
@@ -24,6 +24,7 @@ def session() -> Generator[Session]:
         Issue.__table__,  # pyright: ignore[reportAttributeAccessIssue]
         Profile.__table__,  # pyright: ignore[reportAttributeAccessIssue]
         Notification.__table__,  # pyright: ignore[reportAttributeAccessIssue]
+        AccessDenial.__table__,  # pyright: ignore[reportAttributeAccessIssue]
     ]
     SQLModel.metadata.create_all(engine, tables=tables)  # pyright: ignore[reportUnknownArgumentType]
     with Session(engine) as s:

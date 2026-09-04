@@ -241,6 +241,7 @@ def submit_task(
     # every task in the firm but isn't the "assigned employee" this action is scoped to
     # (API_SPEC.md). Real 403 here, not 404: the task's existence is already legitimately known.
     if actor.role != "employee" or task.assigned_to != actor.id:
+        crud.record_access_denial(session, actor, "task", task.id, "not_assignee")
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Only the assigned employee can submit this task"
         )
@@ -271,6 +272,7 @@ def mark_task_billed(
     if task is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
     if actor.role != "employee" or task.assigned_to != actor.id:
+        crud.record_access_denial(session, actor, "task", task.id, "not_assignee")
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Only the assigned employee can mark this task billed"
         )
@@ -351,6 +353,7 @@ def create_task_issue(
     # Owner can see every task but only the assigned employee actually does the work an issue
     # would be raised about (PRD §2.7). Real 403, not 404: the task's existence is already known.
     if actor.role != "employee" or task.assigned_to != actor.id:
+        crud.record_access_denial(session, actor, "task", task.id, "not_assignee")
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Only the assigned employee can raise an issue on this task"
         )
