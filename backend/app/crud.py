@@ -8,10 +8,17 @@ import secrets
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.core.supabase_admin import admin_auth
-from app.models import AuditLog, Profile
+from app.models import AuditLog, JobType, Profile
+
+
+class DuplicateJobTypeNameError(Exception):
+    """Raised when UNIQUE (firm_id, name) is violated — the 'Secondary key' idempotency pattern
+    API_SPEC.md names for POST /job-types (same shape as Employees' email-uniqueness dedup).
+    """
 
 
 def _generate_password() -> str:
@@ -104,3 +111,37 @@ def reset_employee_password(session: Session, actor: Profile, employee: Profile)
     _write_audit_log(session, actor, action="password_reset", target_id=employee.id)
     session.commit()
     return password
+
+
+def create_job_type(session: Session, actor: Profile, name: str) -> JobType:
+    # Not audit-logged — job_types already carries created_by/created_at, and ARCHITECTURE.md's
+    # audit_log scope note is explicit that anything with its own actor/timestamp columns (like
+    # task_reviews/issues) isn't duplicated there; job_types follows the same reasoning.
+    job_type = JobType(
+        firm_id=actor.firm_id, name=name, created_by=actor.id, created_at=datetime.now(UTC)
+    )
+    session.add(job_type)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise DuplicateJobTypeNameError from exc
+    session.refresh(job_type)
+    return job_type
+
+
+def list_job_types(session: Session, offset: int, limit: int) -> list[JobType]:
+    stmt = select(JobType).offset(offset).limit(limit)
+    return list(session.exec(stmt).all())
+
+
+def get_job_type(session: Session, job_type_id: UUID) -> JobType | None:
+    return session.exec(select(JobType).where(JobType.id == job_type_id)).first()
+
+
+def set_job_type_active(session: Session, job_type: JobType, is_active: bool) -> JobType:
+    job_type.is_active = is_active
+    session.add(job_type)
+    session.commit()
+    session.refresh(job_type)
+    return job_type

@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.models import (
     AuditLog,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     Firm,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    JobType,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     Profile,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
 
