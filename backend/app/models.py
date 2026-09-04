@@ -89,6 +89,36 @@ class IdempotencyKey(SQLModel, table=True):
     created_at: datetime
 
 
+class TaskReview(SQLModel, table=True):
+    __tablename__ = "task_reviews"  # type: ignore[assignment]  # known SQLModel/pyright interaction
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    firm_id: UUID = Field(primary_key=True, foreign_key="firms.id")
+    task_id: UUID
+    reviewed_by: UUID
+    outcome: str
+    notes: str | None = None
+    remaining_work_description: str | None = None
+    resulting_billing_task_id: UUID | None = None
+    created_at: datetime
+
+
+class Issue(SQLModel, table=True):
+    __tablename__ = "issues"  # type: ignore[assignment]  # known SQLModel/pyright interaction
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    firm_id: UUID = Field(primary_key=True, foreign_key="firms.id")
+    task_id: UUID
+    raised_by: UUID
+    description: str
+    status: str = "open"
+    resolution_type: str | None = None
+    resolution_notes: str | None = None
+    resolved_by: UUID | None = None
+    resolved_at: datetime | None = None
+    created_at: datetime
+
+
 class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"  # type: ignore[assignment]  # known SQLModel/pyright interaction
 

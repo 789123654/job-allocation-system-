@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.core.supabase_admin import admin_auth
-from app.models import AuditLog, JobType, Profile, Task
+from app.models import AuditLog, Issue, JobType, Profile, Task, TaskReview
 
 
 class DuplicateJobTypeNameError(Exception):
@@ -25,6 +25,12 @@ class InvalidTaskStateError(Exception):
     """Raised when a workflow-state-checked task transition isn't valid from the task's current
     status (API_SPEC.md: submit only from assigned/in_progress, mark-billed only for billing tasks
     that are assigned/in_progress).
+    """
+
+
+class InvalidIssueStateError(Exception):
+    """Raised when an issue resolution is attempted on an issue that isn't 'open' (DATA_MODEL.md:
+    an issue is raised open, resolved exactly once).
     """
 
 
@@ -236,18 +242,16 @@ def update_task_deadline(session: Session, task: Task, deadline: datetime) -> Ta
     return task
 
 
-def _lock_task(session: Session, task: Task) -> Task:
+def _lock_task(session: Session, firm_id: UUID, task_id: UUID) -> Task:
     """Business_Logic_Security_Cheat_Sheet.md "Use Database Transactions and Locks" — checked
     directly 2026-09-04, not assumed covered by the Idempotency-Key mechanism (that only dedupes
     an identical retried key, not two genuinely concurrent requests with different keys, e.g. two
     tabs both clicking submit). `SELECT ... FOR UPDATE` — the cheat sheet's own first-listed
     pattern — makes the second racer block until the first commits, so it re-reads the *already
-    updated* status instead of the stale value `task` was fetched with in the route.
+    updated* status instead of the stale value the route's earlier `get_task` fetched.
     """
     return session.exec(
-        select(Task)
-        .where(Task.firm_id == task.firm_id, Task.id == task.id)
-        .with_for_update()
+        select(Task).where(Task.firm_id == firm_id, Task.id == task_id).with_for_update()
     ).one()
 
 
@@ -255,7 +259,7 @@ def submit_task(session: Session, task: Task) -> Task:
     """No `session.commit()` — wrapped in `with_idempotency` by the route, same reasoning as
     create_task.
     """
-    locked = _lock_task(session, task)
+    locked = _lock_task(session, task.firm_id, task.id)
     if locked.status not in ("assigned", "in_progress"):
         raise InvalidTaskStateError
     locked.status = "submitted"
@@ -266,10 +270,173 @@ def submit_task(session: Session, task: Task) -> Task:
 
 def mark_task_billed(session: Session, task: Task) -> Task:
     """No `session.commit()` — wrapped in `with_idempotency` by the route."""
-    locked = _lock_task(session, task)
+    locked = _lock_task(session, task.firm_id, task.id)
     if locked.task_type != "billing" or locked.status not in ("assigned", "in_progress"):
         raise InvalidTaskStateError
     locked.status = "billed"
     locked.updated_at = datetime.now(UTC)
+    session.add(locked)
+    return locked
+
+
+def _reassign_task(
+    task: Task,
+    source: str,
+    notes: str | None,
+    remaining_work: str | None,
+    assigned_to: UUID | None,
+) -> None:
+    """DATA_MODEL.md's explicit convergence: a review-triggered reassignment and an issue-
+    resolution reassignment update `tasks` through this one path (the same four
+    `last_reassignment_*` columns) — what makes PRD's 'two distinct triggers, same employee
+    notification' requirement (§3.3/§4.3) fall out of one code path instead of two.
+    """
+    now = datetime.now(UTC)
+    task.status = "in_progress"
+    task.last_reassignment_notes = notes
+    task.last_reassignment_remaining_work = remaining_work
+    task.last_reassignment_source = source
+    task.last_reassignment_at = now
+    task.updated_at = now
+    if assigned_to is not None:
+        task.assigned_to = assigned_to
+
+
+def create_task_review(
+    session: Session,
+    actor: Profile,
+    task: Task,
+    outcome: str,
+    notes: str | None,
+    remaining_work_description: str | None,
+    assigned_to: UUID | None,
+    billing_deadline: datetime | None,
+    billing_description: str | None,
+    billing_amount: float | None,
+    billing_recipient: str | None,
+) -> tuple[TaskReview, Task]:
+    """No `session.commit()` — wrapped in `with_idempotency` by the route. Row-locks the reviewed
+    task (Business_Logic_Security_Cheat_Sheet.md, same reasoning as submit_task/mark_task_billed)
+    so two concurrent reviews of the same submission can't both succeed. Outcome-specific field
+    requirements (e.g. `remaining_work_description` required for 'reassigned') are enforced by the
+    request body's own validator (routes/tasks.py) — cheat sheet's "Validate Combinations": fields
+    individually valid but only meaningful together per outcome.
+    """
+    locked = _lock_task(session, task.firm_id, task.id)
+    if locked.status != "submitted":
+        raise InvalidTaskStateError
+
+    now = datetime.now(UTC)
+    review = TaskReview(
+        firm_id=actor.firm_id,
+        task_id=locked.id,
+        reviewed_by=actor.id,
+        outcome=outcome,
+        notes=notes,
+        created_at=now,
+    )
+
+    if outcome == "approved":
+        locked.status = "completed"
+        locked.updated_at = now
+    elif outcome == "reassigned":
+        review.remaining_work_description = remaining_work_description
+        _reassign_task(locked, "review", notes, remaining_work_description, assigned_to)
+    else:  # billing
+        locked.status = "completed"
+        locked.updated_at = now
+        billing_task = Task(
+            firm_id=actor.firm_id,
+            job_type_id=locked.job_type_id,
+            task_type="billing",
+            parent_task_id=locked.id,
+            title=f"Billing — {locked.title}",
+            description=billing_description,
+            assigned_to=assigned_to,
+            deadline=billing_deadline,
+            status="assigned",
+            created_by=actor.id,
+            created_at=now,
+            updated_at=now,
+            billing_amount=billing_amount,
+            billing_recipient=billing_recipient,
+        )
+        session.add(billing_task)
+        session.flush()  # assigns billing_task.id within the still-open transaction
+        review.resulting_billing_task_id = billing_task.id
+
+    session.add(locked)
+    session.add(review)
+    return review, locked
+
+
+def create_issue(session: Session, actor: Profile, task: Task, description: str) -> Issue:
+    """No `session.commit()` — wrapped in `with_idempotency` by the route. Not row-locked: raising
+    an issue doesn't mutate `tasks` (PRD §2.7/§4.3), so there's no check-then-act write for a
+    concurrent submit/review to race against — worst case is an issue landing a moment either side
+    of a submission, which isn't an invalid state, just an ordering choice.
+    """
+    if task.status not in ("assigned", "in_progress"):
+        raise InvalidTaskStateError
+    issue = Issue(
+        firm_id=actor.firm_id,
+        task_id=task.id,
+        raised_by=actor.id,
+        description=description,
+        status="open",
+        created_at=datetime.now(UTC),
+    )
+    session.add(issue)
+    return issue
+
+
+def get_issue(session: Session, issue_id: UUID) -> Issue | None:
+    return session.exec(select(Issue).where(Issue.id == issue_id)).first()
+
+
+def _lock_issue(session: Session, firm_id: UUID, issue_id: UUID) -> Issue:
+    """Same reasoning as `_lock_task` — two concurrent resolutions of the same issue must not
+    both succeed.
+    """
+    return session.exec(
+        select(Issue).where(Issue.firm_id == firm_id, Issue.id == issue_id).with_for_update()
+    ).one()
+
+
+def resolve_issue(
+    session: Session,
+    actor: Profile,
+    issue: Issue,
+    resolution_type: str,
+    resolution_notes: str,
+    new_deadline: datetime | None,
+    assigned_to: UUID | None,
+) -> Issue:
+    """No `session.commit()` — wrapped in `with_idempotency` by the route.
+    ponytail: `issues` has no `remaining_work_description` column (DATA_MODEL.md) — an issue-
+    triggered reassignment sets `tasks.last_reassignment_remaining_work` to None, unlike a review-
+    triggered one. Add the column if/when this proves to be a real gap in practice, not
+    speculatively now.
+    """
+    locked = _lock_issue(session, issue.firm_id, issue.id)
+    if locked.status != "open":
+        raise InvalidIssueStateError
+
+    now = datetime.now(UTC)
+    locked.status = "resolved"
+    locked.resolution_type = resolution_type
+    locked.resolution_notes = resolution_notes
+    locked.resolved_by = actor.id
+    locked.resolved_at = now
+
+    if resolution_type in ("deadline_adjusted", "reassigned"):
+        task = _lock_task(session, locked.firm_id, locked.task_id)
+        if resolution_type == "deadline_adjusted":
+            task.deadline = new_deadline
+            task.updated_at = now
+        else:  # reassigned — DATA_MODEL.md's convergence: same path as a review reassignment
+            _reassign_task(task, "issue", resolution_notes, None, assigned_to)
+        session.add(task)
+
     session.add(locked)
     return locked

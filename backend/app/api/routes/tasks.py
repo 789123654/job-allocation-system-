@@ -1,15 +1,15 @@
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import crud
 from app.api.deps import ActiveProfileDep, RequireOwnerDep, SessionDep
 from app.core.idempotency import with_idempotency
-from app.models import Task
+from app.models import Issue, Task
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -71,6 +71,90 @@ class TaskOut(BaseModel):
 
 class TaskDeadlineUpdate(BaseModel):
     deadline: datetime
+
+
+class TaskReviewCreate(BaseModel):
+    outcome: Literal["approved", "reassigned", "billing"]
+    notes: str | None = Field(default=None, max_length=2000)
+    # 'reassigned' fields
+    remaining_work_description: str | None = Field(default=None, max_length=2000)
+    assigned_to: UUID | None = None
+    # 'billing' fields — all required together when outcome='billing', enforced below
+    billing_deadline: datetime | None = None
+    billing_description: str | None = Field(default=None, max_length=5000)
+    billing_amount: float | None = Field(default=None, gt=0)
+    billing_recipient: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def _validate_outcome_fields(self) -> "TaskReviewCreate":
+        # Business_Logic_Security_Cheat_Sheet.md "Validate Combinations" (checked 2026-09-04) —
+        # each field is individually well-formed but only meaningful for its own outcome; a field
+        # from another outcome silently accepted here would be exactly the "don't trust hidden/
+        # derived fields" gap the cheat sheet warns about.
+        billing_fields_set = any(
+            v is not None
+            for v in (
+                self.billing_deadline,
+                self.billing_description,
+                self.billing_amount,
+                self.billing_recipient,
+            )
+        )
+        if self.outcome == "reassigned":
+            if not self.remaining_work_description:
+                raise ValueError("remaining_work_description is required for outcome=reassigned")
+            if billing_fields_set:
+                raise ValueError("billing fields are only valid for outcome=billing")
+        elif self.outcome == "billing":
+            if not (
+                self.assigned_to
+                and self.billing_deadline
+                and self.billing_description
+                and self.billing_amount
+                and self.billing_recipient
+            ):
+                raise ValueError(
+                    "assigned_to, billing_deadline, billing_description, billing_amount, and "
+                    "billing_recipient are all required for outcome=billing"
+                )
+            if self.remaining_work_description:
+                raise ValueError("remaining_work_description is only valid for outcome=reassigned")
+        else:  # approved
+            if self.remaining_work_description or self.assigned_to or billing_fields_set:
+                raise ValueError("only 'notes' is valid for outcome=approved")
+        return self
+
+
+class IssueCreate(BaseModel):
+    description: str = Field(min_length=1, max_length=2000)
+
+
+class IssueOut(BaseModel):
+    id: UUID
+    task_id: UUID
+    raised_by: UUID
+    description: str
+    status: str
+    resolution_type: str | None
+    resolution_notes: str | None
+    resolved_by: UUID | None
+    resolved_at: datetime | None
+    created_at: datetime
+
+    @classmethod
+    def from_issue(cls, issue: Issue) -> "IssueOut":
+        return cls(
+            id=issue.id,
+            task_id=issue.task_id,
+            raised_by=issue.raised_by,
+            description=issue.description,
+            status=issue.status,
+            resolution_type=issue.resolution_type,
+            resolution_notes=issue.resolution_notes,
+            resolved_by=issue.resolved_by,
+            resolved_at=issue.resolved_at,
+            created_at=issue.created_at,
+        )
 
 
 # response_model isn't declared on the two Idempotency-Key routes below — they return a
@@ -201,5 +285,90 @@ def mark_task_billed(
 
     status_code, response_body = with_idempotency(
         session, actor, idempotency_key, f"POST /tasks/{task_id}/mark-billed", {}, _handler
+    )
+    return JSONResponse(status_code=status_code, content=response_body)
+
+
+@router.post("/{task_id}/review")
+def review_task(
+    task_id: UUID,
+    body: TaskReviewCreate,
+    actor: RequireOwnerDep,
+    session: SessionDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> JSONResponse:
+    task = crud.get_task(session, actor, task_id)
+    if task is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
+
+    def _handler() -> tuple[int, dict[str, Any]]:
+        try:
+            _, updated = crud.create_task_review(
+                session,
+                actor,
+                task,
+                body.outcome,
+                body.notes,
+                body.remaining_work_description,
+                body.assigned_to,
+                body.billing_deadline,
+                body.billing_description,
+                body.billing_amount,
+                body.billing_recipient,
+            )
+        except crud.InvalidTaskStateError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Task cannot be reviewed from its current status"
+            ) from exc
+        session.flush()  # assigns the linked billing task's id, if any, before the response
+        return status.HTTP_200_OK, TaskOut.from_task(updated).model_dump(mode="json")
+
+    status_code, response_body = with_idempotency(
+        session,
+        actor,
+        idempotency_key,
+        f"POST /tasks/{task_id}/review",
+        body.model_dump(mode="json"),
+        _handler,
+    )
+    return JSONResponse(status_code=status_code, content=response_body)
+
+
+@router.post("/{task_id}/issues", status_code=status.HTTP_201_CREATED)
+def create_task_issue(
+    task_id: UUID,
+    body: IssueCreate,
+    actor: ActiveProfileDep,
+    session: SessionDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> JSONResponse:
+    task = crud.get_task(session, actor, task_id)
+    if task is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
+    # get_task's "visible to" rule (owner sees all) is broader than "may raise an issue on" — an
+    # Owner can see every task but only the assigned employee actually does the work an issue
+    # would be raised about (PRD §2.7). Real 403, not 404: the task's existence is already known.
+    if actor.role != "employee" or task.assigned_to != actor.id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Only the assigned employee can raise an issue on this task"
+        )
+
+    def _handler() -> tuple[int, dict[str, Any]]:
+        try:
+            issue = crud.create_issue(session, actor, task, body.description)
+        except crud.InvalidTaskStateError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Cannot raise an issue on a task in its current status"
+            ) from exc
+        session.flush()  # assigns issue.id within the still-open transaction, before commit
+        return status.HTTP_201_CREATED, IssueOut.from_issue(issue).model_dump(mode="json")
+
+    status_code, response_body = with_idempotency(
+        session,
+        actor,
+        idempotency_key,
+        f"POST /tasks/{task_id}/issues",
+        body.model_dump(mode="json"),
+        _handler,
     )
     return JSONResponse(status_code=status_code, content=response_body)

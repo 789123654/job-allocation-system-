@@ -191,6 +191,121 @@ def test_update_deadline_nonexistent_task_is_404_not_403(
     assert response.status_code == 404
 
 
+def test_review_requires_idempotency_key_header(owner_client: TestClient) -> None:
+    response = owner_client.post(f"/tasks/{uuid4()}/review", json={"outcome": "approved"})
+    assert response.status_code == 422  # FastAPI's own required-header validation
+
+
+def test_review_approved_returns_updated_task(
+    owner_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _fake_task(status="submitted")
+    monkeypatch.setattr(crud, "get_task", lambda *a, **kw: task)
+    monkeypatch.setattr(
+        crud,
+        "create_task_review",
+        lambda *a, **kw: (None, _fake_task(status="completed")),
+    )
+
+    response = owner_client.post(
+        f"/tasks/{task.id}/review",
+        json={"outcome": "approved", "notes": "looks good"},
+        headers={"Idempotency-Key": "key-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+
+def test_review_wrong_state_is_409(
+    owner_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _fake_task(status="in_progress")
+    monkeypatch.setattr(crud, "get_task", lambda *a, **kw: task)
+
+    def _raise(*a: object, **kw: object) -> None:
+        raise crud.InvalidTaskStateError
+
+    monkeypatch.setattr(crud, "create_task_review", _raise)
+
+    response = owner_client.post(
+        f"/tasks/{task.id}/review",
+        json={"outcome": "approved"},
+        headers={"Idempotency-Key": "key-1"},
+    )
+
+    assert response.status_code == 409
+
+
+def test_review_reassigned_without_remaining_work_is_422(owner_client: TestClient) -> None:
+    # Business_Logic_Security_Cheat_Sheet.md "Validate Combinations" — the field is required for
+    # this specific outcome, enforced by TaskReviewCreate's own model_validator.
+    response = owner_client.post(
+        f"/tasks/{uuid4()}/review",
+        json={"outcome": "reassigned"},
+        headers={"Idempotency-Key": "key-1"},
+    )
+    assert response.status_code == 422
+
+
+def test_review_approved_rejects_billing_fields(owner_client: TestClient) -> None:
+    response = owner_client.post(
+        f"/tasks/{uuid4()}/review",
+        json={"outcome": "approved", "billing_amount": 100},
+        headers={"Idempotency-Key": "key-1"},
+    )
+    assert response.status_code == 422
+
+
+def test_create_issue_requires_idempotency_key_header(employee_client: TestClient) -> None:
+    task = _fake_task(assigned_to=_EMPLOYEE_ID, status="in_progress")
+    response = employee_client.post(f"/tasks/{task.id}/issues", json={"description": "Blocked"})
+    assert response.status_code == 422
+
+
+def test_assigned_employee_can_raise_issue(
+    employee_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _fake_task(assigned_to=_EMPLOYEE_ID, status="in_progress")
+    monkeypatch.setattr(crud, "get_task", lambda *a, **kw: task)
+    from app.models import Issue
+
+    issue = Issue(
+        id=uuid4(),
+        firm_id=_FIRM_ID,
+        task_id=task.id,
+        raised_by=_EMPLOYEE_ID,
+        description="Blocked",
+        status="open",
+        created_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(crud, "create_issue", lambda *a, **kw: issue)
+
+    response = employee_client.post(
+        f"/tasks/{task.id}/issues",
+        json={"description": "Blocked"},
+        headers={"Idempotency-Key": "key-1"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "open"
+
+
+def test_owner_cannot_raise_issue(
+    owner_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _fake_task(status="in_progress")
+    monkeypatch.setattr(crud, "get_task", lambda *a, **kw: task)
+
+    response = owner_client.post(
+        f"/tasks/{task.id}/issues",
+        json={"description": "Blocked"},
+        headers={"Idempotency-Key": "key-1"},
+    )
+
+    assert response.status_code == 403
+
+
 def test_employee_list_is_scoped_server_side(
     employee_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
