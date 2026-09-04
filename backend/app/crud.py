@@ -236,23 +236,40 @@ def update_task_deadline(session: Session, task: Task, deadline: datetime) -> Ta
     return task
 
 
+def _lock_task(session: Session, task: Task) -> Task:
+    """Business_Logic_Security_Cheat_Sheet.md "Use Database Transactions and Locks" — checked
+    directly 2026-09-04, not assumed covered by the Idempotency-Key mechanism (that only dedupes
+    an identical retried key, not two genuinely concurrent requests with different keys, e.g. two
+    tabs both clicking submit). `SELECT ... FOR UPDATE` — the cheat sheet's own first-listed
+    pattern — makes the second racer block until the first commits, so it re-reads the *already
+    updated* status instead of the stale value `task` was fetched with in the route.
+    """
+    return session.exec(
+        select(Task)
+        .where(Task.firm_id == task.firm_id, Task.id == task.id)
+        .with_for_update()
+    ).one()
+
+
 def submit_task(session: Session, task: Task) -> Task:
     """No `session.commit()` — wrapped in `with_idempotency` by the route, same reasoning as
     create_task.
     """
-    if task.status not in ("assigned", "in_progress"):
+    locked = _lock_task(session, task)
+    if locked.status not in ("assigned", "in_progress"):
         raise InvalidTaskStateError
-    task.status = "submitted"
-    task.updated_at = datetime.now(UTC)
-    session.add(task)
-    return task
+    locked.status = "submitted"
+    locked.updated_at = datetime.now(UTC)
+    session.add(locked)
+    return locked
 
 
 def mark_task_billed(session: Session, task: Task) -> Task:
     """No `session.commit()` — wrapped in `with_idempotency` by the route."""
-    if task.task_type != "billing" or task.status not in ("assigned", "in_progress"):
+    locked = _lock_task(session, task)
+    if locked.task_type != "billing" or locked.status not in ("assigned", "in_progress"):
         raise InvalidTaskStateError
-    task.status = "billed"
-    task.updated_at = datetime.now(UTC)
-    session.add(task)
-    return task
+    locked.status = "billed"
+    locked.updated_at = datetime.now(UTC)
+    session.add(locked)
+    return locked
