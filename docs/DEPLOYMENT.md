@@ -273,3 +273,35 @@ Per the standing instruction to check every component against the OWASP skills �
 ---
 
 Reminder, stated once more since it applies to this whole document outside §9: nothing above is a skill citation. It's current-as-of-today research (Railway and code-signing pricing pulled directly this session) plus general infrastructure reasoning — worth an independent check against Railway's/Cloudflare's/Apple's/Microsoft's own current pricing pages before this becomes a real bill, since none of that is pinned to a source document the way `ARCHITECTURE.md`/`DATA_MODEL.md` are.
+
+## 11. Supabase Auth Dashboard Settings — Required Before Go-Live
+
+Found 2026-09-06 during a Phase 4 audit pass, by reading the installed `@supabase/auth-js` type
+definitions directly rather than trusting the frontend code's own comments: two of the password
+controls `ARCHITECTURE.md`'s password-policy section (§ "Password policy... checked against
+`owasp-asvs-5/chapters/v6-authentication.md` §6.2") already decided on are **dashboard/project-level
+settings, not something the frontend code enforces by itself** — easy to assume "done" once the
+client code compiles and ships, when in fact nothing enforces either one until a human flips a
+setting in the real Supabase project (which doesn't exist yet — this is a required step for
+whenever it's created, not a currently-missed one):
+
+- **Minimum password length (ASVS 6.2.1).** `ARCHITECTURE.md` already states Supabase's own default
+  is lower than the required 8 chars and "must be set explicitly in the dashboard" — Authentication →
+  Policies → Password minimum length. No code path enforces this; it's purely a project setting.
+- **"Require current password when changing password" (ASVS 6.2.3).** The frontend passes
+  `current_password` on every `updateUser()` call (`use-set-new-password.ts`, `use-change-password.ts`)
+  expecting Supabase to verify it before allowing the change. Confirmed directly in
+  `node_modules/@supabase/auth-js/dist/module/lib/types.d.ts`'s `UserAttributes.current_password`
+  doc comment: *"This is only ever present when the user is resetting their password and
+  `GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_PASSWORD` is true."* — i.e. **if that GoTrue
+  config flag is left at its default, Supabase silently ignores the field and allows the password
+  change with no current-password check at all**, even though the frontend code looks like it's
+  enforcing one. Must be set (Authentication → Providers/Policies, or `auth.security.update_password_
+  require_reauthentication` if managed via `supabase/config.toml` once the CLI is in use) the moment
+  the real project is created — otherwise ASVS 6.2.3 is silently unmet despite the code suggesting
+  otherwise.
+
+Verify both are actually set (not just assumed) as part of whatever manual smoke-test happens the
+first time `npm run tauri dev` runs against the real project (`binary-meandering-wind.md`'s own
+Step 3 verification checklist) — try changing a password with the wrong current password and confirm
+it's rejected, not just that the happy path works.

@@ -53,7 +53,7 @@ jobs:
       - run: uv sync --frozen --dev
       - run: uv run ruff check .
       - run: uv run pyright
-      - name: Stub Supabase's auth.users (CI-only — the real project already has this)
+      - name: Stub Supabase's auth.users and auth-admin roles (CI-only — the real project already has these)
         run: |
           uv run python -c "
           import psycopg
@@ -66,6 +66,11 @@ jobs:
                   raw_user_meta_data jsonb
               )
           ''')
+          # a8e6def15927's GRANT/REVOKE statements target these Supabase-provisioned roles —
+          # nonexistent on vanilla postgres:16, so alembic upgrade head would error without them.
+          conn.execute('CREATE ROLE supabase_auth_admin')
+          conn.execute('CREATE ROLE authenticated')
+          conn.execute('CREATE ROLE anon')
           "
       - run: uv run alembic upgrade head
       - name: Set fastapi_app's CI-only password
@@ -94,6 +99,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run test
       - run: npm run build
 
   security:
@@ -103,6 +109,12 @@ jobs:
     # workflow file itself, not the app code — a different surface than the backend/frontend jobs.
     permissions:
       contents: read
+      # gitleaks-action calls GET /pulls/{n}/commits on pull_request events to resolve the commit
+      # range to scan — 403s ("Resource not accessible by integration") without this. Confirmed by
+      # the actual failing run, not assumed; granting only `read` (not `write`) per CI_CD_Security_
+      # Cheat_Sheet.md's least-privilege guidance ("access must be justified, not assumed") since
+      # nothing here has shown a need to write back to the PR.
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
