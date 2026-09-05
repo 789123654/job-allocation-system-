@@ -174,6 +174,11 @@ and "meet policy" halves are addressed below.
   password when changing password" section. `API_SPEC.md`'s `POST /auth/set-new-password` (added earlier
   this session) needs updating to require the temporary password as `current_password`, not accept a bare
   `new_password` alone as originally written — the employee already has it, having just used it to log in.
+  **Caveat found 2026-09-06, see `DEPLOYMENT.md` §11:** the frontend passing `current_password` only
+  matters if the project's `GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_PASSWORD` setting is
+  actually turned on — otherwise Supabase silently ignores the field and this control is a no-op
+  despite the code looking correct. Not yet set anywhere since no real project exists yet; tracked
+  as a required go-live step, not done by the code alone.
 - **Breached-password check — decided 2026-09-02: accepted gap for Phase 1.** ASVS 6.2.4/6.2.12 (L1)
   requires checking new passwords against a breached-password list. Supabase Auth supports exactly this via
   the HaveIBeenPwned Pwned Passwords API — but `password-security.md` states plainly: *"Leaked password
