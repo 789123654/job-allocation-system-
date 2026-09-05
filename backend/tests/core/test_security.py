@@ -47,18 +47,23 @@ def test_valid_token_verifies() -> None:
 
 
 def test_wrong_audience_rejected() -> None:
+    # SonarQube S5778: only one call inside pytest.raises, so a bug that made _make_token() itself
+    # raise couldn't be mistaken for verify_access_token correctly rejecting the token.
+    token = _make_token(aud="something-else")
     with pytest.raises(security.InvalidTokenError):
-        security.verify_access_token(_make_token(aud="something-else"))
+        security.verify_access_token(token)
 
 
 def test_wrong_issuer_rejected() -> None:
+    token = _make_token(iss="https://attacker.example/auth/v1")
     with pytest.raises(security.InvalidTokenError):
-        security.verify_access_token(_make_token(iss="https://attacker.example/auth/v1"))
+        security.verify_access_token(token)
 
 
 def test_expired_token_rejected() -> None:
+    token = _make_token(exp=int(time.time()) - 10)
     with pytest.raises(security.InvalidTokenError):
-        security.verify_access_token(_make_token(exp=int(time.time()) - 10))
+        security.verify_access_token(token)
 
 
 def test_algorithm_confusion_rejected() -> None:
