@@ -77,6 +77,14 @@ this trigger doesn't have to rediscover them.
 
 **Explicit scope call, my own judgment applied to the PRD, not a skill-derived decision:** PRD §1.1 says templates could carry "any fields the firm wants to track per job type," but nothing else in the PRD (task creation, dashboards, notifications) actually exercises such per-template custom fields. Building a dynamic `jsonb` custom-fields system now would be speculative — recommend the fixed `name` column only, flag dynamic fields as deferred rather than built. This is the same YAGNI reasoning applied throughout this project, not new.
 
+**ASVS compound-check closed 2026-09-05** — `Input_Validation_Cheat_Sheet.md` was checked when this
+slice was built (2026-09-04), but its ASVS pair wasn't cited alongside it at the time. Checked now:
+`owasp-asvs-5` V2.2.1 ("positive allowlist... or structural/logical-limit comparison") is satisfied
+by `name`'s existing `min_length=1, max_length=200` — a structural limit already in place, nothing
+to add. No combined fields to reason about (V2.2.3 N/A), no multi-step workflow here (V2.3.x N/A),
+and V2.4.1's anti-automation concern is already covered by the existing Cloudflare edge rate
+limiting (`API_SPEC.md` §1). Confirmed compliant, not a gap.
+
 ### `tasks` — standard tasks and billing sub-tasks, one table (reasoning in §5)
 | Column | Type | Notes |
 |---|---|---|
@@ -176,6 +184,12 @@ RLS: `tenant_isolation` pattern, same as every other table — a firm sees only 
 
 **Why now instead of Phase 2, reversing the earlier call:** originally deferred (`ARCHITECTURE.md` §4) on the reasoning that a single, manually-onboarded firm has no lifecycle events worth logging yet. That reasoning breaks the moment a second firm is imminent, not once it actually lands — the cheapest time to add a table is before there's data in the tables around it, and waiting would mean either building it under pressure or missing the second firm's own onboarding, which is itself the first real event worth having in this log. Still deliberately narrow: no firm-lifecycle actions (`firm_deactivated`, `firm_deleted`) yet, because `firms.status` itself has no defined values yet (`ARCHITECTURE.md` §4 offboarding note) — those get added together, when offboarding is actually built, not speculatively now.
 
+**ASVS V16 (Security Logging) compound-check closed 2026-09-05 — checked directly against this table for the first time**, not just indirectly via `DEPLOYMENT.md` §6's separate general-app-logging discussion:
+- **16.2.5 (never log sensitive data), 16.4.1 (log injection)** — confirmed compliant by construction: `_write_audit_log` (`crud.py`) takes only `action` (DB-`CHECK`-constrained enum) and `target_id` (a UUID FK) — there is no free-text/payload column at all, so neither a secret nor unsanitized user input can ever land in this table.
+- **16.4.2 (logs protected from unauthorized access, can't be modified)** — confirmed compliant, and stronger than it looks from the schema alone: the migration's `GRANT SELECT, INSERT ON audit_log TO fastapi_app` means the app's own DB role has no `UPDATE`/`DELETE` privilege on this table at all — even a compromised app can't tamper with an existing row, not just "the code doesn't currently do it."
+- **16.4.3 (logs shipped to a logically separate system)** — genuine gap, not met: `audit_log` lives in the same Postgres database as the application data it audits, so a full database compromise takes the log with it. Real per ASVS L2, but disproportionate to build now (log-shipping infra for a ~10-user, one-to-two-firm pilot) — stated as a deliberate Phase-1 gap, same footing as the breached-password-check deferral (`ARCHITECTURE.md` §4), not silently accepted.
+- **16.1.1 (documented retention period)** — made explicit here rather than left implicit: retention is *indefinite* (the "never modified or removed" line above is the retention policy, not just a tamper-resistance note).
+
 ### `access_denials` — failed authorization attempts, append-only (added 2026-09-05)
 | Column | Type | Notes |
 |---|---|---|
@@ -194,6 +208,8 @@ RLS: `tenant_isolation` pattern, same as every other table.
 **Structural limit, stated so it isn't assumed to cover more than it does:** a true *cross-tenant* access attempt is invisible at this layer. `get_task`/`get_notification` query with no `firm_id` filter at all — RLS itself silently scopes the result to the actor's own tenant, so a task ID belonging to a different firm produces the exact same "not found" as an ID that never existed; the app code has no way to tell the two apart, and this table only receives what the app code can see. This table therefore records same-tenant IDOR and role-check denials, not cross-tenant probing — that case stays covered by RLS alone (`ARCHITECTURE.md` §5's defense-in-depth boundary), with no app-level record. Making cross-tenant attempts visible would require a privileged, RLS-bypassing lookup purely for detection — a materially different, more sensitive feature, not built here.
 
 **Deliberately excluded:** `require_password_set`'s 403 (`deps.py`) — a forced Set-New-Password gate every new employee hits on first login, not a violation attempt. Logging it would be noise, not signal (`Authorization_Cheat_Sheet.md`'s own caution against over-logging: CWE-778/CWE-779, both too little and too much logging are named weaknesses).
+
+**Relationship to `DEPLOYMENT.md` §6's Railway/Sentry logging plan, reconciled 2026-09-05:** that plan already lists "authorization failures (403/404s)" as something the general application log (stdout/stderr, 7-day retention) captures — written before this table existed, and not cross-checked against it when this table was built. Not a duplication once reconciled: Railway/Sentry stays the real-time catch-all, covering cases this table structurally can't (genuine 404s with nothing to log, 401s, anything not tied to an authenticated actor). This table is the narrower, durable, tenant-scoped, permanently-retained record for the one subset it actually covers — same-tenant IDOR and role/ownership denials only, per the structural limit above. Same division of labor as `audit_log` already has with that section.
 
 **Why a separate table instead of extending `audit_log`, decided 2026-09-05:** `audit_log.target_id` is a composite FK scoped to `(firm_id, target_id) → profiles(firm_id, id)` — it can only reference a profile, and only within the same firm as the log row. A denial can target a non-profile resource (a task) and, structurally, could involve a target outside the actor's own firm — both break that FK outright. Forcing this in would mean either dropping the FK (weakening the guarantee on `audit_log`'s existing four actions too) or bolting on a second, unconstrained column — at which point it isn't really the same table. `audit_log`'s own stated scope ("who did this admin action" — a *success* record) is also a different semantic category from a denial record; mixing them means every future reader has to remember which kind of row they're looking at. Confirmed against `Multi_Tenant_Security_Cheat_Sheet.md` §8 ("Monitor for cross-tenant access attempts... tenant-isolated audit trails") and ASVS 16.3.2 (L2, failed authorization attempts logged) before building — both describe this as its own concern, not a rider on general audit logging.
 

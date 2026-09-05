@@ -197,6 +197,16 @@ failures (403/404s), workflow-state-violation attempts (409s — the exact "out-
 `API_SPEC.md` §1 already names), and unhandled exceptions. Admin actions already have a home
 (`audit_log`, `DATA_MODEL.md`) — not duplicated here.
 
+**Reconciled 2026-09-05, after `access_denials` (`DATA_MODEL.md`) was built without cross-checking
+this section first — a real process gap, caught on self-audit, not a design conflict once checked.**
+Same relationship as `audit_log` above, not a duplication: this section's "authorization failures
+(403/404s)" line still stands as-is for Railway/Sentry — it's the real-time, catch-all layer, and it
+covers cases `access_denials` structurally can't (genuine 404s with no denial to log, 401s, anything
+not tied to an authenticated actor). `access_denials` is the narrower, durable, tenant-scoped,
+permanently-retained counterpart for one specific subset of that same category — same-tenant IDOR and
+role/ownership denials only (its own "structural limit" note explains why cross-tenant attempts stay
+outside even that). Both should exist; neither makes the other redundant.
+
 **Error tracking — Sentry, free Developer plan.** Verified directly: 5,000 errors/month, 1 user, free
 forever — comfortably covers pilot-scale volume. The 1-user limit is fine while you're the one monitoring
 this; revisit once the firm itself needs its own visibility. This is also where ASVS 16.5.1 actually gets
