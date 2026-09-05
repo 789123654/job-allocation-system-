@@ -1,3 +1,11 @@
+import { RouterProvider } from "react-router-dom";
+import { Provider } from "@/app/provider";
+import { router } from "@/app/router";
+
 export function App() {
-  return <div>CA Firm Practice Management — scaffolding, Phase 0</div>;
+  return (
+    <Provider>
+      <RouterProvider router={router} />
+    </Provider>
+  );
 }

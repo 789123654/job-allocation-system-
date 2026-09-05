@@ -53,7 +53,7 @@ jobs:
       - run: uv sync --frozen --dev
       - run: uv run ruff check .
       - run: uv run pyright
-      - name: Stub Supabase's auth.users (CI-only — the real project already has this)
+      - name: Stub Supabase's auth.users and auth-admin roles (CI-only — the real project already has these)
         run: |
           uv run python -c "
           import psycopg
@@ -66,6 +66,11 @@ jobs:
                   raw_user_meta_data jsonb
               )
           ''')
+          # a8e6def15927's GRANT/REVOKE statements target these Supabase-provisioned roles —
+          # nonexistent on vanilla postgres:16, so alembic upgrade head would error without them.
+          conn.execute('CREATE ROLE supabase_auth_admin')
+          conn.execute('CREATE ROLE authenticated')
+          conn.execute('CREATE ROLE anon')
           "
       - run: uv run alembic upgrade head
       - name: Set fastapi_app's CI-only password
@@ -94,6 +99,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run test
       - run: npm run build
 
   security:
