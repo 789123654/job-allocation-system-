@@ -28,6 +28,57 @@ def _hash_request(endpoint: str, body: dict[str, Any]) -> str:
     return hashlib.sha256(f"{endpoint}:{canonical}".encode()).hexdigest()
 
 
+def reject_if_idempotency_key_used(
+    session: Session, actor: Profile, idempotency_key: str, endpoint: str
+) -> None:
+    """For an endpoint whose response is a one-time secret, where `with_idempotency`'s cache-
+    and-replay would persist it past its single intended transmission (API_SPEC.md §3) — this
+    only dedupes: a retry gets 409, never the original response. Call before the real work; call
+    `record_idempotency_key` after, in the same transaction as that work's own commit — moved out
+    of employees.py's reset-password route (2026-09-05) to satisfy CODING_STRUCTURE.md's "route
+    calls crud.py [or this module] only, no inline queries," same rule every other slice follows.
+    """
+    existing = session.exec(
+        select(IdempotencyKey).where(
+            IdempotencyKey.firm_id == actor.firm_id,
+            IdempotencyKey.actor_id == actor.id,
+            IdempotencyKey.idempotency_key == idempotency_key,
+            IdempotencyKey.endpoint == endpoint,
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Already processed with this Idempotency-Key — the response was shown once and "
+            "cannot be retrieved again; retry with a new Idempotency-Key for a new one.",
+        )
+
+
+def record_idempotency_key(
+    session: Session,
+    actor: Profile,
+    idempotency_key: str,
+    endpoint: str,
+    redacted_response_body: dict[str, Any],
+) -> None:
+    """Pairs with `reject_if_idempotency_key_used` — session.add() only, no commit, so it lands in
+    the caller's own transaction alongside the real work's writes (same reasoning as
+    `with_idempotency`'s own handler contract).
+    """
+    session.add(
+        IdempotencyKey(
+            firm_id=actor.firm_id,
+            actor_id=actor.id,
+            idempotency_key=idempotency_key,
+            endpoint=endpoint,
+            request_hash="",  # no request body ever varies on this class of bodyless POST
+            response_status=status.HTTP_200_OK,
+            response_body=redacted_response_body,
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
 def with_idempotency(
     session: Session,
     actor: Profile,

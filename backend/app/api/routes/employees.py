@@ -1,16 +1,14 @@
-from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import select
 from supabase_auth.errors import AuthApiError
 
 from app import crud
 from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
-from app.models import IdempotencyKey
+from app.core.idempotency import record_idempotency_key, reject_if_idempotency_key_used
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -125,33 +123,15 @@ def reset_password(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found")
 
     endpoint = f"POST /employees/{employee_id}/reset-password"
-    existing = session.exec(
-        select(IdempotencyKey).where(
-            IdempotencyKey.firm_id == actor.firm_id,
-            IdempotencyKey.actor_id == actor.id,
-            IdempotencyKey.idempotency_key == idempotency_key,
-            IdempotencyKey.endpoint == endpoint,
-        )
-    ).first()
-    if existing is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "Already processed with this Idempotency-Key — the generated password was shown "
-            "once and cannot be retrieved again; retry with a new Idempotency-Key for a new one.",
-        )
+    reject_if_idempotency_key_used(session, actor, idempotency_key, endpoint)
 
     password = crud.reset_employee_password(session, actor, employee)
-    session.add(
-        IdempotencyKey(
-            firm_id=actor.firm_id,
-            actor_id=actor.id,
-            idempotency_key=idempotency_key,
-            endpoint=endpoint,
-            request_hash="",  # no request body ever varies on this bodyless POST
-            response_status=status.HTTP_200_OK,
-            response_body={"generated_password": "[redacted — shown once, not cached]"},
-            created_at=datetime.now(UTC),
-        )
+    record_idempotency_key(
+        session,
+        actor,
+        idempotency_key,
+        endpoint,
+        {"generated_password": "[redacted — shown once, not cached]"},
     )
     try:
         session.commit()

@@ -13,7 +13,11 @@ import pytest
 from fastapi import HTTPException
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.core.idempotency import with_idempotency
+from app.core.idempotency import (
+    record_idempotency_key,
+    reject_if_idempotency_key_used,
+    with_idempotency,
+)
 from app.models import IdempotencyKey, Profile
 
 _FIRM_ID = uuid4()
@@ -103,3 +107,48 @@ def test_different_actor_same_key_does_not_collide(session: Session) -> None:
 
     status_code, _ = with_idempotency(session, _actor(), "key-1", "POST /tasks", {}, handler)
     assert status_code == 201  # a fresh actor, not a replay — handler-derived result either way
+
+
+def test_reject_if_idempotency_key_used_allows_first_use(session: Session) -> None:
+    actor = _actor()
+    reject_if_idempotency_key_used(session, actor, "key-1", "POST /employees/x/reset-password")
+    # no exception raised — nothing recorded yet either, since record_idempotency_key is separate
+
+
+def test_reject_if_idempotency_key_used_rejects_replay(session: Session) -> None:
+    actor = _actor()
+    endpoint = "POST /employees/x/reset-password"
+    reject_if_idempotency_key_used(session, actor, "key-1", endpoint)
+    record_idempotency_key(session, actor, "key-1", endpoint, {"generated_password": "[redacted]"})
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        reject_if_idempotency_key_used(session, actor, "key-1", endpoint)
+
+    assert exc_info.value.status_code == 409
+
+
+def test_reject_if_idempotency_key_used_does_not_replay_the_response(session: Session) -> None:
+    # The whole point of this pair vs. with_idempotency: a retry must never get the original
+    # response body back, only a 409 — a real one-time secret must not become retrievable twice.
+    actor = _actor()
+    endpoint = "POST /employees/x/reset-password"
+    reject_if_idempotency_key_used(session, actor, "key-1", endpoint)
+    record_idempotency_key(session, actor, "key-1", endpoint, {"generated_password": "s3cr3t"})
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        reject_if_idempotency_key_used(session, actor, "key-1", endpoint)
+
+    assert "s3cr3t" not in str(exc_info.value.detail)
+
+
+def test_record_idempotency_key_different_actor_same_key_does_not_collide(
+    session: Session,
+) -> None:
+    endpoint = "POST /employees/x/reset-password"
+    actor_a, actor_b = _actor(), _actor()
+    record_idempotency_key(session, actor_a, "key-1", endpoint, {"generated_password": "a"})
+    session.commit()
+
+    reject_if_idempotency_key_used(session, actor_b, "key-1", endpoint)  # no exception — fresh
