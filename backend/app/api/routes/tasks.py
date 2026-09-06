@@ -191,15 +191,21 @@ def create_task(
     idempotency_key: IdempotencyKeyHeader,
 ) -> JSONResponse:
     def _handler() -> tuple[int, dict[str, Any]]:
-        task = crud.create_task(
-            session,
-            actor,
-            body.title,
-            body.description,
-            body.job_type_id,
-            body.assigned_to,
-            body.deadline,
-        )
+        try:
+            task = crud.create_task(
+                session,
+                actor,
+                body.title,
+                body.description,
+                body.job_type_id,
+                body.assigned_to,
+                body.deadline,
+            )
+        except crud.UnknownAssigneeError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "assigned_to must be an active employee of this firm",
+            ) from exc
         session.flush()  # assigns task.id within the still-open transaction, before commit
         return status.HTTP_201_CREATED, TaskOut.from_task(task).model_dump(mode="json")
 
@@ -320,6 +326,11 @@ def review_task(
         except crud.InvalidTaskStateError as exc:
             raise HTTPException(
                 status.HTTP_409_CONFLICT, "Task cannot be reviewed from its current status"
+            ) from exc
+        except crud.UnknownAssigneeError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "assigned_to must be an active employee of this firm",
             ) from exc
         session.flush()  # assigns the linked billing task's id, if any, before the response
         return status.HTTP_200_OK, TaskOut.from_task(updated).model_dump(mode="json")
