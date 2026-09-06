@@ -322,3 +322,27 @@ it's rejected, not just that the happy path works.
   `tests/core/test_security.py`'s token fixture, which currently signs with a 2048-bit RSA key/RS256,
   to an EC key/ES256 to match) — do this as a real, verified follow-up once the project exists, not a
   guess made now that could otherwise silently break every login if the real project ends up on RS256.
+
+## 12. Tauri CSP `connect-src` — Real API Origin Required Before a Production Build
+
+Found 2026-09-07 during a Phase 4 checklist-backed audit pass: `frontend/src-tauri/tauri.conf.json`'s
+`app.security.csp.connect-src` currently reads `'self' ipc: http://ipc.localhost http://localhost:8000
+https://*.supabase.co` — the `http://localhost:8000` entry is the local dev FastAPI backend
+(`tauri-official/chapters/security-capabilities.md`'s own suggested policy for this project names it
+as `https://<api-domain>`, explicitly flagged there as "fill in ... once those are fixed"). §2 above
+already places the real backend on Railway behind Cloudflare (`Full (strict)` TLS) — an HTTPS origin
+that doesn't exist in this CSP at all yet, since no real deployment has happened.
+
+**Not a live security hole today** (this is a desktop app not yet built for release, and
+`http://localhost:8000` can only ever resolve to something on the same machine running the app — no
+remote attacker gains anything from it being present), but a real availability gap if missed: shipping
+a production build with this CSP unedited would have every API call silently blocked by the webview's
+own CSP enforcement, discovered only after distribution, not caught by any existing check (`npm run
+build` compiles fine regardless — CSP violations are a runtime browser/webview behavior, not a build
+error).
+
+**Required before the first production build** (Phase 6, Distribution, per `CODING_STRUCTURE.md` §4
+item 7): replace `http://localhost:8000` in `connect-src` with the real Railway/Cloudflare HTTPS origin
+once it exists. Verify by an actual failed-then-fixed request in a production-configured build, not by
+inspection alone — a CSP violation is silent (no thrown error the app code can catch), so "the API call
+just doesn't work" is the only symptom without an explicit check.
