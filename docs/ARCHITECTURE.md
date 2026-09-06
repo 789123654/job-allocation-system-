@@ -237,6 +237,20 @@ pattern exactly) — deferred until a real need shows up, not built speculativel
   actual row deletion as a separate scheduled pass, is the recommended order in the same file — supports
   recoverability during the grace window and avoids a slow cascading delete blocking on every table's foreign
   keys at once.
+- **`profiles.id` has no FK to `auth.users(id)` — found 2026-09-06, a real gap for this decommissioning
+  path specifically, not for anything employee-facing.** `supabase-official/auth/managing-user-data.md`'s
+  own reference schema is `id uuid not null references auth.users on delete cascade`, precisely so
+  deleting an `auth.users` row (via `auth.admin.deleteUser()`) cascades to the matching `public.profiles`
+  row automatically. This project's `profiles.id` (migration `cb67cdb7538a`) was never given that FK,
+  despite the migration's own comment citing that exact doc. **Not an employee-deletion gap** — employees
+  are only ever deactivated, never deleted (PRD §2.1, `API_SPEC.md`'s `PATCH /employees/{id}`), so
+  `auth.admin.deleteUser()` is never called from that feature in any phase. It matters only here: the
+  eventual scheduled hard-delete pass above, once it starts actually removing a firm's employees' Supabase
+  Auth accounts, would leave orphaned `profiles` rows behind without this FK. **Deliberately not fixed now**
+  — every test that creates a `Profile` row does so directly (a bare `uuid4()`, no matching `auth.users`
+  row), so adding the FK today would need rewriting those fixtures across every test file that touches
+  `profiles`, not just a one-line migration edit. Add the FK as part of building the Phase 2 hard-delete
+  pass itself, when those fixtures are being touched anyway for the decommissioning work.
 - **Per-tenant data export before deletion is a real product question, not just a technical one** — a CA
   firm's task and billing records are exactly the kind of thing a firm would reasonably expect back before
   its data is gone for good. `postgres-multitenant/operations.md` notes `pg_dump` has no native per-tenant
@@ -248,9 +262,10 @@ pattern exactly) — deferred until a real need shows up, not built speculativel
 **Net shape for Phase 2, once there's a firm actually leaving:** add real values to `firms.status`
 (active/suspended/offboarding/deleted), gate login on it, extend the `audit_log` table already built
 (`DATA_MODEL.md`) with the firm-level actions it deliberately excludes today (`firm_deactivated`,
-`firm_deleted`), decide the data-export question with the firm's actual contract terms in hand, and only
-then build the scheduled hard-delete pass. Nothing here changes Phase 1's schema beyond what's already
-built for the audit trail above.
+`firm_deleted`), decide the data-export question with the firm's actual contract terms in hand, add the
+`profiles.id → auth.users(id) ON DELETE CASCADE` FK above (and the matching test-fixture updates it
+requires) as part of that same work, and only then build the scheduled hard-delete pass. Nothing here
+changes Phase 1's schema beyond what's already built for the audit trail above.
 
 ## 5. Multi-Tenancy Strategy
 

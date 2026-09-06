@@ -13,7 +13,19 @@ from app.core.config import settings
 
 logger = logging.getLogger("app")
 
-app = FastAPI(title="CA Firm Practice Management API")
+class _UTF8JSONResponse(JSONResponse):
+    """Starlette's JSONResponse never appends `charset` to Content-Type — it only does that for
+    `text/*` media types (checked directly in starlette/responses.py, not assumed). ASVS 5 §4.1.1
+    requires an explicit charset on every response with a body; Error_Handling_Cheat_Sheet.md's own
+    examples set `application/json; charset=UTF-8` explicitly for exactly this reason. Applied as
+    the app-wide default so every route (Phase 1's /health today, every later resource's responses)
+    gets this for free, not just the problem+json error responses below.
+    """
+
+    media_type = "application/json; charset=utf-8"
+
+
+app = FastAPI(title="CA Firm Practice Management API", default_response_class=_UTF8JSONResponse)
 
 # Explicit allowlist only — never "*", never "*" + credentials (API_SPEC.md §1).
 app.add_middleware(
@@ -53,7 +65,7 @@ def _problem(status_code: int, detail: str, instance: str) -> JSONResponse:
     slug = HTTPStatus(status_code).phrase.lower().replace(" ", "-")
     return JSONResponse(
         status_code=status_code,
-        media_type="application/problem+json",
+        media_type="application/problem+json; charset=utf-8",
         content={
             "type": f"/problems/{slug}",
             "title": HTTPStatus(status_code).phrase,
