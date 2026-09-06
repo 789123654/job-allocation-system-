@@ -147,3 +147,27 @@ session doesn't rediscover the same failure mode from scratch.
 Read `docs/CODING_STRUCTURE.md` in full. It has the repo layout, the phase-by-phase build order (cross-
 cutting scaffolding once, then one full vertical slice per resource — never horizontal layers across
 everything at once), and the per-slice checklist that folds §3/§5 above directly into the coding workflow.
+
+## 7. Security audit discipline — checklist + hook mechanism
+
+Every phase's security audit (Phase 1 onward) runs through a single evidence-based mechanism, not ad hoc
+review. **Before claiming a phase's security audit is done, read and follow
+`docs/SECURITY_AUDIT_CHECKLIST.md` in full** — it defines the required sections (scope, what was checked,
+findings, fixes, what's documented-not-fixed and why) and states plainly that "a line that just says 'done'
+or 'yes' isn't evidence and doesn't count."
+
+- A global `Stop` hook (`~/.claude/hooks/audit-checklist-guard.js`) enforces the checklist's `Current Audit`
+  block is non-blank before a turn can end while an audit is `status: in-progress`. It only catches an
+  interrupted or premature stop — it cannot and does not judge whether a filled-in field is actually true.
+  Treat a filled field as "investigation happened," not "conclusion verified" (the checklist file says this
+  about itself; it's not this file editorializing).
+- Set `status: in-progress` with real `phase`/`scope_files`/`date`/`commit` *before* starting analysis, not
+  after — genuinely engage the in-progress state, don't write directly to Completed Audits. (A hook-complete
+  audit can still be shallow; the hook is a safety net against stopping early, not a substitute for the work.)
+- Apply `docs/skill-verification-discipline.md`'s failure modes 6 and 8 on every audit: grep the whole
+  `owasp-cheatsheets`/`owasp-asvs-5` directories by the mechanism's real keywords, not just the files whose
+  titles sound relevant; and actually produce evidence (real command output, real grep hits, real test
+  results) rather than narrating about having checked something.
+- `docs/SECURITY_AUDIT_CHECKLIST.md`'s own Section F (`/code-review ultra`, a separate multi-agent cloud
+  review) is a periodic independent check on this same discipline, not a replacement for it — run it every
+  few phases, not every phase.
