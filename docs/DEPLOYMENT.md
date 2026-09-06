@@ -305,3 +305,20 @@ Verify both are actually set (not just assumed) as part of whatever manual smoke
 first time `npm run tauri dev` runs against the real project (`binary-meandering-wind.md`'s own
 Step 3 verification checklist) — try changing a password with the wrong current password and confirm
 it's rejected, not just that the happy path works.
+
+- **JWT signing algorithm — choose ES256, not RS256, when creating the real project.** Found
+  2026-09-06 auditing Phase 1: `owasp-asvs-5/patterns.md`'s approved-algorithm table marks
+  RSASSA-PKCS1-v1.5 (RS256) **Disallowed** outright (ECDSA/ES256 is Approved); separately, even where
+  RSA is allowed, ASVS 11.2.3's ≥128-bit-security-level bar needs a 3072-bit RSA key — the patterns.md
+  key-size table puts 2048-bit RSA at only ~112-bit security. (Supabase's own docs weren't checked for
+  which RSA key size they'd actually generate if RS256 were chosen — confirm this against the real
+  project's JWKS directly if RS256 is ever considered, rather than assuming 2048-bit.) Supabase's
+  own docs recommend ES256 over RSA for exactly this reason ("faster... while providing comparable
+  security... we recommend using the P-256 elliptic curve instead") and let the signing algorithm be
+  chosen per-project in the dashboard — nothing forces a default either way. `backend/app/core/
+  security.py`'s `_ALGORITHMS` currently allowlists both `RS256` and `ES256` for verification, kept
+  broad because no real project has existed yet to confirm which one it actually issues. Once the
+  real project is created and set to ES256, narrow `_ALGORITHMS` to `["ES256"]` only (and update
+  `tests/core/test_security.py`'s token fixture, which currently signs with a 2048-bit RSA key/RS256,
+  to an EC key/ES256 to match) — do this as a real, verified follow-up once the project exists, not a
+  guess made now that could otherwise silently break every login if the real project ends up on RS256.

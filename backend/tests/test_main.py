@@ -40,7 +40,8 @@ def test_unhandled_exception_returns_problem_json_not_a_raw_500(client: TestClie
     response = client.get("/employees")
 
     assert response.status_code == 500
-    assert response.headers["content-type"] == "application/problem+json"
+    # ASVS 5 §4.1.1: every response with a body states an explicit charset.
+    assert response.headers["content-type"] == "application/problem+json; charset=utf-8"
     body = response.json()
     assert body["detail"] == "An unexpected error occurred"
     assert "boom" not in body["detail"]  # the real exception message must never reach the client

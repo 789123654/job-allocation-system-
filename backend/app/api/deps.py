@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -10,6 +11,8 @@ from app import crud
 from app.core.db import get_session
 from app.core.security import InvalidTokenError, verify_access_token
 from app.models import Profile
+
+logger = logging.getLogger("app.auth")
 
 SessionDep = Annotated[Session, Depends(get_session)]
 # Shared across every Idempotency-Key route (tasks/issues/employees) — was the literal header
@@ -33,13 +36,19 @@ def get_current_profile(
     """
     try:
         claims = verify_access_token(credentials.credentials)
-    except InvalidTokenError:
+    except InvalidTokenError as exc:
+        # ASVS 5 §16.3.1 / Multi_Tenant_Security_Cheat_Sheet.md §8: authentication operations must
+        # be logged, success and failure — this was the one gap this app had no logging for at all
+        # (grep confirmed the only prior logger call anywhere was main.py's generic 500 handler).
+        # No token contents logged, only that verification failed and why (never the token itself).
+        logger.warning("Authentication failed: invalid or expired token (%s)", exc)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token") from None
 
     app_metadata = claims.get("app_metadata", {})
     firm_id = app_metadata.get("firm_id")
     user_id = claims.get("sub")
     if not firm_id or not user_id:
+        logger.warning("Authentication failed: token missing firm_id/sub claims")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token missing required claims")
 
     # Parameterized, not string-interpolated — set_config() is a normal SQL function, unlike the
@@ -56,8 +65,10 @@ def get_current_profile(
 
     profile = session.exec(select(Profile).where(Profile.id == UUID(user_id))).first()
     if profile is None or not profile.is_active:
+        logger.warning("Authentication failed: profile %s inactive or not found", user_id)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account inactive or not found")
 
+    logger.debug("Authentication succeeded for profile %s", user_id)
     return profile
 
 
