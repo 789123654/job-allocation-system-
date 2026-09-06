@@ -25,7 +25,10 @@
         "connect-src": "'self' ipc: http://ipc.localhost http://localhost:8000 https://*.supabase.co",
         "font-src": "https://fonts.gstatic.com",
         "style-src": "'self' https://fonts.googleapis.com",
-        "img-src": "'self' asset: http://asset.localhost data:"
+        "img-src": "'self' asset: http://asset.localhost data:",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "frame-ancestors": "'none'"
       }
     }
   },
