@@ -157,16 +157,31 @@ def reset_employee_password(session: Session, actor: Profile, employee: Profile)
     with its own redacted `IdempotencyKey` insert in one transaction. Not the shared
     `with_idempotency` helper — that one caches and replays the exact response body, which would
     persist this one-time password past its single intended transmission (API_SPEC.md §3).
+
+    Row-locks `employee` first (`Business_Logic_Security_Cheat_Sheet.md`'s "Use Database
+    Transactions and Locks", same reasoning as `_lock_task`/`_lock_issue`) — the Idempotency-Key
+    dedup check is keyed on `(firm_id, actor_id, key, endpoint)`, not on `employee_id`, so it
+    doesn't stop two *different* keys hitting reset-password for the *same* employee
+    concurrently. Locking before the Admin API call, not after, makes the second caller block
+    until the first has fully finished (including its own Supabase call and commit) — so
+    whichever response comes back always reflects the password that's actually live, instead of
+    a caller occasionally receiving a password a second, later-committing call already overwrote.
     """
+    locked = session.exec(
+        select(Profile)
+        .where(Profile.firm_id == employee.firm_id, Profile.id == employee.id)
+        .with_for_update()
+    ).one()
+
     password = _generate_password()
-    admin_auth.update_user_by_id(str(employee.id), {"password": password})
+    admin_auth.update_user_by_id(str(locked.id), {"password": password})
 
     now = datetime.now(UTC)
-    employee.must_change_password = True
-    employee.last_reset_by = actor.id
-    employee.last_reset_at = now
-    session.add(employee)
-    _write_audit_log(session, actor, action="password_reset", target_id=employee.id)
+    locked.must_change_password = True
+    locked.last_reset_by = actor.id
+    locked.last_reset_at = now
+    session.add(locked)
+    _write_audit_log(session, actor, action="password_reset", target_id=locked.id)
     return password
 
 
