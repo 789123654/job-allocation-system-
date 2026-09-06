@@ -46,6 +46,28 @@ def _actor() -> Profile:
     )
 
 
+def _employee(session: Session, **overrides: object) -> Profile:
+    # crud._validate_assignee (Phase 3 audit finding, Business_Logic_Security_Cheat_Sheet.md) now
+    # requires `assigned_to` to resolve to a real, active employee row — a bare uuid4() (what these
+    # reassignment tests used before that check existed) correctly fails it now.
+    defaults: dict[str, object] = {
+        "id": uuid4(),
+        "firm_id": _FIRM_ID,
+        "role": "employee",
+        "full_name": "Employee",
+        "email": "employee@example.com",
+        "is_active": True,
+        "must_change_password": False,
+        "created_at": datetime.now(UTC),
+    }
+    defaults.update(overrides)
+    employee = Profile(**defaults)  # pyright: ignore[reportArgumentType]
+    session.add(employee)
+    session.commit()
+    session.refresh(employee)
+    return employee
+
+
 def _task(session: Session, **overrides: object) -> Task:
     defaults: dict[str, object] = {
         "firm_id": _FIRM_ID,
@@ -80,7 +102,7 @@ def test_review_approved_completes_task(session: Session) -> None:
 def test_review_reassigned_sets_last_reassignment_fields(session: Session) -> None:
     task = _task(session, status="submitted")
     actor = _actor()
-    new_employee = uuid4()
+    new_employee = _employee(session)
 
     review, updated = crud.create_task_review(
         session,
@@ -89,7 +111,7 @@ def test_review_reassigned_sets_last_reassignment_fields(session: Session) -> No
         "reassigned",
         "needs more work",
         "finish the appendix",
-        new_employee,
+        new_employee.id,
         None,
         None,
         None,
@@ -98,7 +120,7 @@ def test_review_reassigned_sets_last_reassignment_fields(session: Session) -> No
     session.commit()
 
     assert updated.status == "in_progress"
-    assert updated.assigned_to == new_employee
+    assert updated.assigned_to == new_employee.id
     assert updated.last_reassignment_source == "review"
     assert updated.last_reassignment_remaining_work == "finish the appendix"
     assert review.remaining_work_description == "finish the appendix"
@@ -107,7 +129,7 @@ def test_review_reassigned_sets_last_reassignment_fields(session: Session) -> No
 def test_review_billing_creates_linked_task(session: Session) -> None:
     task = _task(session, status="submitted")
     actor = _actor()
-    employee = uuid4()
+    employee = _employee(session)
 
     review, updated = crud.create_task_review(
         session,
@@ -116,7 +138,7 @@ def test_review_billing_creates_linked_task(session: Session) -> None:
         "billing",
         None,
         None,
-        employee,
+        employee.id,
         datetime.now(UTC),
         "Invoice the client",
         500.0,
@@ -132,6 +154,16 @@ def test_review_billing_creates_linked_task(session: Session) -> None:
     assert billing_task.task_type == "billing"
     assert billing_task.parent_task_id == task.id
     assert billing_task.billing_amount == 500.0
+
+
+def test_review_reassigned_rejects_unknown_assignee(session: Session) -> None:
+    task = _task(session, status="submitted")
+    actor = _actor()
+
+    with pytest.raises(crud.UnknownAssigneeError):
+        crud.create_task_review(
+            session, actor, task, "reassigned", None, "finish it", uuid4(), None, None, None, None
+        )
 
 
 def test_review_wrong_state_raises(session: Session) -> None:
@@ -217,7 +249,7 @@ def test_resolve_issue_reassigned_uses_shared_reassignment_path(session: Session
     task = _task(session, status="in_progress")
     issue = _issue(session, task)
     actor = _actor()
-    new_employee = uuid4()
+    new_employee = _employee(session)
 
     crud.resolve_issue(
         session,
@@ -227,16 +259,27 @@ def test_resolve_issue_reassigned_uses_shared_reassignment_path(session: Session
         "give to someone else",
         "finish the remaining checks",
         None,
-        new_employee,
+        new_employee.id,
     )
     session.commit()
     session.refresh(task)
 
-    assert task.assigned_to == new_employee
+    assert task.assigned_to == new_employee.id
     assert task.last_reassignment_source == "issue"
     assert task.last_reassignment_remaining_work == "finish the remaining checks"
     assert issue.remaining_work_description == "finish the remaining checks"
     assert task.status == "in_progress"
+
+
+def test_resolve_issue_reassigned_rejects_unknown_assignee(session: Session) -> None:
+    task = _task(session, status="in_progress")
+    issue = _issue(session, task)
+    actor = _actor()
+
+    with pytest.raises(crud.UnknownAssigneeError):
+        crud.resolve_issue(
+            session, actor, issue, "reassigned", "give to someone else", "finish it", None, uuid4()
+        )
 
 
 def test_resolve_issue_already_resolved_raises(session: Session) -> None:

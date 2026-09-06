@@ -74,6 +74,11 @@ def resolve_issue(
             raise HTTPException(
                 status.HTTP_409_CONFLICT, "Issue has already been resolved"
             ) from exc
+        except crud.UnknownAssigneeError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "assigned_to must be an active employee of this firm",
+            ) from exc
         return status.HTTP_200_OK, IssueOut.from_issue(resolved).model_dump(mode="json")
 
     status_code, response_body = with_idempotency(

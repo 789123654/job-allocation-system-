@@ -43,6 +43,19 @@ class InvalidIssueStateError(Exception):
     """
 
 
+class UnknownAssigneeError(Exception):
+    """Raised when a request-body `assigned_to` doesn't resolve to an active employee of the
+    caller's own firm — Business_Logic_Security_Cheat_Sheet.md's "Never accept a user ID... from
+    the request body unless the request is explicitly an administrative action by a privileged
+    caller, and even then the value has to be validated against what the caller is allowed to
+    manage" (checked fresh this pass, Phase 3 audit). Previously this was left entirely to the
+    `tasks`/`issues` tables' own `(firm_id, assigned_to) REFERENCES profiles` composite FK — real
+    tenant-boundary enforcement, but a raw `IntegrityError` on violation surfaces as a generic 500
+    (main.py's catch-all handler), not a clean 4xx, and the FK alone doesn't stop an Owner assigning
+    work to a fellow Owner or a deactivated employee, neither of which can ever act on it.
+    """
+
+
 def _generate_password() -> str:
     # secrets.token_urlsafe: CSPRNG, not `random` (ASVS 6.4.1's "securely random"). 16 bytes = 128
     # bits, well past the length policy in ARCHITECTURE.md §4.
@@ -132,6 +145,20 @@ def get_employee(session: Session, employee_id: UUID) -> Profile | None:
     return session.exec(
         select(Profile).where(Profile.id == employee_id, Profile.role == "employee")
     ).first()
+
+
+def _validate_assignee(session: Session, firm_id: UUID, employee_id: UUID) -> None:
+    """See `UnknownAssigneeError`. Scoped to `firm_id` explicitly (not just relying on RLS's
+    `app.current_tenant`) since the caller is always the acting Owner's own firm_id here — belt
+    and suspenders with the DB's own composite FK, not a replacement for it.
+    """
+    employee = session.exec(
+        select(Profile).where(
+            Profile.firm_id == firm_id, Profile.id == employee_id, Profile.role == "employee"
+        )
+    ).first()
+    if employee is None or not employee.is_active:
+        raise UnknownAssigneeError
 
 
 def set_employee_active(
@@ -271,6 +298,8 @@ def create_task(
     once for both this row and the idempotency-cache row (one atomic transaction, rest-api-
     guidelines Rule 230's "hard transaction semantics" requirement).
     """
+    if assigned_to is not None:
+        _validate_assignee(session, actor.firm_id, assigned_to)
     now = datetime.now(UTC)
     task = Task(
         firm_id=actor.firm_id,
@@ -437,6 +466,8 @@ def create_task_review(
     locked = _lock_task(session, task.firm_id, task.id)
     if locked.status != "submitted":
         raise InvalidTaskStateError
+    if assigned_to is not None:
+        _validate_assignee(session, actor.firm_id, assigned_to)
 
     now = datetime.now(UTC)
     review = TaskReview(
@@ -535,6 +566,8 @@ def resolve_issue(
     locked = _lock_issue(session, issue.firm_id, issue.id)
     if locked.status != "open":
         raise InvalidIssueStateError
+    if assigned_to is not None:
+        _validate_assignee(session, actor.firm_id, assigned_to)
 
     now = datetime.now(UTC)
     locked.status = "resolved"

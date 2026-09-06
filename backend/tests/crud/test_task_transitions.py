@@ -76,3 +76,77 @@ def test_mark_task_billed_transitions_billing_task(session: Session) -> None:
     updated = crud.mark_task_billed(session, task)
 
     assert updated.status == "billed"
+
+
+def _profile(session: Session, **overrides: object) -> Profile:
+    defaults: dict[str, object] = {
+        "id": uuid4(),
+        "firm_id": _FIRM_ID,
+        "role": "employee",
+        "full_name": "Employee",
+        "email": "e@example.com",
+        "is_active": True,
+        "must_change_password": False,
+        "created_at": datetime.now(UTC),
+    }
+    defaults.update(overrides)
+    profile = Profile(**defaults)  # pyright: ignore[reportArgumentType]
+    session.add(profile)
+    session.commit()
+    session.refresh(profile)
+    return profile
+
+
+def test_create_task_rejects_nonexistent_assignee(session: Session) -> None:
+    owner = _profile(session, role="owner")
+
+    with pytest.raises(crud.UnknownAssigneeError):
+        crud.create_task(session, owner, "Do the thing", None, None, uuid4(), None)
+
+
+def test_create_task_rejects_inactive_assignee(session: Session) -> None:
+    owner = _profile(session, role="owner")
+    inactive_employee = _profile(session, is_active=False)
+
+    with pytest.raises(crud.UnknownAssigneeError):
+        crud.create_task(session, owner, "Do the thing", None, None, inactive_employee.id, None)
+
+
+def test_create_task_rejects_owner_as_assignee(session: Session) -> None:
+    owner = _profile(session, role="owner")
+    other_owner = _profile(session, role="owner")
+
+    with pytest.raises(crud.UnknownAssigneeError):
+        crud.create_task(session, owner, "Do the thing", None, None, other_owner.id, None)
+
+
+def test_create_task_accepts_active_employee_assignee(session: Session) -> None:
+    owner = _profile(session, role="owner")
+    employee = _profile(session)
+
+    task = crud.create_task(session, owner, "Do the thing", None, None, employee.id, None)
+
+    assert task.assigned_to == employee.id
+
+
+_OTHER_FIRM_ID = uuid4()
+
+
+def test_create_task_rejects_cross_firm_owner(session: Session) -> None:
+    # Proves _validate_assignee's firm_id filter itself is doing the work, not just the
+    # role/is_active checks — a different firm's owner must be rejected even though (in
+    # isolation) an owner-role profile is what test_create_task_rejects_owner_as_assignee
+    # already covers same-firm.
+    owner = _profile(session, role="owner")
+    other_firm_owner = _profile(session, firm_id=_OTHER_FIRM_ID, role="owner")
+
+    with pytest.raises(crud.UnknownAssigneeError):
+        crud.create_task(session, owner, "Do the thing", None, None, other_firm_owner.id, None)
+
+
+def test_create_task_rejects_cross_firm_employee(session: Session) -> None:
+    owner = _profile(session, role="owner")
+    other_firm_employee = _profile(session, firm_id=_OTHER_FIRM_ID)
+
+    with pytest.raises(crud.UnknownAssigneeError):
+        crud.create_task(session, owner, "Do the thing", None, None, other_firm_employee.id, None)
