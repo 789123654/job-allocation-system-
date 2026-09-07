@@ -65,6 +65,90 @@ commit:
 
 ## Completed Audits
 
+### Concurrency Defect — Identity-Map Staleness Defeats Row Locks (2026-09-07, commit `8565734`)
+
+Not a phase audit — a targeted fix pass triggered by a real CI failure, tracked here at the same
+rigor because of what it found: a previously "audited and fixed" mechanism (Phase 2's
+reset-password race guard, commit `503f73c`) never actually worked as documented, and a brand-new
+Phase 3 mechanism (`_lock_issue`) never worked either. Full narrative and reasoning trail in this
+session's own record; this entry is the evidence summary.
+
+```
+status: complete
+phase: N/A — cross-phase defect fix (crud.py's three .with_for_update() call sites)
+scope_files: backend/app/crud.py (_lock_task, _lock_issue, reset_employee_password),
+  backend/tests/crud/test_concurrency.py
+date: 2026-09-07
+commit: 8565734
+```
+
+**What was found:** `.with_for_update()` takes the real Postgres row lock — that part always
+worked. But every caller in this codebase does an *unlocked* read of the row earlier in the same
+request (`get_task`/`get_issue`/`get_employee`), then calls the locking function in the *same*
+SQLAlchemy `Session`. SQLAlchemy's identity map returns the session's already-cached Python object
+for a given primary key by default — `.with_for_update()` alone does not force a refresh of that
+object's attributes from the row the query just (re-)fetched. So the lock blocks correctly at the
+database level, but the Python object the code then reads (`if locked.status != "open": ...`)
+still holds pre-lock, stale values. Fix: `.execution_options(populate_existing=True)` on each
+locking query, which forces SQLAlchemy to overwrite the cached object's attributes with the fresh
+row.
+
+**Why this wasn't caught by four prior completed audits, CI's own CodeQL/Semgrep, or `Business_
+Logic_Security_Cheat_Sheet.md`'s own review checklist:** `.with_for_update()` is the textbook-
+correct primitive, in the textbook-correct place — nothing about the *code's shape* is wrong,
+so neither a human reading the diff nor a signature-matching SAST tool (CodeQL/Semgrep) had
+anything to flag. `Business_Logic_Security_Cheat_Sheet.md:7` names this class directly: "No
+scanner will find these bugs for you... the bug isn't in any single function." The property only
+breaks under two genuinely concurrent database sessions racing the same row — no test in the
+project exercised that before this session's `test_concurrency.py` (Phase 2's own reset-password
+fix was verified only against SQLite, which doesn't enforce `.with_for_update()` at all and
+couldn't have caught this either way — a limitation that pass's own record explicitly named at
+the time, D section, rather than assuming coverage it didn't have).
+
+**Fixed, with independent verification per call site:**
+- `_lock_task` (`submit_task`/`mark_task_billed`/review reassignment) — fixed 2026-09-04 per its
+  own docstring, re-verified this pass.
+- `_lock_issue` (`resolve_issue`) — same "read old state, branch on it" shape as `_lock_task`.
+  `test_concurrent_resolve_issue_only_one_wins` added; negative control confirmed the test
+  actually detects the bug (3/3 failed with the fix stripped, `['resolved', 'resolved']` instead
+  of one rejection), then 15/15 clean across 5 full-suite reruns with the fix restored.
+- `reset_employee_password`'s inline lock — no downstream state branch reads the locked object's
+  old values, so this call site has no currently observable failure mode from this bug (every
+  write here is unconditional, not gated on a stale read). Fixed as defense-in-depth against a
+  future change that adds such a branch; `test_concurrent_reset_password_serializes` proves the
+  lock still genuinely blocks (two racers' completion timestamps ≥0.25s apart), a regression
+  guard rather than a bug reproduction — stated as such rather than overclaimed.
+
+**D. Verification-of-verification**
+
+- `library_behavior_claims_checked_against_installed_source`: SQLAlchemy's identity-map/
+  `populate_existing` behavior wasn't taken from documentation or memory — verified empirically
+  against a disposable, disposable-after Docker `postgres:16` container replicating CI's schema/
+  roles/migrations exactly: reproduced both racers succeeding (bug present) 5/5 times without the
+  fix, then 5/5 clean with it, before writing any of this up.
+- `fix_verified_by_real_command_output`: full backend suite `105 passed` (`.venv/Scripts/python.exe
+  -m pytest -q`, real Postgres via `TEST_MIGRATIONS_DATABASE_URL`/`TEST_DATABASE_URL`); concurrency
+  file alone run 5x consecutively, `3 passed` each time; `uv run pyright` → `0 errors, 0 warnings,
+  0 informations`; `ruff check`/`ruff format --check` → clean.
+
+**E. Bounded claim**
+
+- `standard_and_scope`: `Business_Logic_Security_Cheat_Sheet.md`'s "Use Database Transactions and
+  Locks" pattern, scoped to all three `.with_for_update()` call sites in `backend/app/crud.py` as
+  of commit `8565734`.
+- `severity_trend_vs_last_pass`: Rising, not diminishing, in one specific sense worth naming
+  honestly — this is the first finding in the project's audit history that shows a previously
+  "complete" audit's own fix silently not working. Not a new category (concurrency/TOCTOU was
+  already tracked, Phase 2), but a confirmation that "fixed and verified" claims in this file are
+  only as strong as the test that backed them — SQLite-backed verification of a
+  `.with_for_update()`-dependent fix was never sufficient evidence, a gap this file's own D-section
+  entries have now started flagging explicitly rather than silently.
+
+**F. Independent pass**
+
+- `security_review_run`: No — `/code-review ultra` still hasn't been run on this repo as of this
+  pass (2026-09-07).
+
 ### Phase 4 Step 1 — Frontend Scaffold + Auth (2026-09-07, base commit `cac3e70`)
 
 ```
