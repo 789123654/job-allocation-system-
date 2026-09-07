@@ -45,7 +45,7 @@ this needs `CREATEROLE`/superuser), and the `on_auth_user_created` trigger on `a
 `postgres`/`supabase_admin` roles, not any ordinary application role. **Two separate connection strings,
 both env vars, neither ever the same value**: `DATABASE_URL` (`fastapi_app`, what the running app uses,
 least-privilege, no `BYPASSRLS`) and `MIGRATIONS_DATABASE_URL` (Supabase's own `postgres` connection, used
-**only** by `alembic upgrade` — in CI's disposable `postgres:16` container this is just that container's own
+**only** by `alembic upgrade` — in CI's disposable `postgres:17` container this is just that container's own
 superuser, no distinction needed there; against the real Supabase project it's the project's default
 connection string from its dashboard). Neither is committed to the repo, both live in Railway's/CI's
 environment variable store like every other secret here.
