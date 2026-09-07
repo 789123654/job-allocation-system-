@@ -20,6 +20,7 @@ dev = [
     "pyright>=1.1.411",
     "pytest>=9.1.1",
     "ruff>=0.16.5",
+    "schemathesis>=4.26.0",
 ]
 
 [tool.ruff]
