@@ -193,11 +193,16 @@ def reset_employee_password(session: Session, actor: Profile, employee: Profile)
     until the first has fully finished (including its own Supabase call and commit) — so
     whichever response comes back always reflects the password that's actually live, instead of
     a caller occasionally receiving a password a second, later-committing call already overwrote.
+
+    `populate_existing=True` on the lock query is required for the same reason as `_lock_task`:
+    the route calls `get_employee` (unlocked) before this, so without it SQLAlchemy would return
+    the caller's stale cached `Profile` instead of the fresh post-lock row.
     """
     locked = session.exec(
         select(Profile)
         .where(Profile.firm_id == employee.firm_id, Profile.id == employee.id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     ).one()
 
     password = _generate_password()
@@ -382,11 +387,23 @@ def _lock_task(session: Session, firm_id: UUID, task_id: UUID) -> Task:
     directly 2026-09-04, not assumed covered by the Idempotency-Key mechanism (that only dedupes
     an identical retried key, not two genuinely concurrent requests with different keys, e.g. two
     tabs both clicking submit). `SELECT ... FOR UPDATE` — the cheat sheet's own first-listed
-    pattern — makes the second racer block until the first commits, so it re-reads the *already
-    updated* status instead of the stale value the route's earlier `get_task` fetched.
+    pattern — makes the second racer block at the database level until the first commits.
+
+    `populate_existing=True` is required, not optional decoration: the route always calls
+    `get_task` (unlocked) before this, so this session's identity map already holds a Python
+    `Task` object for this PK. Without this option, SQLAlchemy silently returns that cached,
+    stale object instead of the fresh post-lock row this query just fetched — the database lock
+    still works, but the Python code making the decision never sees its result. Found
+    2026-09-07 via a real-Postgres concurrency test (`tests/crud/test_concurrency.py`) after the
+    original version of this function (without this option) let two concurrent submits both
+    succeed; verified 5/5 clean runs after adding it. Same fix applied to `_lock_issue` and
+    `reset_employee_password`'s inline lock below, which have the identical vulnerable shape.
     """
     return session.exec(
-        select(Task).where(Task.firm_id == firm_id, Task.id == task_id).with_for_update()
+        select(Task)
+        .where(Task.firm_id == firm_id, Task.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     ).one()
 
 
@@ -540,10 +557,18 @@ def get_issue(session: Session, issue_id: UUID) -> Issue | None:
 
 def _lock_issue(session: Session, firm_id: UUID, issue_id: UUID) -> Issue:
     """Same reasoning as `_lock_task` — two concurrent resolutions of the same issue must not
-    both succeed.
+    both succeed. `populate_existing=True` is required, not optional decoration: the route
+    always calls `get_issue` (unlocked) before this, so this session's identity map already
+    holds a Python `Issue` object for this PK — without this option, SQLAlchemy returns that
+    cached object instead of the fresh, post-lock row this query just fetched, silently
+    discarding the lock's entire purpose (verified against real Postgres, not assumed;
+    see `_lock_task`'s docstring/SECURITY_AUDIT_CHECKLIST.md).
     """
     return session.exec(
-        select(Issue).where(Issue.firm_id == firm_id, Issue.id == issue_id).with_for_update()
+        select(Issue)
+        .where(Issue.firm_id == firm_id, Issue.id == issue_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     ).one()
 
 

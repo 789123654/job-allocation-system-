@@ -1,10 +1,23 @@
-"""Real Postgres concurrency test — proves `crud._lock_task`'s `SELECT ... FOR UPDATE` actually
-blocks a second concurrent transaction rather than letting both racers act on the same stale
-status, which is the exact TOCTOU race `Business_Logic_Security_Cheat_Sheet.md`'s "Use Database
-Transactions and Locks" guards against (see `_lock_task`'s own docstring — this is the bug the
-project shipped once already, found and fixed 2026-09-04). SQLite (used by every other crud test,
-including `test_task_transitions.py`) silently ignores `.with_for_update()` — this property can
-only be proven against real Postgres. Same real-Postgres-or-skip pattern as `test_rls_isolation.py`.
+"""Real Postgres concurrency tests — prove `crud._lock_task`/`_lock_issue`'s `SELECT ... FOR
+UPDATE` actually blocks a second concurrent transaction AND that the blocked transaction sees the
+*fresh* post-lock row, not a stale one already cached in its session's identity map. This second
+property is the one that was actually broken: `.with_for_update()` alone takes the real database
+lock, but without `.execution_options(populate_existing=True)`, SQLAlchemy silently hands back
+whatever Python object was already loaded for that primary key — found 2026-09-07 when this test
+(then only `test_concurrent_submit_only_one_wins`) failed against real Postgres in CI (PR #8) with
+both racers reporting "submitted" instead of one "rejected". See `_lock_task`'s docstring and
+`SECURITY_AUDIT_CHECKLIST.md` for the full writeup. SQLite (used by every other crud test,
+including `test_task_transitions.py`) silently ignores `.with_for_update()` entirely and can't
+reproduce either property — this can only be proven against real Postgres. Same
+real-Postgres-or-skip pattern as `test_rls_isolation.py`.
+
+`reset_employee_password`'s inline lock has the identical code shape (unlocked read in the route,
+then `.with_for_update()` in this function, in the same session) but, unlike `submit_task`/
+`resolve_issue`, nothing downstream reads the locked object's *old* field values to decide
+whether to proceed — every write here is unconditional. So the identity-map bug has no currently
+observable effect on this call site: `test_concurrent_reset_password_serializes` below proves the
+lock still blocks correctly (a regression guard, and cheap insurance against a future change that
+adds a conditional read), not a reproduction of a live bug the way the other two tests are.
 """
 
 import os
@@ -18,7 +31,7 @@ from sqlalchemy import Engine, create_engine, text
 from sqlmodel import Session, select
 
 from app import crud
-from app.models import Task
+from app.models import Issue, Profile, Task
 
 _MIGRATIONS_URL = os.environ.get("TEST_MIGRATIONS_DATABASE_URL")
 _APP_URL = os.environ.get("TEST_DATABASE_URL")
@@ -60,7 +73,83 @@ def assigned_task() -> Generator[dict[str, UUID]]:
         )
     yield {"firm_id": firm_id, "task_id": task_id}
     with admin_engine.begin() as conn:
+        # notifications must go first: submit_task's _notify_owners inserts rows that FK to this
+        # task, and tasks' own delete fails with ForeignKeyViolation otherwise (fixture's own bug,
+        # separate from the crud.py finding — found the same day, fixed here).
+        conn.execute(text("DELETE FROM notifications WHERE firm_id = :fid"), {"fid": firm_id})
         conn.execute(text("DELETE FROM tasks WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM profiles WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM firms WHERE id = :fid"), {"fid": firm_id})
+    admin_engine.dispose()
+
+
+@pytest.fixture
+def open_issue() -> Generator[dict[str, UUID]]:
+    """Same planting pattern as `assigned_task` — a task plus one open `Issue` raised against it."""
+    assert _MIGRATIONS_URL is not None  # guaranteed by pytestmark's skipif above
+    admin_engine = create_engine(_MIGRATIONS_URL)
+    firm_id, owner_id, employee_id, task_id, issue_id = uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    with admin_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO firms (id, name, plan, status) VALUES (:id, 'x', 'free', 'active')"),
+            {"id": firm_id},
+        )
+        for pid, role in ((owner_id, "owner"), (employee_id, "employee")):
+            conn.execute(
+                text(
+                    "INSERT INTO profiles (id, firm_id, role, full_name, email) "
+                    "VALUES (:id, :fid, :role, 'x', :email)"
+                ),
+                {"id": pid, "fid": firm_id, "role": role, "email": f"{pid}@example.com"},
+            )
+        conn.execute(
+            text(
+                "INSERT INTO tasks (id, firm_id, title, assigned_to, status, created_by) "
+                "VALUES (:id, :fid, 'Race me', :assignee, 'assigned', :owner)"
+            ),
+            {"id": task_id, "fid": firm_id, "assignee": employee_id, "owner": owner_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO issues (id, firm_id, task_id, raised_by, description, status) "
+                "VALUES (:id, :fid, :task_id, :raised_by, 'Race me too', 'open')"
+            ),
+            {"id": issue_id, "fid": firm_id, "task_id": task_id, "raised_by": employee_id},
+        )
+    yield {"firm_id": firm_id, "task_id": task_id, "issue_id": issue_id, "owner_id": owner_id}
+    with admin_engine.begin() as conn:
+        conn.execute(text("DELETE FROM issues WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM notifications WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM tasks WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM profiles WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM firms WHERE id = :fid"), {"fid": firm_id})
+    admin_engine.dispose()
+
+
+@pytest.fixture
+def firm_employee() -> Generator[dict[str, UUID]]:
+    """A bare firm/owner/employee triple — for `reset_employee_password`, which touches no task
+    or issue at all.
+    """
+    assert _MIGRATIONS_URL is not None  # guaranteed by pytestmark's skipif above
+    admin_engine = create_engine(_MIGRATIONS_URL)
+    firm_id, owner_id, employee_id = uuid4(), uuid4(), uuid4()
+    with admin_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO firms (id, name, plan, status) VALUES (:id, 'x', 'free', 'active')"),
+            {"id": firm_id},
+        )
+        for pid, role in ((owner_id, "owner"), (employee_id, "employee")):
+            conn.execute(
+                text(
+                    "INSERT INTO profiles (id, firm_id, role, full_name, email) "
+                    "VALUES (:id, :fid, :role, 'x', :email)"
+                ),
+                {"id": pid, "fid": firm_id, "role": role, "email": f"{pid}@example.com"},
+            )
+    yield {"firm_id": firm_id, "owner_id": owner_id, "employee_id": employee_id}
+    with admin_engine.begin() as conn:
+        conn.execute(text("DELETE FROM audit_log WHERE firm_id = :fid"), {"fid": firm_id})
         conn.execute(text("DELETE FROM profiles WHERE firm_id = :fid"), {"fid": firm_id})
         conn.execute(text("DELETE FROM firms WHERE id = :fid"), {"fid": firm_id})
     admin_engine.dispose()
@@ -120,3 +209,130 @@ def test_concurrent_submit_only_one_wins(assigned_task: dict[str, UUID]) -> None
 
     assert errors == []
     assert sorted(outcomes) == ["rejected", "submitted"]
+
+
+def _issue_racer(
+    engine: Engine,
+    firm_id: UUID,
+    issue_id: UUID,
+    owner_id: UUID,
+    barrier: threading.Barrier,
+    outcomes: list[str],
+    errors: list[BaseException],
+) -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("SELECT set_config('app.current_tenant', :fid, true)"), {"fid": str(firm_id)}
+            )
+            session = Session(bind=conn)
+            issue = session.exec(
+                select(Issue).where(Issue.firm_id == firm_id, Issue.id == issue_id)
+            ).one()
+            actor = session.exec(
+                select(Profile).where(Profile.firm_id == firm_id, Profile.id == owner_id)
+            ).one()
+            barrier.wait(timeout=5)  # both racers hit crud.resolve_issue's FOR UPDATE at once
+            try:
+                crud.resolve_issue(session, actor, issue, "clarified", "notes", None, None, None)
+                session.flush()
+                time.sleep(0.3)  # hold the lock long enough for the other racer to observably block
+                outcomes.append("resolved")
+            except crud.InvalidIssueStateError:
+                outcomes.append("rejected")
+    except BaseException as exc:  # surfaced in the main thread below, never swallowed
+        errors.append(exc)
+
+
+def test_concurrent_resolve_issue_only_one_wins(open_issue: dict[str, UUID]) -> None:
+    """Same shape as test_concurrent_submit_only_one_wins, for `_lock_issue`/`resolve_issue`:
+    `resolve_issue` reads `locked.status != "open"` to decide whether to raise
+    InvalidIssueStateError — the exact "read an old cached value after the lock" shape the
+    identity-map bug breaks. Proves `_lock_issue`'s `populate_existing=True` fix independently of
+    `_lock_task`'s.
+    """
+    firm_id, issue_id = open_issue["firm_id"], open_issue["issue_id"]
+    owner_id = open_issue["owner_id"]
+    engine = create_engine(_APP_URL)  # type: ignore[arg-type]  # guaranteed by pytestmark
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+    errors: list[BaseException] = []
+    threads = [
+        threading.Thread(
+            target=_issue_racer,
+            args=(engine, firm_id, issue_id, owner_id, barrier, outcomes, errors),
+        )
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    engine.dispose()
+
+    assert errors == []
+    assert sorted(outcomes) == ["rejected", "resolved"]
+
+
+def _reset_password_racer(
+    engine: Engine,
+    firm_id: UUID,
+    owner_id: UUID,
+    employee_id: UUID,
+    barrier: threading.Barrier,
+    completed_at: list[float],
+    errors: list[BaseException],
+) -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("SELECT set_config('app.current_tenant', :fid, true)"), {"fid": str(firm_id)}
+            )
+            session = Session(bind=conn)
+            employee = session.exec(
+                select(Profile).where(Profile.firm_id == firm_id, Profile.id == employee_id)
+            ).one()
+            actor = session.exec(
+                select(Profile).where(Profile.firm_id == firm_id, Profile.id == owner_id)
+            ).one()
+            barrier.wait(timeout=5)
+            crud.reset_employee_password(session, actor, employee)
+            session.flush()
+            time.sleep(0.3)  # hold the lock long enough for the other racer to observably block
+            completed_at.append(time.monotonic())
+    except BaseException as exc:  # surfaced in the main thread below, never swallowed
+        errors.append(exc)
+
+
+def test_concurrent_reset_password_serializes(
+    firm_employee: dict[str, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reset_employee_password` has no state check for the identity-map bug to break (see module
+    docstring) — this proves the row lock still serializes two concurrent resets rather than
+    letting them interleave, as a regression guard: both racers must complete (no exception), and
+    since each holds the lock for 0.3s, the two completion timestamps must be at least that far
+    apart, meaning the second racer genuinely blocked on the first rather than running in parallel.
+    """
+    monkeypatch.setattr(crud.admin_auth, "update_user_by_id", lambda *a, **kw: None)
+    firm_id = firm_employee["firm_id"]
+    owner_id, employee_id = firm_employee["owner_id"], firm_employee["employee_id"]
+    engine = create_engine(_APP_URL)  # type: ignore[arg-type]  # guaranteed by pytestmark
+    barrier = threading.Barrier(2)
+    completed_at: list[float] = []
+    errors: list[BaseException] = []
+    threads = [
+        threading.Thread(
+            target=_reset_password_racer,
+            args=(engine, firm_id, owner_id, employee_id, barrier, completed_at, errors),
+        )
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    engine.dispose()
+
+    assert errors == []
+    assert len(completed_at) == 2
+    assert abs(completed_at[0] - completed_at[1]) >= 0.25  # allows a little scheduling slack
