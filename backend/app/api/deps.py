@@ -41,6 +41,11 @@ def get_current_profile(
         # be logged, success and failure — this was the one gap this app had no logging for at all
         # (grep confirmed the only prior logger call anywhere was main.py's generic 500 handler).
         # No token contents logged, only that verification failed and why (never the token itself).
+        # False positive, verified against PyJWT's actual installed source (jwt/api_jwt.py,
+        # jwt/api_jws.py, jwt/jwks_client.py): every PyJWTError/PyJWKClientError message is a
+        # static string ("Signature has expired", "Invalid audience", ...) — none interpolate the
+        # raw token. `exc` here can never contain the token itself, only which check failed.
+        # nosemgrep: python-logger-credential-disclosure
         logger.warning("Authentication failed: invalid or expired token (%s)", exc)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token") from None
 

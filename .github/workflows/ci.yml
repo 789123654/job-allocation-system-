@@ -130,3 +130,50 @@ jobs:
           # Without this, zizmor stays in offline mode and skips GitHub-API-backed audits like
           # impostor-commit — confirmed by the first CI run of this job, not assumed.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # CODING_STRUCTURE.md's Phase 5 plan named Semgrep as a hardening-pass item, pulled forward.
+      # No login/account needed for named registry rulesets — verified directly (`uvx semgrep scan
+      # --config p/security-audit ...` runs standalone, exit 0/1 on clean/findings, confirmed by a
+      # real local run before wiring this in, not assumed from `--config auto`'s own docs, which
+      # do mention a login flow that a bare `--config <ruleset>` never triggers).
+      - run: uvx semgrep scan --config p/security-audit --config p/owasp-top-ten --error .
+
+  codeql:
+    runs-on: ubuntu-latest
+    # No security-events: write, and `upload: never` below — this repo is private on a personal
+    # account, where GitHub Advanced Security (required to use the Security-tab dashboard on a
+    # private repo at all) isn't purchasable without upgrading to a paid Team/Enterprise plan
+    # (verified live against GitHub's own docs, 2026-09-07 — not assumed). A hard CI failure on any
+    # finding is the enforcement here instead of the dashboard.
+    #
+    # actions: read IS still needed even with upload: never — codeql-action calls GitHub's
+    # workflow-runs API internally for its own status/telemetry reporting regardless of the upload
+    # setting. Confirmed by the first real CI run of this job, not assumed: without it, both matrix
+    # jobs failed with "Resource not accessible by integration" on that exact API call and CodeQL
+    # itself reported "job status was configuration error" — a permissions gap, not a code finding.
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none # both languages here are interpreted — nothing to build
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          upload: never
+          output: codeql-results
+      - name: Fail if CodeQL found anything
+        run: |
+          count=$(jq '[.runs[].results[]] | length' codeql-results/*.sarif)
+          echo "CodeQL findings (${{ matrix.language }}): $count"
+          if [ "$count" -gt 0 ]; then
+            jq '.runs[].results[] | {rule: .ruleId, message: .message.text, location: .locations[0].physicalLocation.artifactLocation.uri}' codeql-results/*.sarif
+            exit 1
+          fi
