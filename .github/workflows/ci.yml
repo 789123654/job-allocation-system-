@@ -144,8 +144,15 @@ jobs:
     # private repo at all) isn't purchasable without upgrading to a paid Team/Enterprise plan
     # (verified live against GitHub's own docs, 2026-09-07 — not assumed). A hard CI failure on any
     # finding is the enforcement here instead of the dashboard.
+    #
+    # actions: read IS still needed even with upload: never — codeql-action calls GitHub's
+    # workflow-runs API internally for its own status/telemetry reporting regardless of the upload
+    # setting. Confirmed by the first real CI run of this job, not assumed: without it, both matrix
+    # jobs failed with "Resource not accessible by integration" on that exact API call and CodeQL
+    # itself reported "job status was configuration error" — a permissions gap, not a code finding.
     permissions:
       contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:

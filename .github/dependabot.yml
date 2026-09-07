@@ -7,4 +7,7 @@ updates:
     schedule:
       interval: "weekly"
     cooldown:
-      default-days: 4 # let the community catch a freshly-published malicious/broken release first
+      # Bumped 4 -> 7 (Semgrep p/security-audit finding, first CI run of the codeql/semgrep job) —
+      # same "let the community catch a bad release first" reasoning, just a longer, more
+      # conservative window; matches the ruleset's own recommended minimum.
+      default-days: 7
