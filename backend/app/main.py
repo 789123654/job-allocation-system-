@@ -2,6 +2,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 
+import sentry_sdk
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,30 @@ from app.api.main import api_router
 from app.core.config import settings
 
 logger = logging.getLogger("app")
+
+if settings.SENTRY_DSN:
+    # Must run before FastAPI(...) below — Sentry's FastAPI integration auto-instruments on
+    # sentry_sdk.init(), no explicit integrations=[...] needed for this (verified against Sentry's
+    # own current FastAPI integration docs, not assumed from an older API shape).
+    #
+    # traces_sample_rate=1.0 (100% of requests traced, not a partial sample): at this project's
+    # actual pilot scale this is nowhere near Sentry's free-tier 5M-spans/month cap (real margin,
+    # not guessed — see DEPLOYMENT.md §6); revisit downward only if real usage stats ever say
+    # otherwise, not pre-emptively.
+    #
+    # send_default_pii deliberately NOT set (defaults to False) — Sentry's own quickstart examples
+    # default this to True, which would forward request bodies/headers/user IP to a third-party
+    # service by default. This project already treats user/tenant context as sensitive (audit_log,
+    # access_denials) and that same care applies to a new external destination — a call this
+    # project makes deliberately, not one inherited from a docs example (skill-verification-
+    # discipline.md failure mode 7: a new destination for data needs its own check, not the
+    # mechanism's default).
+    #
+    # No profiling flags (profile_session_sample_rate/profile_lifecycle) — Sentry's continuous
+    # profiling requires a paid add-on even on the free Developer plan (verified live against
+    # Sentry's own pricing page, 2026-09-08); tracing alone already answers "how long did this
+    # request take," which is all this was built for.
+    sentry_sdk.init(dsn=settings.SENTRY_DSN, traces_sample_rate=1.0)
 
 class _UTF8JSONResponse(JSONResponse):
     """Starlette's JSONResponse never appends `charset` to Content-Type — it only does that for

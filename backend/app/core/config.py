@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # publishable key, never exposed to the frontend (supabase/auth/users.md).
     SUPABASE_SECRET_KEY: str
 
+    # Optional — error/performance monitoring (DEPLOYMENT.md §6). None (the default) means Sentry
+    # is never initialized at all: local dev and CI have no reason to send anything anywhere.
+    SENTRY_DSN: str | None = None
+
     @field_validator("DATABASE_URL", "MIGRATIONS_DATABASE_URL")
     @classmethod
     def _require_psycopg_driver(cls, v: PostgresDsn) -> PostgresDsn:
