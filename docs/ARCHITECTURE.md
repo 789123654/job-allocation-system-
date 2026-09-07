@@ -464,6 +464,43 @@ Revisit this section, not as a scheduled review but as a trigger-based one: the 
 actually depends on isolation holding, or before any deliberate move toward a higher ASVS level, re-open this
 as a real question rather than assuming Phase 1's informal version still covers it.
 
+## 15. Platform Coupling — Supabase, Accepted and Named
+
+Not a gap to fix now — abstracting this away before there's ever been a reason to migrate would be exactly
+the premature abstraction this project's own coding discipline argues against (`CODING_STRUCTURE.md`,
+ponytail). This section exists so the coupling is a *named, bounded* risk, discoverable by reading this
+document, rather than something only discovered by hitting a wall if migration were ever actually forced.
+
+**Where this architecture is genuinely Supabase-specific, not just "uses Postgres":**
+1. **Auth is Supabase Auth, not a generic OIDC provider** — login, password change, and the whole
+   account-provisioning flow (§4) go through Supabase's `admin.createUser`/`admin.updateUserById` and
+   `auth.updateUser` APIs directly. Moving off Supabase Auth means rebuilding credential storage, session
+   issuance, and the provisioning flow from scratch — not a config change.
+2. **JWT claim shape is Supabase's** — `app_metadata.firm_id`/`role`/`must_change_password`, injected by a
+   Postgres function (`custom_access_token_hook`) that only Supabase's Auth service calls at token-issue
+   time. A different identity provider wouldn't have this hook mechanism; the claim-injection point would
+   need re-architecting, not just re-pointing.
+3. **`auth.users.email` is globally unique across the whole Supabase project, not per-firm** — a real,
+   already-hit operational constraint (`DATA_MODEL.md`), not just a naming preference. A different provider
+   might not share this constraint at all, which would change (for the better) how employee onboarding
+   across firms works.
+4. **`fastapi_app`'s RLS-respecting Postgres role and the tenant-isolation model assume Supabase-managed
+   Postgres** — the RLS policies themselves are portable SQL (this part is *not* locked in), but the
+   specific role-grant setup and connection-pooling behavior (Supavisor) are Supabase's.
+5. **`fastapi_app` must never carry `BYPASSRLS`** — verified for real in CI (`test_rls_isolation.py`) — is a
+   guarantee tied to how Supabase provisions roles; a self-hosted Postgres would need the same discipline
+   re-established by hand, not inherited automatically.
+
+**What isn't locked in, worth naming so the risk isn't overstated either:** the actual schema (tables, RLS
+policy SQL, composite FKs) is standard Postgres — none of it needs Supabase specifically. FastAPI's own code
+has no Supabase SDK calls outside `core/supabase_admin.py` (checked directly — it's the one deliberate
+integration seam, not scattered through the codebase), so the actual surface a migration would touch is
+already bounded and known, not diffuse.
+
+**Revisit trigger, matching §14's own convention**: not a scheduled review — re-open this only if Supabase's
+pricing, reliability, or product direction ever actually forces the question. Until then, this is an
+accepted, understood trade, not an oversight.
+
 ---
 
 Reference patterns pulled from this project's own skill library, not invented: `postgres-multitenant` (RLS/tenant_id/composite-key patterns), `saas-multitenant-architecture` (control/application plane, JWT-as-passport, deployment model), `fastapi` (project structure, DI pattern), `supabase` (Custom Access Token Hook mechanics), `rest-api-guidelines` (idempotency), `owasp-cheatsheets` + `owasp-asvs-5` (§12).
