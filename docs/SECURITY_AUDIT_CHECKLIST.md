@@ -149,6 +149,70 @@ the time, D section, rather than assuming coverage it didn't have).
 - `security_review_run`: No — `/code-review ultra` still hasn't been run on this repo as of this
   pass (2026-09-07).
 
+### Independent Tooling Pass — CodeQL + Semgrep (2026-09-07, commit `3ad18af`)
+
+Not a phase audit (no new feature/code slice reviewed) — this exercises Section F's own independent-pass
+requirement via two real, separate mechanisms, since `/code-review ultra` still hasn't been run (see the
+`security_review_run` field below, unchanged).
+
+**1. Wired into CI — PR #6, merged to `main` at `3ad18af`.** Semgrep (`p/security-audit` + `p/owasp-top-ten`,
+`--error`) and CodeQL (python + javascript-typescript matrix, `build-mode: none`) added as CI jobs, running on
+every push/PR going forward. CodeQL's SARIF upload set to `upload: never`, no `security-events: write` — this
+repo is private on a personal account, and GitHub Advanced Security (required for the Security-tab dashboard
+on a private repo at all) isn't purchasable without a paid Team/Enterprise plan (verified live against
+GitHub's own docs, not assumed) — a hard CI failure on any finding is the enforcement instead.
+
+**First real CI run of the new jobs found 3 genuine issues, all fixed, not dismissed:**
+- Semgrep: `.github/dependabot.yml`'s cooldown (`default-days: 4`) below the ruleset's own recommended
+  minimum — bumped to 7.
+- Semgrep: false-positive credential-leak flag on `backend/app/api/deps.py`'s auth-failure log line —
+  verified false against PyJWT's actual installed source (`jwt/api_jwt.py`/`api_jws.py`/`jwks_client.py`:
+  every `PyJWTError`/`PyJWKClientError` message is a static string, never the token) — suppressed with a
+  `# nosemgrep` comment carrying that verification, not blind-trusted. Placement mattered: an initial
+  suppression comment 4 lines above the flagged line silently failed to suppress it — confirmed empirically,
+  fixed by placing it immediately adjacent with nothing between.
+- CodeQL: both matrix jobs failed with "Resource not accessible by integration" — not a code finding, a
+  permissions gap. `codeql-action` calls GitHub's workflow-runs API internally for its own telemetry
+  regardless of `upload: never`; needs `actions: read`, which the job didn't have. Added, with the real
+  failure documented in a comment.
+
+Re-run after fixes: all 6 PR #6 checks green, confirmed via `gh pr checks 6` directly — not the `Monitor`
+tool, which timed out without delivering a result on this same PR (checked manually per
+`docs/WORKING_PREFERENCES.md` item 2). Merged; CI on `main` at `3ad18af` independently re-confirmed green via
+`gh run view --json` (all 5 jobs `success`), not assumed carried over from the PR run.
+
+**2. Independent of CI entirely — CodeQL CLI run standalone**, per explicit request to verify beyond what CI
+itself proves. `github/codeql-action`'s own CLI (installed via `gh extension install github/gh-codeql`,
+v2.26.4) used to build real databases from this repo's actual source and run the real query packs directly —
+no GitHub Actions runner, no workflow file involved at all.
+- `codeql/python-queries@1.8.9` against a fresh database built from the real repo source: **46/46 Python
+  files scanned, 45 security queries run, 0 findings.**
+- `codeql/javascript-queries@2.4.4` against a fresh database built from the real repo source: **28/28 JS/TS
+  files scanned, 13 security queries run, 0 findings.**
+- A broader manual Semgrep pass, more rulesets than CI uses (`p/security-audit`, `p/owasp-top-ten`,
+  `p/python`, `p/typescript`, `p/javascript`, `p/react`, `p/docker`, `p/github-actions`, `p/secrets`, `p/jwt`,
+  `p/sql-injection`, `p/insecure-transport`): **1597 rules, 104 files, 0 findings.**
+
+One real infra snag along the way, not glossed over: the first JS/TS database build silently stalled without
+ever finalizing (a partial directory with only metadata files was mistaken for a completed build) — caught
+when the analyze step failed with "needs to be finalized," not assumed successful from the directory simply
+existing. Rebuilt clean in a fresh directory (the stale one was holding a file lock from an orphaned
+process) and re-verified via the real "Successfully created database" log line before re-running analysis.
+
+**Honest scope — what this closes, and what it doesn't.** This is real, independent evidence from tools with
+their own rule logic, not this project's own reasoning — genuinely stronger than a self-audit. But every
+finding this project has caught that actually mattered (the TOCTOU race on `submit_task`, the cross-firm
+`assigned_to` gap, the missing composite FKs) was a **business-logic/authorization** defect — exactly the
+category static pattern-matching tools are least equipped to catch, since they reason about syntax and known
+CWE patterns, not this app's specific workflow-state rules. `security_review_run` below stays `No` — this
+doesn't substitute for `/code-review ultra`'s independent-agent reasoning, it's real, additional, but
+narrower.
+
+**F. Independent pass**
+- `security_review_run`: **No** — `/code-review ultra` has never been run on this repo as of this pass
+  (2026-09-07). CodeQL + Semgrep (above, both CI-wired and run standalone) are real independent-tool
+  evidence, tracked here separately since they're a different mechanism than this field's own definition.
+
 ### Phase 4 Step 1 — Frontend Scaffold + Auth (2026-09-07, base commit `cac3e70`)
 
 ```
