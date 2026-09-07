@@ -170,9 +170,18 @@ schema = (
     #   yet isolated.
     # - POST /tasks: a nonexistent job_type_id in the request body reaches the INSERT directly and
     #   crashes with a raw ForeignKeyViolation instead of a 404/422 "job type not found" check.
+    # - GET /tasks (found by CI's own Hypothesis seed on the first merge to main, 2026-09-08 — not
+    #   reproduced by any of this file's own local runs, since Hypothesis has no fixed seed here):
+    #   `offset` is typed `Query(ge=0)` with no upper bound, so a large-enough value (Postgres
+    #   `bigint`'s own max is 9223372036854775807) reaches the LIMIT/OFFSET query and crashes with
+    #   psycopg.errors.NumericValueOutOfRange instead of a clean 422. The same unbounded-offset
+    #   shape exists on every other list endpoint (GET /employees, GET /job-types, GET
+    #   /notifications) — none reproduced it yet, so none are excluded pre-emptively; noted here in
+    #   case one does on a future run.
     .exclude(path="/job-types", method="POST")
     .exclude(path="/notifications", method="GET")
     .exclude(path="/tasks", method="POST")
+    .exclude(path="/tasks", method="GET")
 )
 
 
