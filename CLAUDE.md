@@ -164,10 +164,12 @@ or 'yes' isn't evidence and doesn't count."
 - Set `status: in-progress` with real `phase`/`scope_files`/`date`/`commit` *before* starting analysis, not
   after — genuinely engage the in-progress state, don't write directly to Completed Audits. (A hook-complete
   audit can still be shallow; the hook is a safety net against stopping early, not a substitute for the work.)
-- Apply `docs/skill-verification-discipline.md`'s failure modes 6 and 8 on every audit: grep the whole
+- Apply `docs/skill-verification-discipline.md`'s failure modes 6, 8, and 9 on every audit: grep the whole
   `owasp-cheatsheets`/`owasp-asvs-5` directories by the mechanism's real keywords, not just the files whose
-  titles sound relevant; and actually produce evidence (real command output, real grep hits, real test
-  results) rather than narrating about having checked something.
+  titles sound relevant; actually produce evidence (real command output, real grep hits, real test results)
+  rather than narrating about having checked something; and for any function that reads a row unlocked then
+  later re-locks the same primary key in the same ORM session, require a real two-thread test against a real
+  instance of the production database engine, not a read of the source, before treating the lock as verified.
 - `docs/SECURITY_AUDIT_CHECKLIST.md`'s own Section F (`/code-review ultra`, a separate multi-agent cloud
   review) is a periodic independent check on this same discipline, not a replacement for it — run it every
   few phases, not every phase.

@@ -146,3 +146,37 @@ Deliberately left un-hook-enforced (the false-positive/false-negative cost of sc
 language across every future project was judged worse than the gap it would close). If this one fails too,
 it gets caught the same way every prior one did: the user asking directly whether the checklist was actually
 touched.
+
+## Failure mode 9 — a lock verified as present in the code was never verified as effective at runtime
+
+`_lock_task`, `_lock_issue`, and `reset_employee_password`'s inline lock all call `.with_for_update()` — the
+correct primitive, in the correct place, exactly matching `Business_Logic_Security_Cheat_Sheet.md`'s own
+first-listed "Use Database Transactions and Locks" pattern. It genuinely takes the Postgres row lock. What
+every prior check missed — Phase 2's own audit (commit `503f73c`, which believed it had fixed a concurrent
+password-reset race), CodeQL, Semgrep, and every code review in between — is that SQLAlchemy's identity map
+returns the session's already-cached Python object for a primary key that was read earlier in the *same*
+session, rather than the fresh row the locked query just fetched. The database lock genuinely blocks the
+second racer; the Python object it then reads (`if locked.status != "open": ...`) is still the stale,
+pre-lock one. Two racers that were supposed to produce one success and one rejection both silently
+succeeded. Real defect in code every prior pass believed was fixed and verified — found only when a
+real-Postgres, two-thread concurrency test (`backend/tests/crud/test_concurrency.py`, built to prove a
+different property) failed when it should have passed, then fixed with `.execution_options(populate_
+existing=True)` (commit `8565734`) and confirmed by deliberately stripping the fix back out and watching the
+same test fail 3/3, then restoring it and watching 15/15 pass.
+
+Same underlying shape as failure mode 6 — a textbook-correct primitive present in a textbook-correct place
+gives a human reviewer and a signature-matching scanner alike nothing to flag, because nothing about the
+code's *shape* is wrong. The defect is a fact about runtime session state (does this session already hold a
+cached copy of this row?), not a fact visible in source. Phase 2's own audit even wrote down that its
+verification only ran against SQLite — which silently ignores `.with_for_update()` entirely — but treated
+that as an acceptable, unavoidable limitation rather than as "this fix was never actually verified,"
+because at the time no real-Postgres concurrency test existed to notice the difference.
+
+**How to apply:** any function that reads a row unlocked, then later re-reads the same primary key with
+`.with_for_update()` (or any pessimistic lock) *in the same ORM session*, needs a real test that races two
+actual threads/connections against a real instance of the actual production database engine — not SQLite,
+not a single-threaded call, not "the lock statement executed without raising" — and asserts on the genuine
+outcome (one success, one rejection; or, if nothing branches on the locked value yet, that the two racers
+are provably serialized). "The lock is in the code" and "the lock actually protects this decision" are
+different claims; only the second one is the one that matters, and only a concurrent execution — never a
+read of the source — can verify it.
