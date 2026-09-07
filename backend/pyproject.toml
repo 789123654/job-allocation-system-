@@ -10,6 +10,7 @@ dependencies = [
     "psycopg[binary]>=3.3.5",
     "pydantic-settings>=2.15.0",
     "pyjwt[crypto]>=2.13.0",
+    "sentry-sdk[fastapi]>=2.30.0",
     "sqlmodel>=0.0.42",
     "supabase-auth>=2.31.0",
 ]
