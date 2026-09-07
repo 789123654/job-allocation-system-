@@ -20,7 +20,7 @@ jobs:
     # §2) — never the live Supabase project. Migrated fresh every run, thrown away after.
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -67,7 +67,7 @@ jobs:
               )
           ''')
           # a8e6def15927's GRANT/REVOKE statements target these Supabase-provisioned roles —
-          # nonexistent on vanilla postgres:16, so alembic upgrade head would error without them.
+          # nonexistent on vanilla postgres:17, so alembic upgrade head would error without them.
           conn.execute('CREATE ROLE supabase_auth_admin')
           conn.execute('CREATE ROLE authenticated')
           conn.execute('CREATE ROLE anon')

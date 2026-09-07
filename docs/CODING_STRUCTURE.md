@@ -59,7 +59,7 @@ by the `tests/` folder existing. The harder question — **how do the RLS-depend
 a real answer: **a real, disposable Postgres instance, not a mock.** RLS policies are enforced by Postgres
 itself; there is no meaningful way to unit-test `BYPASSRLS`/tenant-isolation behavior against a mocked
 session, since the thing under test *is* the database engine's own enforcement. Concretely: a plain
-`postgres:16` service container in GitHub Actions (a built-in feature, no extra infra) that runs the actual
+`postgres:17` service container in GitHub Actions (a built-in feature, no extra infra) that runs the actual
 Alembic migrations — including the RLS policies and the `fastapi_app` role — before the test suite executes.
 This is a local, disposable instance, never the live Supabase project — CI shouldn't depend on, rate-limit
 against, or leave test data in production infrastructure. This is where the tenant-isolation and `BYPASSRLS`
