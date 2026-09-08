@@ -764,13 +764,26 @@ def _ensure_deadline_notifications(session: Session, actor: Profile) -> None:
         _ensure_owner_deadline_notifications(session, actor, now)
     else:
         _ensure_employee_deadline_notifications(session, actor, now)
-    session.commit()
-    # Re-set tenant context — commit() ended the transaction get_current_profile's set_config()
-    # scoped it to (module docstring above). list_notifications queries `notifications` right
-    # after this call returns, in the same session; without this, that query runs with no tenant
-    # context and either matches 0 rows or crashes on a raw uuid cast, same mechanism as the
-    # deleted post-commit session.refresh() calls elsewhere in this file, just as a genuinely new
-    # query instead of a stale-attribute read (so expire_on_commit=False doesn't cover this one).
+    try:
+        session.commit()
+    except IntegrityError:
+        # Two near-simultaneous polls (ARCHITECTURE.md §8: every 30-60s) both found the same
+        # deadline notification "missing" and both tried to insert it — ix_notifications_dedup's
+        # partial UNIQUE index (see its migration) is what makes that a real DB conflict instead of
+        # a silent duplicate row. Whichever request loses just rolls back its whole batch rather
+        # than retrying: the other request's commit already created every notification this one
+        # would have, and anything genuinely still missing gets picked up by this same lazy-
+        # generation path on the next poll — this function's own docstring already commits to that
+        # "no scheduler, next poll catches it" design, so losing one cycle changes nothing about
+        # correctness, only which of two concurrent requests happens to do the writing.
+        session.rollback()
+    # Re-set tenant context — commit() (or the rollback() above, on that race) ended the
+    # transaction get_current_profile's set_config() scoped it to (module docstring above).
+    # list_notifications queries `notifications` right after this call returns, in the same
+    # session; without this, that query runs with no tenant context and either matches 0 rows or
+    # crashes on a raw uuid cast, same mechanism as the deleted post-commit session.refresh() calls
+    # elsewhere in this file, just as a genuinely new query instead of a stale-attribute read (so
+    # expire_on_commit=False doesn't cover this one).
     # Postgres-only, like get_current_profile's own call —
     # tests/crud/test_notification_generation.py deliberately runs this same function against
     # real SQLite (no RLS there to restore context for), and set_config doesn't exist on SQLite.
