@@ -292,6 +292,36 @@ the identical check is runnable locally via `docker run postgres:17` + the exist
 or added as a one-off `EXPLAIN`-reading assertion in that same test tier — no new mechanism, just the
 existing one actually exercised for this specific question.
 
+**`LEAKPROOF` is the actual mechanism governing whether this is even eligible to reach relation-level
+evaluation — checked live against `docs/17/sql-createfunction.html`'s own definition, not assumed:** *"a
+function which throws an error message for some argument values but not others, or which includes the
+argument values in any error message, is not leakproof"* — and non-leakproof conditions are deferred until
+*after* RLS's own condition runs, specifically so a malicious user-supplied predicate can't infer protected
+data via error/timing differences. This project doesn't declare any `LEAKPROOF` function itself (grepped —
+none exist); the policy's own condition, `firm_id = current_setting(...)::uuid`, relies on Postgres's
+built-in `=` operator for `uuid` being marked leakproof by default, which is the normal case for base-type
+comparison operators but has **not been independently confirmed here** against the actual catalog. `current_
+setting()` and the `::uuid` cast don't need to be leakproof regardless — `sql-createfunction.html`'s own
+stated exception: *"functions which do not take arguments or which are not passed any arguments from the
+security barrier view or table do not have to be marked as leakproof"* — neither one receives an argument
+from `tasks`/`notifications`/etc. itself, only a literal GUC name and a cast target. **How to close this
+one:** `SELECT oprcode, (SELECT proleakproof FROM pg_proc WHERE oid = oprcode) FROM pg_operator WHERE
+oprname = '=' AND oprleft = 'uuid'::regtype;` against the same real Postgres — cheaper than the `EXPLAIN`
+check above (no migration or seed data needed, just the bare instance), worth running in the same pass.
+
+**One more thing this surfaced, worth closing alongside the above rather than assuming it's fine:** every
+real-Postgres verification this project has ever done — `.github/workflows/ci.yml:23`'s CI service
+container, every `SECURITY_AUDIT_CHECKLIST.md` entry's own reproduction steps — runs against `postgres:17`,
+but nowhere in `DEPLOYMENT.md`/`ARCHITECTURE.md` is that version ever stated to have been checked against
+Supabase's actual managed Postgres version. `CODING_STRUCTURE.md:62` frames it as a practical CI-tooling
+choice ("a built-in feature, no extra infra"), not a verified-to-match-production decision — and the pin
+has already drifted once without a note (one older `SECURITY_AUDIT_CHECKLIST.md` concurrency-test entry
+used `postgres:16` instead). Unlikely to matter for anything checked so far (RLS/leakproof/index mechanics
+have been stable across recent Postgres majors), but "unlikely" isn't "checked," and this project holds
+every other platform-specific claim to that same bar (`ARCHITECTURE.md`'s own Railway-IPv6 finding, this
+same session's Supavisor-pooling-mode correction, both explicitly "not skill-covered, verified live" rather
+than assumed).
+
 ---
 
 Reference patterns pulled from `postgres-multitenant/schema-design.md`, verified against the actual file (exact line numbers cited above) before being written here — not from memory. Table-specific field choices are this project's own application of those patterns to the PRD's actual requirements, not skill citations themselves.
