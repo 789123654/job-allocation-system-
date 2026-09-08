@@ -70,7 +70,9 @@ def create_employee(
 def list_employees(
     actor: RequireOwnerDep,
     session: SessionDep,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    # le bound: same reasoning as tasks.py's list_tasks — Postgres bigint OFFSET overflow
+    # otherwise crashes with a raw 500 instead of a clean 422 (found by Schemathesis, 2026-09-08).
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> list[EmployeeOut]:
     # Pending-job workload count (PRD §2.4) needs `tasks`, which doesn't exist until Phase 3 —

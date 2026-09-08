@@ -2,6 +2,16 @@
 trusts `session` to already have `app.current_tenant` set (get_current_profile, api/deps.py) — RLS
 does the tenant-scoping; nothing here filters by `firm_id` itself, per ARCHITECTURE.md §5's
 division of responsibility (RLS = isolation, crud/routes = role-based authorization).
+
+That trust holds only within the one transaction get_current_profile's `set_config(..., true)` set
+it in — `true` (is_local) means it's transaction-scoped, deliberately, so a pooled connection can
+never carry one request's tenant context into another's. A function that calls `session.commit()`
+mid-request and then queries again afterward runs that later query with no tenant context at all
+(found via Schemathesis, 2026-09-08, docs/SECURITY_AUDIT_CHECKLIST.md) — either 0 rows or a raw
+uuid-cast crash, depending on whether the pooled connection had seen a tenant context before. Fixed
+at the two shapes this takes: a stale post-commit `session.refresh()` (delete it — see
+`get_session`'s `expire_on_commit=False`, app/core/db.py) or a real post-commit query that's
+regenerated the tenant context explicitly (`_ensure_deadline_notifications`, below).
 """
 
 import secrets
@@ -10,6 +20,7 @@ from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
+from sqlmodel import text as sql_text
 
 from app.core.supabase_admin import admin_auth
 from app.models import (
@@ -53,6 +64,16 @@ class UnknownAssigneeError(Exception):
     tenant-boundary enforcement, but a raw `IntegrityError` on violation surfaces as a generic 500
     (main.py's catch-all handler), not a clean 4xx, and the FK alone doesn't stop an Owner assigning
     work to a fellow Owner or a deactivated employee, neither of which can ever act on it.
+    """
+
+
+class UnknownJobTypeError(Exception):
+    """Raised when a request-body `job_type_id` doesn't resolve to an active job type of the
+    caller's own firm — same reasoning as `UnknownAssigneeError` just above, and the same gap:
+    previously left entirely to `tasks`'s own `(firm_id, job_type_id) REFERENCES job_types`
+    composite FK, so a nonexistent id crashed with a raw `ForeignKeyViolation` (a generic 500 via
+    main.py's catch-all handler) instead of a clean 4xx — found by Schemathesis, 2026-09-08,
+    docs/SECURITY_AUDIT_CHECKLIST.md.
     """
 
 
@@ -161,6 +182,17 @@ def _validate_assignee(session: Session, firm_id: UUID, employee_id: UUID) -> No
         raise UnknownAssigneeError
 
 
+def _validate_job_type(session: Session, firm_id: UUID, job_type_id: UUID) -> None:
+    """See `UnknownJobTypeError`. Scoped to `firm_id` explicitly — same belt-and-suspenders
+    reasoning as `_validate_assignee` just above.
+    """
+    job_type = session.exec(
+        select(JobType).where(JobType.firm_id == firm_id, JobType.id == job_type_id)
+    ).first()
+    if job_type is None or not job_type.is_active:
+        raise UnknownJobTypeError
+
+
 def set_employee_active(
     session: Session, actor: Profile, employee: Profile, is_active: bool
 ) -> Profile:
@@ -169,7 +201,7 @@ def set_employee_active(
     action = "employee_reactivated" if is_active else "employee_deactivated"
     _write_audit_log(session, actor, action=action, target_id=employee.id)
     session.commit()
-    session.refresh(employee)
+    # No session.refresh() — see create_job_type's comment; same reasoning applies here.
     return employee
 
 
@@ -269,7 +301,10 @@ def create_job_type(session: Session, actor: Profile, name: str) -> JobType:
     except IntegrityError as exc:
         session.rollback()
         raise DuplicateJobTypeNameError from exc
-    session.refresh(job_type)
+    # No session.refresh() — every field here is set in Python above, nothing is DB-computed, and
+    # get_session's expire_on_commit=False means this object's attributes are already the
+    # authoritative just-written values (app/core/db.py). A refresh would re-query job_types right
+    # after commit ended the transaction that held the RLS tenant context — see that comment.
     return job_type
 
 
@@ -286,7 +321,7 @@ def set_job_type_active(session: Session, job_type: JobType, is_active: bool) ->
     job_type.is_active = is_active
     session.add(job_type)
     session.commit()
-    session.refresh(job_type)
+    # No session.refresh() — see create_job_type's comment; same reasoning applies here.
     return job_type
 
 
@@ -305,6 +340,8 @@ def create_task(
     """
     if assigned_to is not None:
         _validate_assignee(session, actor.firm_id, assigned_to)
+    if job_type_id is not None:
+        _validate_job_type(session, actor.firm_id, job_type_id)
     now = datetime.now(UTC)
     task = Task(
         firm_id=actor.firm_id,
@@ -378,7 +415,7 @@ def update_task_deadline(session: Session, task: Task, deadline: datetime) -> Ta
     task.updated_at = datetime.now(UTC)
     session.add(task)
     session.commit()
-    session.refresh(task)
+    # No session.refresh() — see create_job_type's comment; same reasoning applies here.
     return task
 
 
@@ -728,6 +765,20 @@ def _ensure_deadline_notifications(session: Session, actor: Profile) -> None:
     else:
         _ensure_employee_deadline_notifications(session, actor, now)
     session.commit()
+    # Re-set tenant context — commit() ended the transaction get_current_profile's set_config()
+    # scoped it to (module docstring above). list_notifications queries `notifications` right
+    # after this call returns, in the same session; without this, that query runs with no tenant
+    # context and either matches 0 rows or crashes on a raw uuid cast, same mechanism as the
+    # deleted post-commit session.refresh() calls elsewhere in this file, just as a genuinely new
+    # query instead of a stale-attribute read (so expire_on_commit=False doesn't cover this one).
+    # Postgres-only, like get_current_profile's own call —
+    # tests/crud/test_notification_generation.py deliberately runs this same function against
+    # real SQLite (no RLS there to restore context for), and set_config doesn't exist on SQLite.
+    if session.get_bind().dialect.name == "postgresql":
+        session.execute(  # pyright: ignore[reportDeprecated] — same as get_current_profile's call
+            sql_text("SELECT set_config('app.current_tenant', :firm_id, true)"),
+            {"firm_id": str(actor.firm_id)},
+        )
 
 
 def list_notifications(
@@ -764,5 +815,5 @@ def mark_notification_read(session: Session, notification: Notification) -> Noti
     notification.is_read = True
     session.add(notification)
     session.commit()
-    session.refresh(notification)
+    # No session.refresh() — see create_job_type's comment; same reasoning applies here.
     return notification

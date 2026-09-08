@@ -65,6 +65,109 @@ commit:
 
 ## Completed Audits
 
+### RLS Tenant-Context Loss on Post-Commit Queries (2026-09-08, commit `d16a978`)
+
+Not a phase audit — found by Schemathesis (`tests/api/test_schema_fuzz.py`, added this same
+session) fuzzing 4 endpoints into a crash, then traced to a shared root cause across 6 call sites,
+none of which any prior audit had flagged.
+
+```
+status: complete
+phase: N/A — cross-cutting defect fix (backend/app/core/db.py, backend/app/crud.py, 4 route files)
+scope_files: backend/app/core/db.py, backend/app/crud.py,
+  backend/app/api/routes/{tasks,employees,job_types,notifications}.py,
+  backend/tests/api/test_schema_fuzz.py
+date: 2026-09-08
+commit: d16a978
+```
+
+**What was found:** `get_current_profile` (api/deps.py) sets `app.current_tenant` — the GUC every
+RLS policy filters on — with `set_config(..., true)`: `is_local=true`, deliberately, so a pooled
+connection can never carry one request's tenant context into another's under Supavisor pooling.
+That context is therefore scoped to exactly one transaction. Six `crud.py` functions called
+`session.commit()` mid-request and then read again afterward in the same session — five via a
+`session.refresh()` immediately after commit (`create_job_type`, `set_job_type_active`,
+`update_task_deadline`, `mark_notification_read`, `set_employee_active`), one via a genuine new
+query (`_ensure_deadline_notifications` → `list_notifications`). Every one of those reads ran in a
+new transaction with no tenant context. Depending on whether the specific pooled Postgres
+connection had ever seen a tenant context set on it before, the read either matched 0 rows
+(`session.refresh()` raising `InvalidRequestError: Could not refresh instance`) or crashed with
+`psycopg.errors.InvalidTextRepresentation: invalid input syntax for type uuid: ""` — a
+misdiagnosed-at-first symptom (initially logged as "empty-string input" before being traced to its
+real cause) whose SQL/parameters shown in the error message didn't even belong to the statement
+that actually failed, which is what made this take real digging, not a quick read of the traceback.
+
+**Why this wasn't caught by any prior audit:** the pattern — `session.add(); session.commit();
+session.refresh(); return obj` — is FastAPI's own official tutorial idiom (`fastapi` skill,
+`guide/tutorial/sql-databases.md`), copied faithfully across 4 separate commits from the project's
+very first scaffolding commit (`2f5e940`) through Phase 3's notifications slice (`2d22757`) — `git
+blame` confirms zero comment anywhere justifying it, unlike this codebase's usual documentation
+discipline for every other non-obvious choice, which is itself the tell that it was never checked
+against this project's specific transaction-scoped RLS design. Every hand-written route test
+(`tests/api/routes/*.py`) uses a `MagicMock()` session deliberately (no real DB needed for
+dependency-override-style route tests) — a mock has no transactions and no RLS, so it can never
+reproduce this. Only a real Postgres connection, exercised enough times to land on a pooled
+connection that had already seen a tenant context once, ever surfaces it — exactly the kind of gap
+`skill-verification-discipline.md` failure mode 9 already names (a mechanism verified present in
+the code, never verified effective at runtime) — this is a fresh, distinct instance of that same
+class, one layer over: not the lock mechanism itself, but the session lifecycle around it.
+
+**Fixed:**
+- `app/core/db.py`: `expire_on_commit=False` on the request-scoped `Session` — root-cause fix.
+  SQLAlchemy's default (`True`) would keep triggering the same implicit reload on *any* post-commit
+  attribute read even with every explicit `.refresh()` call deleted (the route layer reads
+  `job_type.id`/`.name`/etc. immediately after `crud.create_job_type()` returns, to build the
+  response). Safe specifically because `get_session()` hands each request its own session that
+  never outlives that request — no cross-request staleness risk to trade away.
+- 5 redundant `session.refresh()` calls deleted — confirmed via each model's own field list
+  (`JobType`/`Task`/`Notification`/`Profile`) that nothing is DB-computed, so refresh never pulled
+  back anything real to begin with.
+- `_ensure_deadline_notifications` re-sets `app.current_tenant` after its own commit — Postgres-only
+  (`session.get_bind().dialect.name == "postgresql"`), since `tests/crud/test_notification_generation.py`
+  deliberately runs this same function against real SQLite (no RLS there to restore context for,
+  and no `set_config` function on SQLite at all) — caught by a real regression on first attempt,
+  not assumed safe.
+
+**D. Verification-of-verification**
+
+- `library_behavior_claims_checked_against_installed_source`: the `expire_on_commit` default and
+  its interaction with post-commit attribute access wasn't taken from memory — confirmed by
+  reproducing the crash directly against a real disposable `postgres:17` container with SQLAlchemy
+  engine `echo=True` and `poolclass=NullPool`, watching the exact statement sequence, before
+  writing any fix (`InvalidRequestError: Could not refresh instance` under `NullPool`, the same
+  failure without the misleading uuid-cast symptom the pooled engine produced).
+- `fix_verified_by_real_command_output`: full backend suite `123 passed` against a real disposable
+  `postgres:17`; `tests/crud/test_concurrency.py`+`tests/api/test_schema_fuzz.py` run 3x
+  consecutively, `21 passed` each run, no flakiness; `uv run ruff check .` / `uv run pyright` →
+  clean both times (once before, once after fixing a real regression the first fix attempt caused
+  in `tests/crud/test_notification_generation.py`).
+
+**E. Bounded claim**
+
+- `standard_and_scope`: `Input_Validation_Cheat_Sheet.md`'s numeric-range-check rule (for the
+  `offset` bound) plus this project's own RLS/session-lifecycle design, scoped to the 6 call sites
+  named above as of commit `d16a978` — not a claim that every `session.commit()` in the codebase
+  has been re-audited for this shape, only that every one *at the time of this pass* was checked
+  (see grep evidence in this session's own record: every `session.commit()` in `crud.py` was read
+  in context before deciding fix vs. no-fix-needed).
+- `severity_trend_vs_last_pass`: Same trend as the Concurrency Defect entry above — a real,
+  previously-invisible production bug (intermittent 500s on real user actions, not a test-only
+  artifact), found only because a new tool (Schemathesis) exercised paths no hand-written test
+  ever did. Confirms the same lesson that entry already named: "fixed and verified" is only as
+  strong as what actually got exercised, not what was theoretically covered.
+
+**F. Independent pass**
+
+- `security_review_run`: No — `/code-review ultra` still hasn't been run on this repo as of this
+  pass (2026-09-08).
+
+A 5th, separate, NOT-yet-fixed bug surfaced once the above unblocked `POST /job-types` far enough
+for Schemathesis to reach it: a `name` containing a NUL byte (`\x00`) crashes with
+`psycopg.DataError: PostgreSQL text fields cannot contain NUL (0x00) bytes` instead of a clean 422
+— Pydantic's plain `str` field never rejects it (a valid Unicode codepoint). Likely systemic across
+every plain-string field in the API (task title/description, employee `full_name`, ...), not
+job_types-specific. Reported to the user, not fixed in this pass — tracked here so it isn't lost.
+
 ### Concurrency Defect — Identity-Map Staleness Defeats Row Locks (2026-09-07, commit `8565734`)
 
 Not a phase audit — a targeted fix pass triggered by a real CI failure, tracked here at the same
