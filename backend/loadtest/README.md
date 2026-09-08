@@ -97,3 +97,16 @@ same steps as above, automated, with `vus`/`hold_duration` as workflow inputs.
 - **A real-deployment run** — needs actual Supabase-issued tokens for real synthetic test users
   (not this JWKS-stub trick), and a staging environment to target — both explicitly out of scope
   until `DEPLOYMENT.md`'s own deferred trigger is hit.
+- **`script.js` only exercises 4 of the API's 17 real endpoints** (grepped every `@router.get/
+  post/patch` across `app/api/routes/`, 2026-09-09) — `GET /notifications`, `GET /tasks`,
+  `GET /tasks/{id}`, `GET /job-types`. Not touched at all: every `employees` endpoint (list *and*
+  every mutation), every `issues` endpoint, `PATCH /notifications/{id}/read`, and every `tasks`
+  mutation (create/deadline/submit/mark-billed/review/raise-issue). Deliberate for this first pass
+  — matches the "read-only, polling-weighted" scope above — but worth naming precisely rather than
+  leaving "this tests the API" as a vaguer claim than what's actually true. Add `employees`/`issues`
+  reads before writes, since they're the same low-risk shape as what's already here.
+- **`RAMP_UP`/`RAMP_DOWN` aren't exposed as `workflow_dispatch` inputs** — `script.js` reads them
+  from env (defaults `1m`/`30s`), and the workflow only wires through `vus`/`hold_duration`, so
+  ramp shape is fixed unless run locally with `k6 run -e RAMP_UP=... -e RAMP_DOWN=...` directly.
+  Add both as workflow inputs, same shape as the existing ones, when ramp shape itself needs
+  tuning per run rather than just peak concurrency and hold time.
