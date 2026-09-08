@@ -269,6 +269,29 @@ status before accepting a transition), not a DB trigger here. Stated so it isn't
 
 **One thing genuinely worth deciding before this doc is "done," not a schema question:** per `schema-design.md:107-118`, declarative partitioning by `firm_id` is explicitly framed as "an operational scaling lever, not a day-one requirement — adopt it when a specific table's size... actually becomes a measured problem." Nothing to build now; the composite-PK convention in §1 is what keeps that door open when the time comes, same logic as the RLS-from-day-one decision. Flagging it here so it's a stated deferral, not a forgotten one — matching the discipline used for caching/async in `ARCHITECTURE.md` §10.
 
+**Unverified claim, needs a real Postgres to close — not a schema question either, but the composite-index
+strategy above depends on the answer:** every firm_id-leading composite index in this schema (the 8 listed
+in the index-strategy review, 2026-09-09 session) is *assumed* to actually get used by queries whose
+`WHERE` never mentions `firm_id` literally — because RLS's `USING (firm_id = current_setting(...)::uuid)`
+clause is the only thing supplying that predicate. Checked three live PostgreSQL 17 official doc pages
+before writing this (`docs/17/ddl-rowsecurity.html`, `docs/17/sql-createpolicy.html`,
+`docs/17/sql-createview.html`'s security-barrier/Updatable-Views section) — none of them explicitly states
+whether an RLS policy's condition is eligible for index-level pushdown (`Index Cond`) the same as a
+hand-written `WHERE`, versus being applied only as a post-filter (`Filter`) after a full scan. What they do
+establish: the policy expression "will be added to queries that refer to the table" (`sql-createpolicy.html`),
+and `EXPLAIN` is the documented way to see "which conditions are applied at the relation level... and which
+are not" (`sql-createview.html`) — consistent with the claim, not a confirmation of it.
+
+**How to close this, once a real Postgres is up:** run `EXPLAIN (ANALYZE)` on `list_tasks`'s actual query
+shape (e.g. `SELECT * FROM tasks WHERE status = 'assigned'` — no `firm_id` in the SQL, only the RLS session
+variable set via `set_config`) against a real migrated instance, and read whether the plan shows `Index Cond`
+on `ix_tasks_firm_status_deadline` or a `Seq Scan` with a `Filter`. **This doesn't need new infrastructure —
+`.github/workflows/ci.yml:23` already runs a `postgres:17` Docker service container for exactly this kind of
+test** (the same one `tests/api/test_deps.py`/`tests/api/test_schema_fuzz.py` already migrate against), so
+the identical check is runnable locally via `docker run postgres:17` + the existing Alembic migration path,
+or added as a one-off `EXPLAIN`-reading assertion in that same test tier — no new mechanism, just the
+existing one actually exercised for this specific question.
+
 ---
 
 Reference patterns pulled from `postgres-multitenant/schema-design.md`, verified against the actual file (exact line numbers cited above) before being written here — not from memory. Table-specific field choices are this project's own application of those patterns to the PRD's actual requirements, not skill citations themselves.
