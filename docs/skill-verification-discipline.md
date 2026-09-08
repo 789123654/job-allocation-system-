@@ -180,3 +180,46 @@ outcome (one success, one rejection; or, if nothing branches on the locked value
 are provably serialized). "The lock is in the code" and "the lock actually protects this decision" are
 different claims; only the second one is the one that matters, and only a concurrent execution — never a
 read of the source — can verify it.
+
+## Failure mode 10 — a pattern copied faithfully from an official tutorial was never checked against this
+project's own conflicting design
+
+`crud.py`'s `create_job_type`, `set_job_type_active`, `update_task_deadline`, `mark_notification_read`, and
+`set_employee_active` all end with `session.add(x); session.commit(); session.refresh(x); return x` — the
+FastAPI project's own official tutorial idiom (`fastapi` skill, `guide/tutorial/sql-databases.md`, its exact
+create/update example), copied faithfully across 4 separate commits from this project's very first
+scaffolding commit (`2f5e940`) through Phase 3's notifications slice (`2d22757`). `git blame` on all five
+call sites shows zero comment anywhere justifying the `.refresh()` — notable *because* this codebase
+otherwise comments every non-obvious choice relentlessly, which is itself the tell that this specific
+pattern was never actually checked against anything project-specific; it was just typed the way the
+tutorial types it. It happens to be wrong here: `get_current_profile` (api/deps.py) scopes RLS's
+`app.current_tenant` to exactly one transaction, deliberately (`set_config(..., true)`, so a pooled
+connection under Supavisor can never carry one request's tenant context into another's) — and
+`session.commit()` ends that transaction. Every one of those five `.refresh()` calls, and a sixth,
+structurally different case (`_ensure_deadline_notifications`, a genuine post-commit query, not a stale
+refresh), ran with no tenant context at all, intermittently returning 0 rows or crashing on a raw uuid-cast
+error depending on whether the pooled connection had ever seen a tenant context before. Found only by
+Schemathesis fuzzing 4 endpoints into a crash (2026-09-08, `docs/SECURITY_AUDIT_CHECKLIST.md`), not by any
+of the four prior completed phase audits, because — same shape as failure modes 6 and 9 — the tutorial's
+own idiom is correct in the tutorial's own context; nothing about its *shape* looks wrong, so a human
+reading the diff has nothing to flag either.
+
+This is a different failure from failure mode 7 (a shared mechanism reused on a new call site without
+re-checking that site's own data): here the mechanism was never *this project's* to begin with — it came
+from an external skill/tutorial, applied as-is, and the project's own conflicting design (transaction-scoped
+tenant context) was never brought into the comparison at all. The global instruction this project already
+runs under — "applying a skill's general pattern... a divergence has to be a real decision made after
+checking" — existed the whole time; it just wasn't applied at the moment this specific pattern was first
+typed, because nothing about copying a framework's own official example felt like the kind of claim that
+needed checking.
+
+**How to apply:** when writing code that follows a pattern straight from an official framework tutorial,
+example repo, or a skill's own sample code — not just when translating a cheat sheet's *stated principle*,
+but literally reusing its *shape* verbatim — explicitly ask, in that moment, "does this project have an
+already-established mechanism this pattern's steps could interact badly with?" before typing it, the same
+way a shared mechanism's new call site gets asked "what's different about this call site's data" (failure
+mode 7). For this specific shape: any `session.commit()` followed by *any* further read in the same
+request/session — an explicit `.refresh()`, an implicit lazy-reload from SQLAlchemy's default
+`expire_on_commit=True`, or a brand-new query — needs to be checked against whatever this project's own
+request-scoped state (RLS tenant context, an idempotency cache, anything transaction-scoped) actually
+guarantees past that commit, not assumed safe because the pattern's source was authoritative.
