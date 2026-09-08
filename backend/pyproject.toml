@@ -34,6 +34,10 @@ select = ["E", "F", "I", "UP", "B", "S", "FAST"]
 # `python -O`. S105/S106: fixture strings like "temp-pw-123" (as a default or a kwarg) are fake
 # test data, not real secrets.
 "tests/**" = ["S101", "S105", "S106"]
+# S311: seed.py's random.random()/random.choice() pick a synthetic task's status/deadline spread
+# for load-test data variety — never a security or cryptographic use (token signing goes through
+# PyJWT's own RS256, not this module).
+"loadtest/**" = ["S311"]
 
 [tool.pyright]
 include = ["app", "tests"]

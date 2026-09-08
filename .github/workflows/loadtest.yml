@@ -1,0 +1,170 @@
+name: API load test
+
+# Manual only — never on push/pull_request like ci.yml. A load test is slow and resource-heavy,
+# and always targets a throwaway postgres:17 service container in this same job, never a real
+# deployment (backend/loadtest/README.md explains why: DEPLOYMENT.md's "single environment, no
+# staging, this phase" means "deployed" currently means the real pilot firm's live production
+# system).
+on:
+  workflow_dispatch:
+    inputs:
+      vus:
+        description: "Peak virtual users"
+        default: "50"
+      hold_duration:
+        description: "How long to hold at peak VUs (e.g. 2m)"
+        default: "2m"
+      firms:
+        description: "Firms to seed"
+        default: "20"
+      employees_per_firm:
+        description: "Employees per seeded firm"
+        default: "10"
+      tasks_per_firm:
+        description: "Tasks per seeded firm"
+        default: "40"
+
+permissions:
+  contents: read
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    # Same disposable Postgres image/setup as ci.yml's backend job — this run's data never
+    # persists past the job.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://fastapi_app:loadtest_password@localhost:5432/postgres
+      MIGRATIONS_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+      SUPABASE_URL: http://localhost:9999 # loadtest/generate_keys.py's JWKS stub, step below
+      SUPABASE_SECRET_KEY: sb_secret_loadtest_placeholder
+      CORS_ORIGINS: '["http://localhost"]'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --dev
+
+      # Same bootstrap as ci.yml's backend job — vanilla postgres:17 has none of Supabase's own
+      # auth schema/roles that a8e6def15927's migration GRANTs against.
+      - name: Stub Supabase's auth.users and auth-admin roles
+        run: |
+          uv run python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/postgres', autocommit=True)
+          conn.execute('CREATE SCHEMA IF NOT EXISTS auth')
+          conn.execute('''
+              CREATE TABLE IF NOT EXISTS auth.users (
+                  id uuid PRIMARY KEY,
+                  email text,
+                  raw_user_meta_data jsonb
+              )
+          ''')
+          conn.execute('CREATE ROLE supabase_auth_admin')
+          conn.execute('CREATE ROLE authenticated')
+          conn.execute('CREATE ROLE anon')
+          "
+      - run: uv run alembic upgrade head
+      - name: Set fastapi_app's loadtest-only password
+        run: |
+          uv run python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/postgres', autocommit=True)
+          conn.execute(\"ALTER ROLE fastapi_app WITH PASSWORD 'loadtest_password'\")
+          "
+
+      - name: Generate the throwaway JWKS keypair
+        run: uv run python loadtest/generate_keys.py
+
+      - name: Serve the JWKS stub in the background
+        working-directory: backend/loadtest/www
+        run: |
+          nohup python -m http.server 9999 > jwks_server.log 2>&1 &
+          echo $! > /tmp/jwks_server.pid
+
+      - name: Start the app under test in the background
+        run: |
+          nohup uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/uvicorn.log 2>&1 &
+          echo $! > /tmp/uvicorn.pid
+      - name: Wait for the app to become healthy
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "App is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "App never became healthy — uvicorn log:"
+          cat /tmp/uvicorn.log
+          exit 1
+
+      - name: Seed firms/profiles/tasks and mint tokens
+        # Inputs go through env:, never interpolated directly into the run: script (GitHub_
+        # Actions_Security_Cheat_Sheet.md / zizmor's template-injection audit, confirmed by a real
+        # local zizmor run against this exact file before this fix, not assumed) — a workflow_
+        # dispatch input is attacker-influenced if someone with trigger access supplies a crafted
+        # value; $ENV_VAR expansion happens in the shell, not in the template-substitution step
+        # that would otherwise let it break out of the quoted argument.
+        env:
+          FIRMS: ${{ inputs.firms }}
+          EMPLOYEES_PER_FIRM: ${{ inputs.employees_per_firm }}
+          TASKS_PER_FIRM: ${{ inputs.tasks_per_firm }}
+        run: |
+          uv run python loadtest/seed.py \
+            --firms "$FIRMS" \
+            --employees-per-firm "$EMPLOYEES_PER_FIRM" \
+            --tasks-per-firm "$TASKS_PER_FIRM"
+
+      - name: Install k6 (pinned release, checksum-verified)
+        run: |
+          cd /tmp
+          curl -sSLO https://github.com/grafana/k6/releases/download/v2.2.0/k6-v2.2.0-linux-amd64.tar.gz
+          curl -sSLO https://github.com/grafana/k6/releases/download/v2.2.0/k6-v2.2.0-checksums.txt
+          grep 'k6-v2.2.0-linux-amd64.tar.gz$' k6-v2.2.0-checksums.txt | sha256sum -c -
+          tar -xzf k6-v2.2.0-linux-amd64.tar.gz
+          sudo mv k6-v2.2.0-linux-amd64/k6 /usr/local/bin/k6
+
+      - name: Run k6
+        working-directory: backend/loadtest
+        # Same env:-not-template reasoning as the seed step above.
+        env:
+          VUS: ${{ inputs.vus }}
+          HOLD: ${{ inputs.hold_duration }}
+        run: |
+          k6 run \
+            -e API_BASE_URL=http://localhost:8000 \
+            -e VUS="$VUS" \
+            -e HOLD="$HOLD" \
+            --summary-export=summary.json \
+            script.js
+
+      - name: Show the app's own log on failure
+        if: failure()
+        run: cat /tmp/uvicorn.log
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: k6-summary
+          path: backend/loadtest/summary.json
+          if-no-files-found: ignore
