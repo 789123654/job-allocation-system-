@@ -157,31 +157,16 @@ def owner_token() -> Generator[str]:
     admin_engine.dispose()
 
 
-schema = (
-    schemathesis.openapi.from_asgi("/openapi.json", app)
-    # 4 real, pre-existing crashes this test found (2026-09-08) were excluded here, then fixed and
-    # un-excluded (docs/SECURITY_AUDIT_CHECKLIST.md has the full history):
-    # - POST /job-types, GET /notifications: session.refresh()/a post-commit query ran with no RLS
-    #   tenant context (transaction-scoped, reset by the commit that preceded it) — fixed at the
-    #   root via get_session's expire_on_commit=False (app/core/db.py) plus re-setting tenant
-    #   context where a real post-commit query was still needed
-    #   (crud._ensure_deadline_notifications).
-    # - POST /tasks: a nonexistent job_type_id reached the INSERT directly, raw
-    #   ForeignKeyViolation — fixed via crud._validate_job_type, mirroring the existing
-    #   _validate_assignee pattern.
-    # - GET /tasks: unbounded `offset` could exceed Postgres bigint range — fixed with an `le=`
-    #   bound, applied to every list endpoint's offset param, not just this one.
-    #
-    # A 5th, separate, NOT-yet-fixed bug surfaced once the above unblocked POST /job-types far
-    # enough for Schemathesis to reach it: a `name` containing a NUL byte (\x00) — a valid Python/
-    # JSON string character, so Pydantic's plain `str` field never rejects it — crashes with
-    # `psycopg.DataError: PostgreSQL text fields cannot contain NUL (0x00) bytes` instead of a
-    # clean 422. This isn't job_types-specific: every plain-string field across the API (task
-    # title/description, employee full_name, ...) has the same gap, since none reject NUL bytes
-    # and every one lands in a Postgres text/varchar column. Reported to the user as a genuinely
-    # separate, systemic finding, not folded into this session's fix silently.
-    .exclude(path="/job-types", method="POST")
-)
+schema = schemathesis.openapi.from_asgi("/openapi.json", app)
+# 5 real, pre-existing crashes this test has found so far (2026-09-08), full history in
+# docs/SECURITY_AUDIT_CHECKLIST.md — all fixed, no exclusions currently active:
+# - POST /job-types, GET /notifications, POST /tasks, GET /tasks: one shared RLS/session-lifecycle
+#   root cause (get_session's expire_on_commit=False, crud.py's post-commit refresh/query fixes)
+#   plus two narrower ones (crud._validate_job_type, offset bounds on every list endpoint).
+# - A 5th, found only once the above unblocked POST /job-types far enough to reach it: a NUL byte
+#   (\x00) in a string field crashed Postgres text-column encoding instead of a clean 422 — fixed
+#   via app/core/validation.NoNulStr, applied to every client-controlled free-text/filter field
+#   across the API, not just job_types.name.
 
 
 @schema.parametrize()  # pyright: ignore[reportUntypedFunctionDecorator] — schemathesis itself is untyped here

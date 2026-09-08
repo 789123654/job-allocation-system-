@@ -9,6 +9,7 @@ from supabase_auth.errors import AuthApiError
 from app import crud
 from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.core.idempotency import record_idempotency_key, reject_if_idempotency_key_used
+from app.core.validation import NoNulStr
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -24,7 +25,7 @@ class EmployeeCreate(BaseModel):
     # Input_Validation_Cheat_Sheet.md: every string field needs a real length ceiling, not
     # whatever Postgres `text` allows unbounded (API_SPEC.md §4 applies this same rule to
     # tasks/issues text fields; full_name was never given one there — fixed here).
-    full_name: str = Field(min_length=1, max_length=200)
+    full_name: NoNulStr = Field(min_length=1, max_length=200)
     email: EmailStr
 
 

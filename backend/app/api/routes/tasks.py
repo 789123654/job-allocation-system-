@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 from app import crud
 from app.api.deps import ActiveProfileDep, IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.core.idempotency import with_idempotency
+from app.core.validation import NoNulStr
 from app.models import Issue, Profile, Task
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -36,8 +37,8 @@ class TaskCreate(BaseModel):
     # Input_Validation_Cheat_Sheet.md length-ceiling rule, re-checked fresh for these two fields
     # (2026-09-04) — same rule already applied to full_name/job_types.name, not assumed to
     # transfer automatically. No skill specifies the exact numbers; these are project judgment.
-    title: str = Field(min_length=1, max_length=300)
-    description: str | None = Field(default=None, max_length=5000)
+    title: NoNulStr = Field(min_length=1, max_length=300)
+    description: NoNulStr | None = Field(default=None, max_length=5000)
     job_type_id: UUID | None = None
     assigned_to: UUID | None = None
     deadline: datetime | None = None
@@ -93,15 +94,15 @@ class TaskDeadlineUpdate(BaseModel):
 
 class TaskReviewCreate(BaseModel):
     outcome: Literal["approved", "reassigned", "billing"]
-    notes: str | None = Field(default=None, max_length=2000)
+    notes: NoNulStr | None = Field(default=None, max_length=2000)
     # 'reassigned' fields
-    remaining_work_description: str | None = Field(default=None, max_length=2000)
+    remaining_work_description: NoNulStr | None = Field(default=None, max_length=2000)
     assigned_to: UUID | None = None
     # 'billing' fields — all required together when outcome='billing', enforced below
     billing_deadline: datetime | None = None
-    billing_description: str | None = Field(default=None, max_length=5000)
+    billing_description: NoNulStr | None = Field(default=None, max_length=5000)
     billing_amount: float | None = Field(default=None, gt=0)
-    billing_recipient: str | None = Field(default=None, max_length=200)
+    billing_recipient: NoNulStr | None = Field(default=None, max_length=200)
 
     @model_validator(mode="after")
     def _validate_outcome_fields(self) -> "TaskReviewCreate":
@@ -144,7 +145,7 @@ class TaskReviewCreate(BaseModel):
 
 
 class IssueCreate(BaseModel):
-    description: str = Field(min_length=1, max_length=2000)
+    description: NoNulStr = Field(min_length=1, max_length=2000)
 
 
 class IssueOut(BaseModel):
@@ -231,10 +232,10 @@ def list_tasks(
     # 2026-09-08, docs/SECURITY_AUDIT_CHECKLIST.md — same fix applied to every list endpoint).
     offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    status_filter: Annotated[NoNulStr | None, Query(alias="status")] = None,
     assigned_to: Annotated[UUID | None, Query()] = None,
     job_type_id: Annotated[UUID | None, Query()] = None,
-    task_type: Annotated[str | None, Query()] = None,
+    task_type: Annotated[NoNulStr | None, Query()] = None,
 ) -> list[TaskOut]:
     tasks = crud.list_tasks(
         session, actor, offset, limit, status_filter, assigned_to, job_type_id, task_type

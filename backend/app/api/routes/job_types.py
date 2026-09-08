@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app import crud
 from app.api.deps import ActiveProfileDep, RequireOwnerDep, SessionDep
+from app.core.validation import NoNulStr
 
 router = APIRouter(prefix="/job-types", tags=["job-types"])
 
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/job-types", tags=["job-types"])
 class JobTypeCreate(BaseModel):
     # Input_Validation_Cheat_Sheet.md: every string field needs a real length ceiling (same rule
     # already applied to EmployeeCreate.full_name, re-checked fresh for this field 2026-09-04).
-    name: str = Field(min_length=1, max_length=200)
+    name: NoNulStr = Field(min_length=1, max_length=200)
 
 
 class JobTypeOut(BaseModel):
