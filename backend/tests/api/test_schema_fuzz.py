@@ -159,29 +159,28 @@ def owner_token() -> Generator[str]:
 
 schema = (
     schemathesis.openapi.from_asgi("/openapi.json", app)
-    # Real, pre-existing crashes this test found (2026-09-08), not test-harness artifacts —
-    # confirmed by first running this file with default checks, then narrowing to
-    # not_a_server_error, then reproducing each again standalone. Excluded (not silently passed,
-    # not xfail'd into CI noise) so this new test lands green while each stays a named, tracked,
-    # NOT-yet-fixed defect — reported to the user alongside this file, not hidden by it.
-    # - POST /job-types, GET /notifications: some fuzzed input reaches a raw SQL query with an
-    #   empty-string bound to a `uuid` column, crashing with
-    #   psycopg.errors.InvalidTextRepresentation instead of a clean 422 — exact source field not
-    #   yet isolated.
-    # - POST /tasks: a nonexistent job_type_id in the request body reaches the INSERT directly and
-    #   crashes with a raw ForeignKeyViolation instead of a 404/422 "job type not found" check.
-    # - GET /tasks (found by CI's own Hypothesis seed on the first merge to main, 2026-09-08 — not
-    #   reproduced by any of this file's own local runs, since Hypothesis has no fixed seed here):
-    #   `offset` is typed `Query(ge=0)` with no upper bound, so a large-enough value (Postgres
-    #   `bigint`'s own max is 9223372036854775807) reaches the LIMIT/OFFSET query and crashes with
-    #   psycopg.errors.NumericValueOutOfRange instead of a clean 422. The same unbounded-offset
-    #   shape exists on every other list endpoint (GET /employees, GET /job-types, GET
-    #   /notifications) — none reproduced it yet, so none are excluded pre-emptively; noted here in
-    #   case one does on a future run.
+    # 4 real, pre-existing crashes this test found (2026-09-08) were excluded here, then fixed and
+    # un-excluded (docs/SECURITY_AUDIT_CHECKLIST.md has the full history):
+    # - POST /job-types, GET /notifications: session.refresh()/a post-commit query ran with no RLS
+    #   tenant context (transaction-scoped, reset by the commit that preceded it) — fixed at the
+    #   root via get_session's expire_on_commit=False (app/core/db.py) plus re-setting tenant
+    #   context where a real post-commit query was still needed
+    #   (crud._ensure_deadline_notifications).
+    # - POST /tasks: a nonexistent job_type_id reached the INSERT directly, raw
+    #   ForeignKeyViolation — fixed via crud._validate_job_type, mirroring the existing
+    #   _validate_assignee pattern.
+    # - GET /tasks: unbounded `offset` could exceed Postgres bigint range — fixed with an `le=`
+    #   bound, applied to every list endpoint's offset param, not just this one.
+    #
+    # A 5th, separate, NOT-yet-fixed bug surfaced once the above unblocked POST /job-types far
+    # enough for Schemathesis to reach it: a `name` containing a NUL byte (\x00) — a valid Python/
+    # JSON string character, so Pydantic's plain `str` field never rejects it — crashes with
+    # `psycopg.DataError: PostgreSQL text fields cannot contain NUL (0x00) bytes` instead of a
+    # clean 422. This isn't job_types-specific: every plain-string field across the API (task
+    # title/description, employee full_name, ...) has the same gap, since none reject NUL bytes
+    # and every one lands in a Postgres text/varchar column. Reported to the user as a genuinely
+    # separate, systemic finding, not folded into this session's fix silently.
     .exclude(path="/job-types", method="POST")
-    .exclude(path="/notifications", method="GET")
-    .exclude(path="/tasks", method="POST")
-    .exclude(path="/tasks", method="GET")
 )
 
 

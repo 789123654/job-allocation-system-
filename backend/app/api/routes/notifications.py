@@ -24,7 +24,9 @@ class NotificationOut(BaseModel):
 def list_notifications(
     actor: ActiveProfileDep,
     session: SessionDep,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    # le bound: same reasoning as tasks.py's list_tasks — Postgres bigint OFFSET overflow
+    # otherwise crashes with a raw 500 instead of a clean 422 (found by Schemathesis, 2026-09-08).
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     unread_only: Annotated[bool, Query()] = True,
 ) -> list[NotificationOut]:

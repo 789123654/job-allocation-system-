@@ -206,6 +206,11 @@ def create_task(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "assigned_to must be an active employee of this firm",
             ) from exc
+        except crud.UnknownJobTypeError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "job_type_id must be an active job type of this firm",
+            ) from exc
         session.flush()  # assigns task.id within the still-open transaction, before commit
         return status.HTTP_201_CREATED, TaskOut.from_task(task).model_dump(mode="json")
 
@@ -219,7 +224,12 @@ def create_task(
 def list_tasks(
     actor: ActiveProfileDep,
     session: SessionDep,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    # le bound: Input_Validation_Cheat_Sheet.md's "minimum and maximum value range check for
+    # numerical parameters" — without it, Postgres's own bigint OFFSET clause overflows on a
+    # large-enough value (max 9223372036854775807) and crashes with a raw 500 instead of a clean
+    # 422. 1,000,000 is a generous ceiling for this project's actual scale (found by Schemathesis,
+    # 2026-09-08, docs/SECURITY_AUDIT_CHECKLIST.md — same fix applied to every list endpoint).
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     assigned_to: Annotated[UUID | None, Query()] = None,
