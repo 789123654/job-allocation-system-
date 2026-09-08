@@ -10,18 +10,19 @@ from app import crud
 from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.api.routes.tasks import IssueOut
 from app.core.idempotency import with_idempotency
+from app.core.validation import NoNulStr
 
 router = APIRouter(prefix="/issues", tags=["issues"])
 
 
 class IssueResolveRequest(BaseModel):
     resolution_type: Literal["clarified", "deadline_adjusted", "reassigned"]
-    resolution_notes: str = Field(min_length=1, max_length=2000)
+    resolution_notes: NoNulStr = Field(min_length=1, max_length=2000)
     new_deadline: datetime | None = None
     assigned_to: UUID | None = None
     # PRD §3.3: an issue-triggered reassignment must surface remaining-work same as a review-
     # triggered one — required below, checked directly against the PRD 2026-09-04, not assumed.
-    remaining_work_description: str | None = Field(default=None, max_length=2000)
+    remaining_work_description: NoNulStr | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _validate_resolution_fields(self) -> "IssueResolveRequest":
