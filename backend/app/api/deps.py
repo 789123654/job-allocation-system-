@@ -2,12 +2,14 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
+import sentry_sdk
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import Session, select
 from sqlmodel import text as sql_text
 
 from app import crud
+from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import InvalidTokenError, verify_access_token
 from app.models import Profile
@@ -68,12 +70,25 @@ def get_current_profile(
         {"firm_id": str(firm_id)},
     )
 
+    # Tenant tag, set as early as firm_id is known-good — every log line and Sentry event for the
+    # rest of this request is then attributable to a tenant without threading firm_id through every
+    # call site by hand (saas-multitenant-architecture ch07: "every metric event a service emits
+    # should minimally carry tenant identity" — the interception point already exists here, this is
+    # the cheap moment to hook it, not a new mechanism). Sentry's FastAPI integration auto-captures
+    # any later unhandled exception in this request (main.py's own handler) with this tag already
+    # attached, no separate wiring needed. Guarded like main.py's own sentry_sdk.init() call — a
+    # no-op in dev/test where SENTRY_DSN is unset, same reasoning as that guard.
+    if settings.SENTRY_DSN:
+        sentry_sdk.set_tag("tenant_id", str(firm_id))
+
     profile = session.exec(select(Profile).where(Profile.id == UUID(user_id))).first()
     if profile is None or not profile.is_active:
-        logger.warning("Authentication failed: profile %s inactive or not found", user_id)
+        logger.warning(
+            "Authentication failed: profile %s inactive or not found (firm %s)", user_id, firm_id
+        )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account inactive or not found")
 
-    logger.debug("Authentication succeeded for profile %s", user_id)
+    logger.debug("Authentication succeeded for profile %s (firm %s)", user_id, firm_id)
     return profile
 
 
