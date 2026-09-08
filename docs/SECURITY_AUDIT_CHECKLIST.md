@@ -161,12 +161,68 @@ class, one layer over: not the lock mechanism itself, but the session lifecycle 
 - `security_review_run`: No — `/code-review ultra` still hasn't been run on this repo as of this
   pass (2026-09-08).
 
-A 5th, separate, NOT-yet-fixed bug surfaced once the above unblocked `POST /job-types` far enough
-for Schemathesis to reach it: a `name` containing a NUL byte (`\x00`) crashes with
-`psycopg.DataError: PostgreSQL text fields cannot contain NUL (0x00) bytes` instead of a clean 422
-— Pydantic's plain `str` field never rejects it (a valid Unicode codepoint). Likely systemic across
-every plain-string field in the API (task title/description, employee `full_name`, ...), not
-job_types-specific. Reported to the user, not fixed in this pass — tracked here so it isn't lost.
+A 5th, separate bug surfaced once the above unblocked `POST /job-types` far enough for
+Schemathesis to reach it — see the next entry for the fix.
+
+### NUL Bytes Rejected in Client-Controlled Strings (2026-09-08, commit `41cebb2`)
+
+Found immediately after the RLS entry above, by the same test, once that fix unblocked
+`POST /job-types` far enough for Schemathesis to reach it.
+
+```
+status: complete
+phase: N/A — cross-cutting input-validation gap (backend/app/core/validation.py, 4 route files)
+scope_files: backend/app/core/validation.py (new),
+  backend/app/api/routes/{employees,job_types,tasks,issues}.py,
+  backend/tests/api/test_schema_fuzz.py
+date: 2026-09-08
+commit: 41cebb2
+```
+
+**What was found:** a `name` containing a NUL byte (`\x00`) crashed with `psycopg.DataError:
+PostgreSQL text fields cannot contain NUL (0x00) bytes` instead of a clean 422. NUL (U+0000) is a
+valid Unicode/JSON string character, so Pydantic's plain `str` field never rejects it — but
+psycopg encodes every bound string parameter as a C string, and Postgres `text`/`varchar` columns
+reject NUL outright, in an `INSERT` or a `WHERE` clause alike (the crash happens client-side, at
+parameter encoding, before the query reaches the server — so a query-filter field is just as
+exposed as a body field).
+
+**Fixed:** `app/core/validation.py` adds `NoNulStr`, a reusable
+`Annotated[str, AfterValidator(...)]` type, applied to every client-controlled free-text/filter
+string field across the API — not just `job_types.name`, the one that happened to crash first:
+`employees.full_name`, `job_types.name`, `tasks` title/description, task-review notes/remaining-
+work-description/billing-description/billing-recipient, issue description/resolution-notes/
+remaining-work-description, and `list_tasks`'s `status`/`task_type` query filters.
+
+**D. Verification-of-verification**
+
+- `library_behavior_claims_checked_against_installed_source`: Pydantic v2's `Annotated[str,
+  AfterValidator(...)]` composition with both `Field(...)` constraints and FastAPI's `Query(...)`
+  metadata wasn't assumed — each composition shape was tested standalone (a bare `BaseModel`, then
+  a real `FastAPI`/`TestClient` route) before being applied to any real route file.
+- `fix_verified_by_real_command_output`: full suite `124 passed`, `ruff`/`pyright` clean, against a
+  real disposable `postgres:17`; schemathesis suite run 3x with different random seeds (no
+  exclusions active), all pass.
+- Negative control: reverted `job_types.name` to plain `str`, reran the schemathesis suite 3x —
+  caught the regression 1/3 runs. Stated plainly, not overclaimed: this reflects Hypothesis's
+  unseeded random generation at `max_examples=20`, not a flaw in the fix itself, which was
+  separately proven correct by a direct Pydantic-level assertion (`M(name="a\x00b")` raises)
+  before being applied anywhere.
+
+**E. Bounded claim**
+
+- `standard_and_scope`: general input-validation practice (reject what the storage layer can't
+  hold), scoped to every field named above as of commit `41cebb2` — not a claim that every string
+  field anywhere in the codebase (e.g. response-only fields, which only ever echo already-valid
+  DB data) was touched, only every client-controlled one.
+- `severity_trend_vs_last_pass`: Same category as the RLS entry immediately above — found by the
+  same tool, same session, exercising a path four completed audits and every hand-written test
+  never reached.
+
+**F. Independent pass**
+
+- `security_review_run`: No — `/code-review ultra` still hasn't been run on this repo as of this
+  pass (2026-09-08).
 
 ### Concurrency Defect — Identity-Map Staleness Defeats Row Locks (2026-09-07, commit `8565734`)
 
