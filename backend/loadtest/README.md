@@ -89,6 +89,49 @@ numbers in step 6 and a bigger `VUS` in step 7 — nothing else in this design c
 `.github/workflows/loadtest.yml`, triggered manually from the Actions tab (`workflow_dispatch`) —
 same steps as above, automated, with `vus`/`hold_duration` as workflow inputs.
 
+## Running a real capacity-validating test (not the defaults)
+
+The `20`/`10`/`40`/`50` defaults (firms / employees-per-firm / tasks-per-firm / vus) are a **smoke
+test** — do the pieces work at all (auth, seeding, k6 connecting) — not a real answer to "does the
+2k-tenant/10k-user foundation actually hold." Total request count isn't even the metric that
+matters for that question; two other numbers are, and both defaults sit at ~1-2% of the real
+target:
+
+- **Seeded data volume** — `20` firms is 1% of the 2,000-firm target; `~220` profiles is 2.2% of
+  the 10,000-user target. Composite indexes (`ix_notifications_dedup`,
+  `ix_tasks_firm_status_deadline`, etc.) only matter at real row counts — Postgres's planner
+  happily sequential-scans a table small enough that an index saves nothing, so a small-volume run
+  can't actually tell you whether those indexes are pulling their weight.
+- **Peak concurrency** (`vus`) — `50` doesn't stress connection pooling, RLS lock contention, or
+  concurrent index scans the way real concurrent usage would.
+
+**For an actual capacity run**, use inputs close to the real target:
+```
+firms: 2000
+employees_per_firm: 5      # ≈10,000 users total, matching the stated target
+tasks_per_firm: 40         # ≈80,000 task rows
+vus: 500                   # see the caveat below before going higher
+hold_duration: 5m          # longer hold — stable p95/p99 needs more samples at this scale
+```
+Seeding this is cheap with how `seed.py` is already built — it batches every firm/profile/task
+into three total bulk `INSERT`s (not per-firm round-trips), so 2,000 firms isn't meaningfully
+slower to seed than 20.
+
+**Two things not to gloss over when picking `vus` here:**
+1. **This project has never stated what fraction of 10,000 total users would be concurrently
+   active at once** — that's a real, unrecorded assumption, not a settled number. A conservative
+   5%-active assumption gives ~500 peak VUs; a more realistic one for an internal tool used
+   actively during business hours could be 10-20% (1,000-2,000). Pick a number and *say* it's an
+   assumption when reporting results — don't let it read as measured.
+2. **k6, uvicorn, and Postgres all share the same GitHub-hosted runner** (2 vCPU / 7GB RAM,
+   standard tier) — push `vus` into the low thousands and k6 itself starts competing with the app
+   for CPU, at which point results measure runner contention, not real API latency. A genuinely
+   large-scale run needs a bigger/dedicated runner or a separate load-generation host — not what's
+   built here.
+
+See `RESULTS.md` in this directory for the dated log of actual runs and what each one's findings
+do and don't support.
+
 ## What's not built (deliberately, not an oversight)
 
 - **Writes** (create/submit/review) — this first pass is read-only, matching the emphasis on
