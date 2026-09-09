@@ -56,3 +56,40 @@ reference point every future, larger-scale run's numbers can be compared against
 latency actually grows as data volume and concurrency increase toward the real target. The capacity
 question itself is still open, and still needs the `firms=2000`/`vus=500+` run `README.md` describes,
 not yet executed.
+
+## 2026-09-09 — second run, same defaults, now with latency-by-concurrency (commit `80e3bfc`)
+
+**Run**: [`34342653536`](https://github.com/789123654/job-allocation-system-/actions/runs/34342653536),
+same inputs as the first entry — the only change is `--out csv=timeseries.csv` (PR #26) now
+capturing k6's `vus` metric alongside every `http_req_duration` sample.
+
+**Aggregate result** (same shape as the first run, small run-to-run variance):
+```
+http_req_duration: avg=8.47ms min=3.48ms med=7.37ms max=130.68ms p(90)=13.42ms p(95)=18.53ms
+http_req_failed:   0.00%  0 out of 5141
+checks_total:      5141, 100% succeeded
+```
+
+**Latency bucketed by concurrent VUs** (`analyze_timeseries.py timeseries.csv`, printed directly in
+the run's own log):
+```
+ VUs (bucketed)   requests     avg ms     p95 ms
+              0         18       9.40      34.12
+             10         97       7.77      15.71
+             20        256       7.34      14.40
+             30        305       8.06      18.22
+             40        442       8.14      19.78
+             50       4023       8.63      18.67
+```
+
+**What this actually shows:** latency stayed flat — avg 7-9ms, p95 14-20ms — across the *entire*
+0-to-50-VU range tested, including the ~4,000 requests served during the 2-minute hold at full
+concurrency. No degradation trend as VUs ramped up, at this scale. The `0`-bucket row's higher
+p95 (34.12ms on only 18 requests) is almost certainly cold-start noise (first connections, JIT/cache
+warmup), not a real signal, given the sample size.
+
+**Same bounded-claim caveat as the first entry, worth repeating rather than letting the clean table
+imply otherwise:** this is "no degradation from 0 to 50 concurrent users," not "no degradation up to
+the real target." Whether latency stays this flat at 500-2,000 VUs — the scale that would actually
+stress connection pooling and lock contention — is exactly what's still unmeasured, and stays that
+way until the real-capacity run in `README.md` actually happens.
