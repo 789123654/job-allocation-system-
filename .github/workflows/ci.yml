@@ -53,6 +53,10 @@ jobs:
       - run: uv sync --frozen --dev
       - run: uv run ruff check .
       - run: uv run pyright
+      # `uv run --with` layers pip-audit on top of the already-synced project venv (verified
+      # against uv's own docs) rather than `uvx pip-audit`'s isolated throwaway env, which would
+      # never see this project's actual locked dependency versions at all.
+      - run: uv run --with pip-audit pip-audit
       - name: Stub Supabase's auth.users and auth-admin roles (CI-only — the real project already has these)
         run: |
           uv run python -c "
@@ -141,6 +145,22 @@ jobs:
       - run: >
           uvx semgrep scan --config p/security-audit --config p/owasp-top-ten
           --config .semgrep/custom-rules.yml --error .
+      # CODING_STRUCTURE.md's Phase 5 plan named Trivy alongside Semgrep/CodeQL — finishing that
+      # line now. Filesystem-scan mode (not image mode) covers dependency CVEs across all three
+      # languages this repo actually uses in one tool (Python/uv.lock, npm/package-lock.json,
+      # Rust/Cargo.lock in frontend/src-tauri) — verified support directly against Vulnerable_
+      # Dependency_Management_Cheat_Sheet.md's own tool table, not assumed. `scanners: vuln` only
+      # (not secret/misconfig) — gitleaks and zizmor above already cover those, no overlap wanted.
+      # ignore-unfixed: true — a CVE with no available fix yet would block every future PR
+      # indefinitely with nothing actionable to do about it; CRITICAL/HIGH only, same reasoning as
+      # not failing on LOW/MEDIUM/UNKNOWN noise the first time this ever runs.
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
 
   codeql:
     runs-on: ubuntu-latest
