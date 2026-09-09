@@ -164,6 +164,45 @@ class, one layer over: not the lock mechanism itself, but the session lifecycle 
 A 5th, separate bug surfaced once the above unblocked `POST /job-types` far enough for
 Schemathesis to reach it — see the next entry for the fix.
 
+**Follow-up (2026-09-09) — the "two shapes" claim above is now stale; a 2nd and 3rd instance of
+this exact mechanism were found and fixed, neither a re-audit of the 6 call sites above, both new
+code paths this original pass never touched:**
+
+- **2nd instance, PR #28**: `_ensure_deadline_notifications` itself — the very function this
+  entry's own fix patched — regressed. PR #20 (2026-09-09, `ix_notifications_dedup`) added an
+  `except IntegrityError: session.rollback()` branch for the notification-dedup race, and the
+  line right after it read `actor.firm_id` to rebuild the re-`set_config()` call this entry's fix
+  had put there. `Session.rollback()` (unlike `commit()`, which this entry's `expire_on_commit=
+  False` fix only opts out of for *commit*) always expires every object in the session — so that
+  read fired the identical lazy-refresh-with-no-tenant-context crash this entry describes, from a
+  code path added after this entry was written, and therefore never covered by it. Found by
+  `tests/crud/test_concurrency.py`'s `test_concurrent_deadline_poll_dedups_correctly` — a real
+  `threading.Barrier(2)`-against-Postgres test, this bug's own class of "only a real race surfaces
+  it" the same way the original finding above required a real pooled connection to surface.
+- **3rd instance, PR #29**: `with_idempotency` (`core/idempotency.py`) — same mechanism, a
+  different function entirely, never in `crud.py` so never in this entry's original 6-function
+  scope. Its own `except IntegrityError: session.rollback()` branch (a pre-existing pattern, not
+  new code) read `actor.firm_id`/`actor.id` afterward to look up which concurrent retry won —
+  worse than the 2nd instance, since this function had no re-`set_config()` at all, so even past
+  the actor-refresh crash, the winner-lookup query itself also ran with no tenant context
+  (`idempotency_keys` has RLS too). Backs 6 mutating endpoints (`create_task`, `submit_task`,
+  `mark_task_billed`, `review_task`, `create_task_issue`, `resolve_issue`). Found by sweeping every
+  `session.commit()`/`session.rollback()` call in `backend/app/` after the 2nd instance, rather than
+  waiting for a 4th to surface on its own — verified by the same stash-the-fix/confirm-it-fails,
+  restore-the-fix/confirm-it-passes discipline as the 2nd instance, against real Postgres.
+
+**Revised bound, replacing the "not a claim that every `session.commit()`... has been re-audited"
+line above**: as of 2026-09-09, every `session.commit()`/`session.rollback()` call site in
+`backend/app/` (not just `crud.py`) *has* now been enumerated and checked for this mechanism — 4
+total rollback sites exist in the whole backend, 3 safe (2 already were; `_ensure_deadline_
+notifications` is now the 3rd, fixed above), 1 that was live and is now fixed
+(`with_idempotency`). Also checked and ruled out as candidates: nested transactions/savepoints
+(none exist anywhere in the codebase), middleware and exception handlers in `main.py` (none touch
+`session` or any ORM object), and `backend/loadtest/` (raw autocommit `psycopg`, never goes through
+the `Session`/`app.current_tenant` mechanism at all). This bound is still scoped to *this specific
+mechanism* — a transaction-ending call followed by an ORM-object attribute read in a `SET LOCAL`-
+scoped RLS session — not a claim that no other defect class remains.
+
 ### NUL Bytes Rejected in Client-Controlled Strings (2026-09-08, commit `41cebb2`)
 
 Found immediately after the RLS entry above, by the same test, once that fix unblocked

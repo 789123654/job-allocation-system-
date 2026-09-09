@@ -174,6 +174,28 @@ at up front.
 
 **Resolved 2026-09-03.** The original "Playwright vs. `tauri-driver`" framing was itself the wrong question — checked directly against Tauri's own docs (now the `tauri-official` skill, built specifically to close this gap): the current official recommendation is WebdriverIO, which neither original option was.
 
+**Not yet built (2026-09-09), named so neither gets rediscovered from scratch later:**
+- **`supabase-client.ts`'s storage adapter has no test.** Would need `@tauri-apps/api/mocks`
+  (`mockIPC`) added as a dev dependency first — not installed yet — to intercept the `invoke()`
+  calls `LazyStore`'s `get`/`set`/`save`/`delete` make under the hood, since jsdom (the Unit/
+  Integration tier's environment) has no real Tauri runtime to talk to. Deliberately deprioritized,
+  not forgotten: even with the mock installed, such a test only proves the JS-side plumbing is
+  wired correctly (right IPC command, right args) — it can't reach the actual security property
+  this file exists for, since the DPAPI encryption (`src-tauri/src/store_crypto.rs`) runs entirely
+  in Rust, invisible to a JS-side IPC mock. That property still needs the manual/E2E check the
+  Verification section of the Phase 4 Step 1 plan already named (log in, restart the app, confirm
+  the session survives via real Windows DPAPI) — a JS mock test would add coverage without
+  touching the actual risk.
+- **The E2E tier itself was never installed** — confirmed directly (`package.json` has no
+  `webdriverio`/`@wdio/tauri-service` dependency, no `wdio.conf.*` anywhere in `frontend/`), despite
+  being "decided" above. Only the Unit/Integration tier (Vitest + Testing Library + MSW) exists so
+  far. Deliberately deferred, same reasoning as the Phase 4 Step 1 plan's own choice to skip a
+  Tauri build/lint CI job: E2E needs an OS-matched runner and a real packaged app to drive, real
+  infra cost for a slice that was about wiring, not packaging — revisit in Phase 6 (Distribution),
+  or sooner if a real login/session-persistence regression ships that only an end-to-end run would
+  have caught (the Verification section's manual walkthrough is the only thing covering that path
+  today).
+
 ## 10. Tooling & Linting
 
 `bulletproof-react/docs/project-standards.md`, checked directly: ESLint + Prettier + TypeScript (already the plan per `DEPLOYMENT.md` §4's `eslint`+`tsc` CI gate), plus two additions that document didn't yet specify:
