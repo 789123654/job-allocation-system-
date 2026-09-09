@@ -4,7 +4,10 @@ import { LoginForm } from "@/features/auth/components/login-form";
 import { SetNewPasswordForm } from "@/features/auth/components/set-new-password-form";
 import { useSession } from "@/stores/session-store";
 
-function LoginPage() {
+// Exported for router.test.tsx — the client-side gate logic (mirroring backend/app/api/deps.py's
+// require_password_set) is exercised directly, not through createBrowserRouter's real History API
+// (which reads window.location at module-load time and isn't controllable per-test).
+export function LoginPage() {
   const { session, mustChangePassword, isLoading } = useSession();
   if (isLoading) return null;
   if (session && !mustChangePassword) return <Navigate to="/" replace />;
@@ -16,7 +19,7 @@ function LoginPage() {
   );
 }
 
-function SetNewPasswordPage() {
+export function SetNewPasswordPage() {
   const { session, mustChangePassword, isLoading } = useSession();
   if (isLoading) return null;
   if (!session) return <Navigate to="/login" replace />;
@@ -31,7 +34,7 @@ function SetNewPasswordPage() {
 // Route-level gating (FRONTEND_ARCHITECTURE.md §6) — not per-component checks scattered through
 // the tree. UX only: backend/app/api/deps.py's require_password_set/get_current_profile
 // independently enforce both gates server-side on every request regardless of what this shows.
-function AuthenticatedLayout() {
+export function AuthenticatedLayout() {
   const { session, mustChangePassword, isLoading } = useSession();
   if (isLoading) return null;
   if (!session) return <Navigate to="/login" replace />;
