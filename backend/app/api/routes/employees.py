@@ -143,5 +143,7 @@ def reset_password(
         # still real and still the only response this caller sees (same accepted true-concurrent-
         # race caveat as with_idempotency's own docstring: sequential retries are fully protected,
         # two genuinely simultaneous calls can still both reach Supabase).
-        session.rollback()
+        # Safe outside commit_or_recover (core/db.py): returns an already-captured str right below,
+        # never reads the session again — doesn't need tenant context re-established.
+        session.rollback()  # nosemgrep: hand-rolled-rollback-outside-commit-or-recover
     return GeneratedPassword(generated_password=password)
