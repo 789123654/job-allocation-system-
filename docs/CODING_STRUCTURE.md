@@ -151,6 +151,10 @@ Before a vertical slice is considered done, not after:
   covered by a prior similar-looking slice (per the standing session rule, now extended explicitly into code).
 - Test exists for the slice, including the negative case (wrong firm, wrong role, wrong object) — not just
   the happy path.
+- **Any new `session.commit()`/`session.rollback()` pair goes through `core.db.commit_or_recover`, never
+  hand-rolled** — added 2026-09-10 after this exact shape was independently reimplemented, minus the tenant-
+  context re-`set_config` fix, by a 2nd call site (`SECURITY_AUDIT_CHECKLIST.md`). `tests/core/test_db.py`
+  enforces this in CI; check it here too, before writing the code, not after.
 
 ---
 
