@@ -15,10 +15,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
-from sqlmodel import text as sql_text
 
+from app.core.db import commit_or_recover
 from app.models import IdempotencyKey, Profile
 
 _TTL = timedelta(hours=24)  # Rule 230's own example duration; not prescribed, just a sane default
@@ -100,15 +99,6 @@ def with_idempotency(
     `HTTPException` too if a future failure case is ever non-deterministic (e.g. a transient
     external-API error) where retry-and-recompute could legitimately give a different answer.
     """
-    # Captured now, not re-read after the rollback below: Session.rollback() expires every object
-    # in the session (unlike commit(), which get_session's expire_on_commit=False already opts out
-    # of) — real Postgres two-thread proof, tests/core/test_idempotency_concurrency.py's
-    # test_concurrent_identical_retry_recovers_the_winner, 2026-09-09. Re-reading `actor.firm_id`/
-    # `actor.id` in the except block below would fire a lazy-refresh SELECT with no tenant context
-    # yet — the same crash crud.py's _ensure_deadline_notifications hit from its own rollback path,
-    # found the same session (SECURITY_AUDIT_CHECKLIST.md's original finding, 2026-09-08, is the
-    # third instance of this exact mechanism).
-    firm_id_str = str(actor.firm_id)
     actor_id = actor.id
     request_hash = _hash_request(endpoint, request_body)
     cutoff = datetime.now(UTC) - _TTL
@@ -141,21 +131,13 @@ def with_idempotency(
             created_at=datetime.now(UTC),
         )
     )
-    try:
-        session.commit()
-    except IntegrityError:
-        # A concurrent identical retry won the race first — not a real error, refetch its result.
-        session.rollback()
-        # Re-set tenant context — rollback() ended the transaction get_current_profile's
-        # set_config() scoped it to, same mechanism as _ensure_deadline_notifications's own
-        # post-rollback re-set_config (crud.py). Postgres-only, like that call — this module's own
-        # tests/core/test_idempotency.py deliberately runs against real SQLite (no RLS there to
-        # restore context for, and no set_config function on SQLite at all).
-        if session.get_bind().dialect.name == "postgresql":
-            session.execute(  # pyright: ignore[reportDeprecated] — same as get_current_profile's call
-                sql_text("SELECT set_config('app.current_tenant', :firm_id, true)"),
-                {"firm_id": firm_id_str},
-            )
+
+    firm_id_str = str(actor.firm_id)
+
+    def _recover_winner() -> tuple[int, dict[str, Any]]:
+        # Called by commit_or_recover (core/db.py) only after it has already rolled back and
+        # re-established tenant context — safe to query the session again here for that reason.
+        # A concurrent identical retry won the insert race first — not a real error, refetch it.
         winner = session.exec(
             select(IdempotencyKey).where(
                 IdempotencyKey.firm_id == firm_id_str,
@@ -165,6 +147,18 @@ def with_idempotency(
             )
         ).first()
         if winner is None:
-            raise
+            # Genuinely shouldn't happen — a UNIQUE-constraint IntegrityError with no matching row
+            # after it. Not a bare `raise`: commit_or_recover (core/db.py) calls on_conflict()
+            # after its own except block has already exited (needed so tenant context is restored
+            # before this query runs), so there's no "currently handled exception" left to re-raise
+            # by that point — confirmed empirically while writing this, not assumed.
+            raise RuntimeError(
+                "IntegrityError on idempotency_keys but no winning row found afterward — should "
+                "be impossible; the UNIQUE constraint that raised it implies a matching row exists."
+            )
         return winner.response_status, winner.response_body
+
+    committed, recovered = commit_or_recover(session, actor, on_conflict=_recover_winner)
+    if not committed:
+        return recovered
     return status_code, response_body

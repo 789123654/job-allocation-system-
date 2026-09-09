@@ -10,8 +10,11 @@ mid-request and then queries again afterward runs that later query with no tenan
 (found via Schemathesis, 2026-09-08, docs/SECURITY_AUDIT_CHECKLIST.md) — either 0 rows or a raw
 uuid-cast crash, depending on whether the pooled connection had seen a tenant context before. Fixed
 at the two shapes this takes: a stale post-commit `session.refresh()` (delete it — see
-`get_session`'s `expire_on_commit=False`, app/core/db.py) or a real post-commit query that's
-regenerated the tenant context explicitly (`_ensure_deadline_notifications`, below).
+`get_session`'s `expire_on_commit=False`, app/core/db.py) or a real post-commit query that needs the
+tenant context regenerated explicitly after a conflict rollback — `core.db.commit_or_recover`,
+consolidated there 2026-09-10 after this exact recovery shape was independently reimplemented
+(minus the fix) by a 2nd call site (`core/idempotency.py`). Use that helper, don't hand-roll this
+again — see its own docstring.
 """
 
 import secrets
@@ -20,8 +23,8 @@ from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
-from sqlmodel import text as sql_text
 
+from app.core.db import commit_or_recover
 from app.core.supabase_admin import admin_auth
 from app.models import (
     AccessDenial,
@@ -760,47 +763,21 @@ def _ensure_deadline_notifications(session: Session, actor: Profile) -> None:
     trigger unbounded writes.
     """
     now = datetime.now(UTC)
-    # Captured now, not re-read after rollback below: Session.rollback() (unlike commit(), which
-    # expire_on_commit=False already opts out of) always expires every object in the session —
-    # real Postgres two-thread proof, tests/crud/test_concurrency.py's
-    # test_concurrent_deadline_poll_dedups_correctly, 2026-09-09. Re-reading `actor.firm_id` after
-    # the rollback below would fire a lazy-refresh SELECT to reload the expired attribute — the
-    # exact same "raw uuid-cast crash, no tenant context yet" mechanism this function's own commit-
-    # path already guards against (comment below), just triggered from the rollback side instead:
-    # chicken-and-egg, since re-establishing tenant context is the very thing that read needs.
-    firm_id_str = str(actor.firm_id)
     if actor.role == "owner":
         _ensure_owner_deadline_notifications(session, actor, now)
     else:
         _ensure_employee_deadline_notifications(session, actor, now)
-    try:
-        session.commit()
-    except IntegrityError:
-        # Two near-simultaneous polls (ARCHITECTURE.md §8: every 30-60s) both found the same
-        # deadline notification "missing" and both tried to insert it — ix_notifications_dedup's
-        # partial UNIQUE index (see its migration) is what makes that a real DB conflict instead of
-        # a silent duplicate row. Whichever request loses just rolls back its whole batch rather
-        # than retrying: the other request's commit already created every notification this one
-        # would have, and anything genuinely still missing gets picked up by this same lazy-
-        # generation path on the next poll — this function's own docstring already commits to that
-        # "no scheduler, next poll catches it" design, so losing one cycle changes nothing about
-        # correctness, only which of two concurrent requests happens to do the writing.
-        session.rollback()
-    # Re-set tenant context — commit() (or the rollback() above, on that race) ended the
-    # transaction get_current_profile's set_config() scoped it to (module docstring above).
-    # list_notifications queries `notifications` right after this call returns, in the same
-    # session; without this, that query runs with no tenant context and either matches 0 rows or
-    # crashes on a raw uuid cast, same mechanism as the deleted post-commit session.refresh() calls
-    # elsewhere in this file, just as a genuinely new query instead of a stale-attribute read (so
-    # expire_on_commit=False doesn't cover this one).
-    # Postgres-only, like get_current_profile's own call —
-    # tests/crud/test_notification_generation.py deliberately runs this same function against
-    # real SQLite (no RLS there to restore context for), and set_config doesn't exist on SQLite.
-    if session.get_bind().dialect.name == "postgresql":
-        session.execute(  # pyright: ignore[reportDeprecated] — same as get_current_profile's call
-            sql_text("SELECT set_config('app.current_tenant', :firm_id, true)"),
-            {"firm_id": firm_id_str},
-        )
+    # Two near-simultaneous polls (ARCHITECTURE.md §8: every 30-60s) can both find the same
+    # deadline notification "missing" and both try to insert it — ix_notifications_dedup's partial
+    # UNIQUE index (see its migration) is what makes that a real DB conflict (IntegrityError)
+    # instead of a silent duplicate row. commit_or_recover (core/db.py) commits, and on that
+    # conflict rolls back + re-establishes tenant context for list_notifications' query right after
+    # this call returns — no on_conflict callback needed: whichever request loses just accepts the
+    # rollback, since the other request's commit already created every notification this one would
+    # have, and anything genuinely still missing gets picked up by this same lazy-generation path on
+    # the next poll (this function's own docstring already commits to that "no scheduler, next poll
+    # catches it" design, so losing one cycle changes nothing about correctness).
+    commit_or_recover(session, actor)
 
 
 def list_notifications(
