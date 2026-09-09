@@ -135,7 +135,12 @@ jobs:
       # --config p/security-audit ...` runs standalone, exit 0/1 on clean/findings, confirmed by a
       # real local run before wiring this in, not assumed from `--config auto`'s own docs, which
       # do mention a login flow that a bare `--config <ruleset>` never triggers).
-      - run: uvx semgrep scan --config p/security-audit --config p/owasp-top-ten --error .
+      # .semgrep/custom-rules.yml (added 2026-09-10) — project-specific rules the public registry
+      # rulesets can't know about, e.g. banning a hand-rolled session.rollback() outside
+      # core.db.commit_or_recover (SECURITY_AUDIT_CHECKLIST.md's 2026-09-09 follow-up).
+      - run: >
+          uvx semgrep scan --config p/security-audit --config p/owasp-top-ten
+          --config .semgrep/custom-rules.yml --error .
 
   codeql:
     runs-on: ubuntu-latest

@@ -302,7 +302,9 @@ def create_job_type(session: Session, actor: Profile, name: str) -> JobType:
     try:
         session.commit()
     except IntegrityError as exc:
-        session.rollback()
+        # Safe outside commit_or_recover (core/db.py): raises immediately, never reads the
+        # session again — doesn't need tenant context re-established.
+        session.rollback()  # nosemgrep: hand-rolled-rollback-outside-commit-or-recover
         raise DuplicateJobTypeNameError from exc
     # No session.refresh() — every field here is set in Python above, nothing is DB-computed, and
     # get_session's expire_on_commit=False means this object's attributes are already the

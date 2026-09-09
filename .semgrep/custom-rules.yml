@@ -1,0 +1,20 @@
+# Project-specific rules, run alongside the public p/security-audit + p/owasp-top-ten registry
+# rulesets already wired into ci.yml's `security` job. These catch this project's own patterns,
+# not generic ones a public ruleset would know about.
+rules:
+  - id: hand-rolled-rollback-outside-commit-or-recover
+    languages: [python]
+    severity: ERROR
+    message: >
+      session.rollback() outside app/core/db.py. This project shipped the same tenant-context-loss
+      bug twice by hand-rolling this exact commit/except-IntegrityError/rollback shape at two
+      independent call sites — one got the fix (re-`set_config` after rollback), the other didn't
+      (SECURITY_AUDIT_CHECKLIST.md, 2026-09-09 follow-up; see app/core/db.py's commit_or_recover
+      docstring for the full mechanism). Route this through core.db.commit_or_recover instead of
+      writing a new one. If this rollback genuinely never reads the session again afterward (raises
+      or returns immediately, same as the two existing `# nosemgrep`-annotated sites), silence this
+      finding inline with a one-line reason, same as those two.
+    paths:
+      exclude:
+        - "**/app/core/db.py"
+    pattern: $SESSION.rollback()
