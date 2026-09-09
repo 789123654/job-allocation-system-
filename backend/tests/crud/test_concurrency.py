@@ -24,6 +24,7 @@ import os
 import threading
 import time
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -336,3 +337,121 @@ def test_concurrent_reset_password_serializes(
     assert errors == []
     assert len(completed_at) == 2
     assert abs(completed_at[0] - completed_at[1]) >= 0.25  # allows a little scheduling slack
+
+
+@pytest.fixture
+def overdue_task() -> Generator[dict[str, UUID]]:
+    """A task deadline safely in the past, assigned to `employee_id` and still 'assigned' (an
+    active status) — the exact shape `_ensure_employee_deadline_notifications` turns into a
+    `task_overdue_own` notification. Same planting pattern as `assigned_task`.
+    """
+    assert _MIGRATIONS_URL is not None  # guaranteed by pytestmark's skipif above
+    admin_engine = create_engine(_MIGRATIONS_URL)
+    firm_id, owner_id, employee_id, task_id = uuid4(), uuid4(), uuid4(), uuid4()
+    with admin_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO firms (id, name, plan, status) VALUES (:id, 'x', 'free', 'active')"),
+            {"id": firm_id},
+        )
+        for pid, role in ((owner_id, "owner"), (employee_id, "employee")):
+            conn.execute(
+                text(
+                    "INSERT INTO profiles (id, firm_id, role, full_name, email) "
+                    "VALUES (:id, :fid, :role, 'x', :email)"
+                ),
+                {"id": pid, "fid": firm_id, "role": role, "email": f"{pid}@example.com"},
+            )
+        conn.execute(
+            text(
+                "INSERT INTO tasks (id, firm_id, title, assigned_to, status, created_by, deadline) "
+                "VALUES (:id, :fid, 'Race me', :assignee, 'assigned', :owner, :deadline)"
+            ),
+            {
+                "id": task_id,
+                "fid": firm_id,
+                "assignee": employee_id,
+                "owner": owner_id,
+                "deadline": datetime.now(UTC) - timedelta(days=2),
+            },
+        )
+    yield {"firm_id": firm_id, "task_id": task_id, "employee_id": employee_id}
+    with admin_engine.begin() as conn:
+        conn.execute(text("DELETE FROM notifications WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM tasks WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM profiles WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM firms WHERE id = :fid"), {"fid": firm_id})
+    admin_engine.dispose()
+
+
+def _notification_racer(
+    engine: Engine,
+    firm_id: UUID,
+    employee_id: UUID,
+    barrier: threading.Barrier,
+    errors: list[BaseException],
+) -> None:
+    try:
+        # Bound directly to the engine, not a pre-opened connection like the racers above — this
+        # mirrors get_session()'s real Session(engine, expire_on_commit=False) exactly, because
+        # _ensure_deadline_notifications manages its own transaction boundaries internally
+        # (commit()/rollback(), then a fresh set_config()) the same way a real request does across
+        # get_current_profile's set_config and this function's own mid-request commit.
+        with Session(engine, expire_on_commit=False) as session:
+            session.execute(  # pyright: ignore[reportDeprecated] — same as get_current_profile's call
+                text("SELECT set_config('app.current_tenant', :fid, true)"), {"fid": str(firm_id)}
+            )
+            actor = session.exec(
+                select(Profile).where(Profile.firm_id == firm_id, Profile.id == employee_id)
+            ).one()
+            barrier.wait(timeout=5)  # both racers hit the missing-notification SELECT at once
+            # Through the real public entry point (same call `GET /notifications` makes), not the
+            # private `_ensure_deadline_notifications` directly — exercises the exact production
+            # path and avoids reaching past the module boundary for something with a public route.
+            crud.list_notifications(session, actor, 0, 50, False)
+    except BaseException as exc:  # surfaced in the main thread below, never swallowed
+        errors.append(exc)
+
+
+def test_concurrent_deadline_poll_dedups_correctly(overdue_task: dict[str, UUID]) -> None:
+    """Two threads race `list_notifications` (and its internal `_ensure_deadline_notifications`
+    step) against the same overdue task/recipient — the real shape of two near-simultaneous
+    `GET /notifications` polls (ARCHITECTURE.md §8's 30-60s polling interval). Without
+    `ix_notifications_dedup`'s partial UNIQUE index, both threads
+    could observe the notification "missing" and both insert it — two rows for the same
+    (recipient, type, task). With the index: whichever thread's commit lands second hits a real
+    IntegrityError, which `_ensure_deadline_notifications` must catch and roll back from, not let
+    propagate. This is the real-Postgres proof for that catch, per this file's own established
+    standard (module docstring) — reasoning about the race alone was never enough on its own.
+    """
+    assert _APP_URL is not None  # guaranteed by pytestmark's skipif above
+    firm_id, task_id = overdue_task["firm_id"], overdue_task["task_id"]
+    employee_id = overdue_task["employee_id"]
+    engine = create_engine(_APP_URL)
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+    threads = [
+        threading.Thread(
+            target=_notification_racer, args=(engine, firm_id, employee_id, barrier, errors)
+        )
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    engine.dispose()
+
+    assert _MIGRATIONS_URL is not None  # guaranteed by pytestmark's skipif above
+    admin_engine = create_engine(_MIGRATIONS_URL)
+    with admin_engine.begin() as conn:
+        count = conn.execute(
+            text(
+                "SELECT count(*) FROM notifications WHERE firm_id = :fid AND recipient_id = :rid "
+                "AND type = 'task_overdue_own' AND task_id = :tid"
+            ),
+            {"fid": firm_id, "rid": employee_id, "tid": task_id},
+        ).scalar_one()
+    admin_engine.dispose()
+
+    assert errors == []  # the IntegrityError catch must have absorbed the loser's race, not raised
+    assert count == 1  # exactly one notification — no duplicate, and none lost
