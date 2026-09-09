@@ -760,6 +760,15 @@ def _ensure_deadline_notifications(session: Session, actor: Profile) -> None:
     trigger unbounded writes.
     """
     now = datetime.now(UTC)
+    # Captured now, not re-read after rollback below: Session.rollback() (unlike commit(), which
+    # expire_on_commit=False already opts out of) always expires every object in the session —
+    # real Postgres two-thread proof, tests/crud/test_concurrency.py's
+    # test_concurrent_deadline_poll_dedups_correctly, 2026-09-09. Re-reading `actor.firm_id` after
+    # the rollback below would fire a lazy-refresh SELECT to reload the expired attribute — the
+    # exact same "raw uuid-cast crash, no tenant context yet" mechanism this function's own commit-
+    # path already guards against (comment below), just triggered from the rollback side instead:
+    # chicken-and-egg, since re-establishing tenant context is the very thing that read needs.
+    firm_id_str = str(actor.firm_id)
     if actor.role == "owner":
         _ensure_owner_deadline_notifications(session, actor, now)
     else:
@@ -790,7 +799,7 @@ def _ensure_deadline_notifications(session: Session, actor: Profile) -> None:
     if session.get_bind().dialect.name == "postgresql":
         session.execute(  # pyright: ignore[reportDeprecated] — same as get_current_profile's call
             sql_text("SELECT set_config('app.current_tenant', :firm_id, true)"),
-            {"firm_id": str(actor.firm_id)},
+            {"firm_id": firm_id_str},
         )
 
 
