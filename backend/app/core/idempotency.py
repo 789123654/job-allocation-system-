@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
+from sqlmodel import text as sql_text
 
 from app.models import IdempotencyKey, Profile
 
@@ -99,6 +100,16 @@ def with_idempotency(
     `HTTPException` too if a future failure case is ever non-deterministic (e.g. a transient
     external-API error) where retry-and-recompute could legitimately give a different answer.
     """
+    # Captured now, not re-read after the rollback below: Session.rollback() expires every object
+    # in the session (unlike commit(), which get_session's expire_on_commit=False already opts out
+    # of) — real Postgres two-thread proof, tests/core/test_idempotency_concurrency.py's
+    # test_concurrent_identical_retry_recovers_the_winner, 2026-09-09. Re-reading `actor.firm_id`/
+    # `actor.id` in the except block below would fire a lazy-refresh SELECT with no tenant context
+    # yet — the same crash crud.py's _ensure_deadline_notifications hit from its own rollback path,
+    # found the same session (SECURITY_AUDIT_CHECKLIST.md's original finding, 2026-09-08, is the
+    # third instance of this exact mechanism).
+    firm_id_str = str(actor.firm_id)
+    actor_id = actor.id
     request_hash = _hash_request(endpoint, request_body)
     cutoff = datetime.now(UTC) - _TTL
     existing = session.exec(
@@ -135,10 +146,20 @@ def with_idempotency(
     except IntegrityError:
         # A concurrent identical retry won the race first — not a real error, refetch its result.
         session.rollback()
+        # Re-set tenant context — rollback() ended the transaction get_current_profile's
+        # set_config() scoped it to, same mechanism as _ensure_deadline_notifications's own
+        # post-rollback re-set_config (crud.py). Postgres-only, like that call — this module's own
+        # tests/core/test_idempotency.py deliberately runs against real SQLite (no RLS there to
+        # restore context for, and no set_config function on SQLite at all).
+        if session.get_bind().dialect.name == "postgresql":
+            session.execute(  # pyright: ignore[reportDeprecated] — same as get_current_profile's call
+                sql_text("SELECT set_config('app.current_tenant', :firm_id, true)"),
+                {"firm_id": firm_id_str},
+            )
         winner = session.exec(
             select(IdempotencyKey).where(
-                IdempotencyKey.firm_id == actor.firm_id,
-                IdempotencyKey.actor_id == actor.id,
+                IdempotencyKey.firm_id == firm_id_str,
+                IdempotencyKey.actor_id == actor_id,
                 IdempotencyKey.idempotency_key == idempotency_key,
                 IdempotencyKey.endpoint == endpoint,
             )
