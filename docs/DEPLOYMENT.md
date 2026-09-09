@@ -346,3 +346,65 @@ item 7): replace `http://localhost:8000` in `connect-src` with the real Railway/
 once it exists. Verify by an actual failed-then-fixed request in a production-configured build, not by
 inspection alone — a CSP violation is silent (no thrown error the app code can catch), so "the API call
 just doesn't work" is the only symptom without an explicit check.
+
+## 13. Connecting the Real Supabase Project — Runbook
+
+Written 2026-09-10, before actually doing this — a plan to execute next session, not a record of
+something already done. §11's "doesn't exist yet" framing is now stale: a real project ref
+(`xyhzpzxcfvefrramidwz`) was found embedded in a misconfigured local MCP server entry the same session
+this runbook was written — confirm this is actually the intended pilot-firm project (not a stale/test
+one) as this runbook's first step, rather than assuming.
+
+**Ordered steps:**
+
+1. **Confirm the project.** Verify `xyhzpzxcfvefrramidwz` (or whichever project ref is current) is the
+   real, intended one before touching it with a migration.
+2. **Get `MIGRATIONS_DATABASE_URL`** from that project's dashboard — Project Settings → Database →
+   Connection string, the `postgres` superuser role (same shape CI's disposable container uses, §4).
+   Handed over as an env var, never committed to the repo — same handling as every other secret here.
+3. **Run `uv run alembic upgrade head` directly against it** — the same command this session ran
+   repeatedly against local/CI disposable Postgres instances, just pointed at the real project.
+   **Deliberately not via the Supabase MCP server's own `database`/`development` tools**, even once
+   that connection exists: this repo's migration history lives in `backend/app/alembic/versions/*.py`
+   and is meant to run through exactly one path (`CODING_STRUCTURE.md`: "one migration per schema
+   change, never hand-edited after merge") — running schema changes through a second, MCP-driven
+   mechanism would be a real, undocumented deviation from that, not a shortcut.
+4. **Flip the required dashboard settings** — §11 above already names 3 (password minimum length,
+   require-current-password, ES256 vs RS256 signing). A 4th, not previously collected anywhere in this
+   file: **enable the Custom Access Token Auth Hook** (Authentication → Hooks → Custom Access Token),
+   pointed at `public.custom_access_token_hook(event jsonb)` — the function migration `a8e6def15927`
+   already creates. The migration only creates the function; nothing enables it. Without this step,
+   `app_metadata.role`/`firm_id`/`must_change_password` never reach the JWT and every
+   `get_current_profile`/`require_owner`/`require_password_set` gate in `backend/app/api/deps.py`
+   silently breaks — this is the single most load-bearing dashboard setting in this whole runbook, more
+   so than any item already listed in §11.
+5. **Decide the breached-password-protection gap explicitly**, don't silently skip it — `ARCHITECTURE.md`
+   §14 already named this: accept the ASVS 6.2.4/6.2.12 gap for the free-tier pilot, revisit by flipping
+   Supabase's native leaked-password toggle once/if the project moves to the Pro plan.
+6. **Set the real env vars** — `frontend/.env` (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`,
+   `VITE_API_BASE_URL`) and the backend's `SUPABASE_URL`/`SUPABASE_SECRET_KEY`/`CORS_ORIGINS`, matching
+   `.env.example`'s shape in each. Git-ignored, never committed.
+7. **Run the Firm + Owner provisioning script** (`ARCHITECTURE.md`'s Firm + Owner Provisioning section)
+   against the real project to create the first real Owner account — the one prerequisite every later
+   manual test in this runbook needs.
+8. **Fix the local Supabase MCP connection for ongoing read-only use.** The current entry
+   (`supbase_mcp_server` in the local Claude Code config) is broken because its `url` field holds the
+   entire `claude mcp add` shell command instead of a URL — that command needs to actually be *run*, in
+   an interactive terminal, not pasted into config by hand:
+   ```
+   claude mcp add --scope project --transport http supabase "https://mcp.supabase.com/mcp?project_ref=<ref>&read_only=true&features=docs%2Caccount%2Cdatabase%2Cdebugging%2Cdevelopment%2Cfunctions%2Cbranching"
+   ```
+   `read_only=true` is already part of the intended config — keep it; this connection is for inspecting/
+   debugging the real project afterward, never for running migrations (step 3 already covers that
+   through the repo's own path). Newly-added MCP servers take effect starting the *next* session, not
+   the one that ran `claude mcp add` — confirmed session behavior, not a misconfiguration if it doesn't
+   show up immediately.
+9. **Run the actual manual smoke test** — `binary-meandering-wind.md`'s Step 3 verification checklist,
+   already referenced by §11 above but never yet executed against a real project: `npm run tauri dev`,
+   log in with the provisioned Owner's generated temporary password, confirm the forced Set New Password
+   gate, change the password, close and reopen the app to confirm the session survives via the Tauri
+   storage plugin (not just in-memory), and deliberately try the wrong current password on a change to
+   confirm step 4's hook and §11's "require current password" setting are both actually enforced — not
+   assumed correct because the code looks right.
+10. **Update this file and `ARCHITECTURE.md`'s stale "doesn't exist yet" language** once the above is
+    actually done — don't leave a completed-reality doc still describing a not-yet-real state.
