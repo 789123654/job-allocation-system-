@@ -156,15 +156,23 @@ jobs:
             -e VUS="$VUS" \
             -e HOLD="$HOLD" \
             --summary-export=summary.json \
+            --out csv=timeseries.csv \
             script.js
 
       - name: Show the app's own log on failure
         if: failure()
         run: cat /tmp/uvicorn.log
 
+      - name: Print latency by concurrency (analyze_timeseries.py)
+        if: always()
+        working-directory: backend/loadtest
+        run: uv run python analyze_timeseries.py timeseries.csv || true
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: k6-summary
-          path: backend/loadtest/summary.json
+          path: |
+            backend/loadtest/summary.json
+            backend/loadtest/timeseries.csv
           if-no-files-found: ignore

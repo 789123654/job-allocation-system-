@@ -76,9 +76,15 @@ MIGRATIONS_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/po
 SUPABASE_URL=http://localhost:9999 \
 uv run python loadtest/seed.py --firms 20 --employees-per-firm 10 --tasks-per-firm 40
 
-# 7. Run k6 (install from https://k6.io if needed)
+# 7. Run k6 (install from https://k6.io if needed) — --out csv writes a timestamped row per
+#    metric observation (k6's own `vus` metric included), not just the one end-of-run aggregate
+#    --summary-export gives you.
 cd loadtest
-VUS=50 RAMP_UP=1m HOLD=2m RAMP_DOWN=30s API_BASE_URL=http://localhost:8000 k6 run script.js
+VUS=50 RAMP_UP=1m HOLD=2m RAMP_DOWN=30s API_BASE_URL=http://localhost:8000 \
+  k6 run --out csv=timeseries.csv script.js
+
+# 8. See how latency actually changed as concurrency ramped, not just one flat aggregate number
+uv run python analyze_timeseries.py timeseries.csv
 ```
 
 Scaling toward the real 2k-tenant/10k-user target is just bigger `--firms`/`--employees-per-firm`
@@ -87,7 +93,10 @@ numbers in step 6 and a bigger `VUS` in step 7 — nothing else in this design c
 ## Running it in CI
 
 `.github/workflows/loadtest.yml`, triggered manually from the Actions tab (`workflow_dispatch`) —
-same steps as above, automated, with `vus`/`hold_duration` as workflow inputs.
+same steps as above, automated, with `vus`/`hold_duration` as workflow inputs. `timeseries.csv` and
+`summary.json` both upload as the `k6-summary` artifact, and `analyze_timeseries.py`'s
+latency-by-concurrency table prints directly in the run's own log (a step that runs `if: always()`,
+so it prints even if a threshold fails).
 
 ## Running a real capacity-validating test (not the defaults)
 
@@ -128,6 +137,29 @@ slower to seed than 20.
    for CPU, at which point results measure runner contention, not real API latency. A genuinely
    large-scale run needs a bigger/dedicated runner or a separate load-generation host — not what's
    built here.
+
+**Read this before ever running `vus: 2000`-class inputs — `--out csv=timeseries.csv` needs
+trimming at that scale, and there's no built-in way to do it:** checked live against Grafana's own
+k6 CSV-output docs — the only configuration options are `saveInterval` (how often buffered rows get
+*flushed to disk*, default `1s`), `timeFormat`, and `fileName`. **Nothing filters which metrics or
+how many rows get written.** k6 writes a timestamped row for *every* built-in metric on *every*
+request/iteration by default — not just `vus`/`http_req_duration`, also `http_req_blocked`,
+`http_req_connecting`, `http_req_tls_handshaking`, `http_req_sending`, `http_req_waiting`,
+`http_req_receiving`, `iteration_duration`, `data_sent`, `data_received`, `checks`, and more, each
+its own row. At `vus=50` over 3.5 minutes this was small and harmless (the 2026-09-09 run below).
+At `vus=2000` over `hold_duration: 5m`, row count scales directly with request volume — this will
+be a large file, and there's no k6 flag to shrink it before it's written. Three real options, none
+built yet:
+1. Accept the larger artifact — GitHub Actions artifact storage tolerates it, it's just a bigger
+   download to analyze locally.
+2. Post-filter after the run (a `grep '^(vus|http_req_duration),' timeseries.csv >
+   trimmed.csv`-shaped step, or teach `analyze_timeseries.py` to stream-filter while reading rather
+   than loading every row) — reduces the *artifact/analysis* cost, not k6's own CPU/memory
+   overhead while generating it, so it doesn't help caveat 2 above.
+3. For a genuinely large run, k6 also supports streaming output to a real metrics backend
+   (InfluxDB/Prometheus remote-write) instead of a flat file — the actual right tool at that scale,
+   but real new infrastructure, out of scope for what's built here.
+Read this section again before actually running the 2000-VU input set — don't rediscover it mid-run.
 
 See `RESULTS.md` in this directory for the dated log of actual runs and what each one's findings
 do and don't support.
