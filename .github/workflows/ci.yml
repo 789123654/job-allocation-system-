@@ -152,14 +152,20 @@ jobs:
       # Dependency_Management_Cheat_Sheet.md's own tool table, not assumed. `scanners: vuln` only
       # (not secret/misconfig) — gitleaks and zizmor above already cover those, no overlap wanted.
       # ignore-unfixed: true — a CVE with no available fix yet would block every future PR
-      # indefinitely with nothing actionable to do about it; CRITICAL/HIGH only, same reasoning as
-      # not failing on LOW/MEDIUM/UNKNOWN noise the first time this ever runs.
+      # indefinitely with nothing actionable to do about it.
+      # severity: includes MEDIUM (added 2026-09-10) — every other check in this job fails on any
+      # finding, so Trivy passing a fixable MEDIUM that pip-audit/Dependabot both flag was an
+      # inconsistency. The one current MEDIUM (glib, transitive via Tauri, no upgrade path yet) is
+      # waived with a reason + removal condition in .trivyignore, same strict-gate-plus-explicit-
+      # waiver pattern as the # nosemgrep lines. trivyignores: points at that file explicitly rather
+      # than relying on auto-discovery from the scan root.
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scanners: vuln
-          severity: CRITICAL,HIGH
+          severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
+          trivyignores: .trivyignore
           exit-code: "1"
 
   codeql:

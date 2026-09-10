@@ -1,0 +1,15 @@
+# Trivy vulnerability waivers. One ID per line, each with a reason and a
+# removal condition. Trivy auto-discovers this file; ci.yml also points at it
+# explicitly via the trivy-action `trivyignores` input.
+
+# GHSA-wrw7-89jp-8q8g / RUSTSEC-2024-0429 — MEDIUM
+# glib < 0.20.0: unsoundness in glib::VariantStrIter's Iterator impl. UB only
+# under a specific misuse pattern this codebase does not exercise (we never
+# touch glib::Variant directly).
+# Transitive dependency: pulled in by Tauri's GTK/webview stack (frontend/
+# src-tauri/Cargo.lock), not a direct choice. A manual bump in Cargo.lock is
+# reverted on the next `cargo update` — the real fix waits on Tauri bumping its
+# own glib dependency.
+# Tracked continuously as Dependabot alert #1. Delete this line once Tauri
+# ships with glib 0.20+ and `cargo update` clears it.
+GHSA-wrw7-89jp-8q8g
