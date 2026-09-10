@@ -84,11 +84,17 @@ jobs:
           conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/postgres', autocommit=True)
           conn.execute(\"ALTER ROLE fastapi_app WITH PASSWORD 'ci_test_password'\")
           "
-      # --cov-fail-under is a ratchet: baseline was 93% (measured in this PR's first CI run), set
-      # one point below for rounding slack. Raise it in the PR that adds the tests earning it —
-      # never toward 100%, which just breeds assertion-free tests. A PR that drops coverage below
-      # this fails here and can't merge.
-      - run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=92
+      # Authorization regression suite as its own gate (Authorization_Regression_Testing_Cheat_
+      # Sheet.md — "the authorization test suite must be a required check ... tag or group them
+      # distinctly"). Re-runs under the full pytest below too; this step exists so an access-
+      # control regression surfaces as an authz failure, not one line buried in 130 tests.
+      - run: uv run pytest -m authz
+      # --cov-fail-under is a ratchet: set ~1 point below the current measured number for rounding
+      # slack, raised only in the PR that adds the tests earning it — never toward 100%, which just
+      # breeds assertion-free tests. A PR that drops coverage below this fails here and can't merge.
+      # 92 -> 93: the authz regression suite (test_authz_regression.py + test_deps.py additions)
+      # took the measured number to 94.4%.
+      - run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=93
 
   frontend:
     runs-on: ubuntu-latest

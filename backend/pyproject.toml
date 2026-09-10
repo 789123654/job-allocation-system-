@@ -67,6 +67,11 @@ reportUnknownLambdaType = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# Authorization_Regression_Testing_Cheat_Sheet.md: "Tag or group authorization tests distinctly
+# (e.g. @pytest.mark.authz)" so they can be run as their own fast, legible CI gate — `uv run
+# pytest -m authz` in ci.yml. Covers tenant isolation (test_rls_isolation), object-level authz
+# (test_access_denials, test_authz_regression), and the auth dependency chain (test_deps).
+markers = ["authz: authorization / access-control regression tests"]
 
 [tool.coverage.run]
 source = ["app"]
