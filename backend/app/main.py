@@ -120,7 +120,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     exception logged server-side (this handler's job) and never echoed to the client (`_problem`'s
     job, already true of every other handler here).
     """
-    logger.exception("Unhandled exception on %s", request.url.path)
+    # Starlette invokes this handler from inside its own `except` block, so sys.exc_info() is live
+    # and .exception() captures the real traceback. Ruff's LOG004 is purely syntactic and can't see
+    # that the @app.exception_handler decorator establishes that context.
+    logger.exception("Unhandled exception on %s", request.url.path)  # noqa: LOG004
     return _problem(500, "An unexpected error occurred", str(request.url.path))
 
 

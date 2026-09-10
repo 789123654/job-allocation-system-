@@ -28,7 +28,15 @@ dev = [
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "S", "FAST"]
+# E/F/I/UP/B/S/FAST from the start. Added 2026-09-10: SIM (simplify), PERF (perf anti-patterns),
+# RUF (ruff's own), PTH (pathlib over os.path), C901 (complexity ceiling), and three guardrails
+# that currently flag nothing but lock in the practice — ASYNC (async footguns; this is FastAPI),
+# DTZ (timezone-aware datetimes; the whole domain is deadlines), LOG (logging misuse), T20 (no
+# stray print() in app code).
+select = ["E", "F", "I", "UP", "B", "S", "FAST", "SIM", "PERF", "ASYNC", "C901", "RUF", "PTH", "DTZ", "LOG", "T20"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10 # C901 threshold — the default, stated so a bump is a deliberate edit
 
 [tool.ruff.lint.per-file-ignores]
 # S101: assert is the ponytail self-check pattern here, not production logic that dies under
@@ -37,8 +45,9 @@ select = ["E", "F", "I", "UP", "B", "S", "FAST"]
 "tests/**" = ["S101", "S105", "S106"]
 # S311: seed.py's random.random()/random.choice() pick a synthetic task's status/deadline spread
 # for load-test data variety — never a security or cryptographic use (token signing goes through
-# PyJWT's own RS256, not this module).
-"loadtest/**" = ["S311"]
+# PyJWT's own RS256, not this module). T201: these are throwaway CLI scripts — print IS the output.
+# C901/PTH123: _seed's branch count and one csv open() aren't worth reworking in a load-test helper.
+"loadtest/**" = ["S311", "T201", "C901", "PTH123"]
 
 [tool.pyright]
 include = ["app", "tests"]
