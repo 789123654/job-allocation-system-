@@ -662,31 +662,12 @@ def resolve_issue(
 _ACTIVE_TASK_STATUSES = ("created", "assigned", "in_progress", "submitted")
 _APPROACHING_WINDOW = timedelta(days=3)  # PRD §3.4 names no number for "approaching" — judgment
 _URGENT_WINDOW = timedelta(days=1)  # PRD §2.5's own explicit "1 day from deadline"
-
-
-def _create_notification_if_missing(
-    session: Session,
-    firm_id: UUID,
-    recipient_id: UUID,
-    notif_type: str,
-    task_id: UUID,
-) -> None:
-    """Dedup key is (recipient, type, task_id) — each task fires each type at most once per
-    recipient, ever. ponytail: if a task's deadline changes after a type already fired for it, no
-    second notification fires until the existing row is cleared — acceptable at pilot scale
-    (~10 users, DATA_MODEL.md's own target), revisit with a deadline-aware key if this becomes a
-    real complaint.
-    """
-    existing = session.exec(
-        select(Notification).where(
-            Notification.firm_id == firm_id,
-            Notification.recipient_id == recipient_id,
-            Notification.type == notif_type,
-            Notification.task_id == task_id,
-        )
-    ).first()
-    if existing is None:
-        _notify(session, firm_id, recipient_id, notif_type, task_id, None)
+_DEADLINE_NOTIF_TYPES = (
+    "task_overdue",
+    "task_deadline_1_day",
+    "task_deadline_approaching",
+    "task_overdue_own",
+)
 
 
 def _as_aware_utc(value: datetime) -> datetime:
@@ -698,77 +679,106 @@ def _as_aware_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-def _ensure_owner_deadline_notifications(session: Session, actor: Profile, now: datetime) -> None:
-    tasks = session.exec(
-        select(Task).where(
-            Task.firm_id == actor.firm_id,
-            col(Task.deadline).is_not(None),
-            col(Task.status).in_(_ACTIVE_TASK_STATUSES),
-        )
-    ).all()
-    owners = session.exec(
-        select(Profile).where(Profile.firm_id == actor.firm_id, Profile.role == "owner")
-    ).all()
-    for task in tasks:
-        if task.deadline is None:  # the query already filters this, narrows the type here
-            continue
-        deadline = _as_aware_utc(task.deadline)
-        for owner in owners:
-            if deadline < now:
-                _create_notification_if_missing(
-                    session, actor.firm_id, owner.id, "task_overdue", task.id
-                )
-            elif deadline <= now + _URGENT_WINDOW:
-                _create_notification_if_missing(
-                    session, actor.firm_id, owner.id, "task_deadline_1_day", task.id
-                )
-
-
-def _ensure_employee_deadline_notifications(
-    session: Session, actor: Profile, now: datetime
-) -> None:
-    tasks = session.exec(
-        select(Task).where(
-            Task.firm_id == actor.firm_id,
-            Task.assigned_to == actor.id,
-            col(Task.deadline).is_not(None),
-            col(Task.status).in_(_ACTIVE_TASK_STATUSES),
-        )
-    ).all()
-    for task in tasks:
-        if task.deadline is None:  # the query already filters this, narrows the type here
-            continue
-        deadline = _as_aware_utc(task.deadline)
-        if deadline < now:
-            _create_notification_if_missing(
-                session, actor.firm_id, actor.id, "task_overdue_own", task.id
-            )
+def _due_deadline_notifications(
+    task: Task, now: datetime, owner_ids: list[UUID]
+) -> list[tuple[UUID, str, UUID]]:
+    """Every (recipient, type, task_id) this one task warrants right now — owners get
+    `task_overdue` / `task_deadline_1_day`, the assignee gets `task_overdue_own` /
+    `task_deadline_approaching`. Pure: dedup and persistence are the caller's job.
+    """
+    if task.deadline is None:  # caller's query already filters this; narrows the type here
+        return []
+    deadline = _as_aware_utc(task.deadline)
+    overdue = deadline < now
+    due: list[tuple[UUID, str, UUID]] = []
+    for owner_id in owner_ids:
+        if overdue:
+            due.append((owner_id, "task_overdue", task.id))
+        elif deadline <= now + _URGENT_WINDOW:
+            due.append((owner_id, "task_deadline_1_day", task.id))
+    if task.assigned_to is not None:
+        if overdue:
+            due.append((task.assigned_to, "task_overdue_own", task.id))
         elif deadline <= now + _APPROACHING_WINDOW:
-            _create_notification_if_missing(
-                session, actor.firm_id, actor.id, "task_deadline_approaching", task.id
+            due.append((task.assigned_to, "task_deadline_approaching", task.id))
+    return due
+
+
+def _scan_firm_deadlines(session: Session, firm_id: UUID, now: datetime) -> None:
+    """Firm-wide deadline scan — generates every time-based notification currently due for this
+    firm (see `_due_deadline_notifications` for the per-task rules). Adds rows to the session; the
+    caller commits.
+
+    Firm-scoped and actor-independent on purpose. Today `list_notifications` runs it for the
+    poller's own firm on every GET (there's no scheduler — ARCHITECTURE.md §8/§10). It is written
+    as the exact unit a future scheduled job would call once per firm: when that job exists,
+    `GET /notifications` drops this call and becomes a pure read, and the rest-api-guidelines
+    Rule 149 deviation goes away with it — no rewrite of this function.
+
+    A consequence of being firm-wide rather than per-poller: an assignee's own-task notifications
+    are generated by *any* firm member's poll, not only their own — an employee who hasn't opened
+    the app still accrues them (matches PRD §3.4, and matches what the future scheduler would do).
+
+    Dedup key is (recipient, type, task_id): each task fires each type at most once per recipient,
+    ever. One bulk SELECT of the already-generated keys up front — not one per (task, recipient),
+    so the scan is O(tasks), not O(tasks x owners). `ix_notifications_dedup`'s partial UNIQUE
+    index is still the real backstop for two polls racing; the in-memory set only narrows the
+    window. ponytail: a deadline change after a type already fired doesn't re-fire it until the
+    row is cleared — revisit with a deadline-aware key if that's ever a real complaint.
+    """
+    tasks = session.exec(
+        select(Task).where(
+            Task.firm_id == firm_id,
+            col(Task.deadline).is_not(None),
+            col(Task.status).in_(_ACTIVE_TASK_STATUSES),
+        )
+    ).all()
+    if not tasks:
+        return
+    owner_ids = [
+        owner.id
+        for owner in session.exec(
+            select(Profile).where(Profile.firm_id == firm_id, Profile.role == "owner")
+        ).all()
+    ]
+    task_ids = [task.id for task in tasks]
+    already: set[tuple[UUID, str, UUID]] = {
+        (row.recipient_id, row.type, row.task_id)
+        for row in session.exec(
+            select(Notification).where(
+                Notification.firm_id == firm_id,
+                col(Notification.task_id).in_(task_ids),
+                col(Notification.type).in_(_DEADLINE_NOTIF_TYPES),
             )
+        ).all()
+        if row.task_id is not None
+    }
+
+    for task in tasks:
+        for key in _due_deadline_notifications(task, now, owner_ids):
+            if key not in already:
+                _notify(session, firm_id, key[0], key[1], key[2], None)
+                already.add(key)
 
 
 def _ensure_deadline_notifications(session: Session, actor: Profile) -> None:
-    """The 4 time-based notification types (`task_overdue`, `task_deadline_1_day`,
-    `task_deadline_approaching`, `task_overdue_own`) have no scheduler to generate them —
-    ARCHITECTURE.md explicitly rules out a task queue for Phase 1, and nothing in any doc names a
-    cron/scheduled job. Decided with the user (2026-09-04): generate them lazily here, since the
-    frontend already polls `GET /notifications` every 30-60s (ARCHITECTURE.md §8) — no new infra.
+    """No scheduler generates the 4 time-based notification types (ARCHITECTURE.md §10 rules out a
+    task queue this phase); `GET /notifications` runs `_scan_firm_deadlines` itself on every poll,
+    since the frontend already polls every 30-60s (ARCHITECTURE.md §8) — no new infra.
 
-    Deliberate deviation from rest-api-guidelines Rule 149 ("GET must be safe — no intended side
-    effects on server state"), checked directly, not overlooked: the alternatives (an external
-    cron hitting a protected endpoint, an in-process APScheduler thread) both add real deployment
-    complexity for a 10-user pilot: for a project this size, wrong to build ahead of an actual need
-    per the same "no task queue this phase" reasoning ARCHITECTURE.md already applied elsewhere.
-    The side effect is capped by the dedup above, so a client that only ever reads still can't
-    trigger unbounded writes.
+    Deliberate, documented deviation from rest-api-guidelines Rule 149 ("GET must be safe — no
+    server-state side effects"): the alternatives (external cron, in-process APScheduler) add
+    deployment complexity not justified at the current target (2-4 firms, ~30 users —
+    ca-tool-project-scope). `_scan_firm_deadlines` is deliberately shaped so this becomes a pure
+    read the day a scheduled job takes the scan over. The write is bounded by the dedup key, so a
+    read-only client still can't trigger unbounded writes.
+
+    Checked against Business_Logic_Security_Cheat_Sheet.md "Resource exhaustion" / owasp-asvs-5
+    V2.4.1 (anti-automation), confirmed 2026-09-05, still holds: §1's Cloudflare-edge rate limiting
+    covers this endpoint, the scan is 3 indexed firm-scoped queries (not per-item-expensive), and
+    the dedup key bounds row growth from repeated polls. Not a gap.
     """
-    now = datetime.now(UTC)
-    if actor.role == "owner":
-        _ensure_owner_deadline_notifications(session, actor, now)
-    else:
-        _ensure_employee_deadline_notifications(session, actor, now)
+    _scan_firm_deadlines(session, actor.firm_id, datetime.now(UTC))
     # Two near-simultaneous polls (ARCHITECTURE.md §8: every 30-60s) can both find the same
     # deadline notification "missing" and both try to insert it — ix_notifications_dedup's partial
     # UNIQUE index (see its migration) is what makes that a real DB conflict (IntegrityError)
@@ -776,9 +786,8 @@ def _ensure_deadline_notifications(session: Session, actor: Profile) -> None:
     # conflict rolls back + re-establishes tenant context for list_notifications' query right after
     # this call returns — no on_conflict callback needed: whichever request loses just accepts the
     # rollback, since the other request's commit already created every notification this one would
-    # have, and anything genuinely still missing gets picked up by this same lazy-generation path on
-    # the next poll (this function's own docstring already commits to that "no scheduler, next poll
-    # catches it" design, so losing one cycle changes nothing about correctness).
+    # have, and anything genuinely still missing gets picked up by this same scan on the next poll
+    # (losing one cycle changes nothing about correctness).
     commit_or_recover(session, actor)
 
 

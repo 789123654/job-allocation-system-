@@ -203,6 +203,14 @@ the `Session`/`app.current_tenant` mechanism at all). This bound is still scoped
 mechanism* — a transaction-ending call followed by an ORM-object attribute read in a `SET LOCAL`-
 scoped RLS session — not a claim that no other defect class remains.
 
+**Note (2026-09-10):** the per-site enumeration above ("4 total rollback sites") was superseded by
+the `core/db.commit_or_recover` consolidation (PR #32) — `backend/tests/core/test_db.py` is now the
+source of truth for the accounted-for `session.rollback()` sites (3, none in the notification path).
+Separately, the notification scan body moved out of `_ensure_deadline_notifications` into
+`crud._scan_firm_deadlines` (firm-wide refactor, 2026-09-10); `_ensure_deadline_notifications` still
+wraps it with `commit_or_recover(session, actor)` exactly as this entry describes — the
+commit/rollback/tenant-context behaviour audited here is unchanged.
+
 ### NUL Bytes Rejected in Client-Controlled Strings (2026-09-08, commit `41cebb2`)
 
 Found immediately after the RLS entry above, by the same test, once that fix unblocked

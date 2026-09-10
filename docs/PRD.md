@@ -107,7 +107,7 @@ The billing task then follows the **employee's normal task flow** (§3), except 
 - New task assigned to them (individually targeted, not broadcast to all employees)
 - Task reassigned to them — covers both trigger paths (§3.3)
 - Task approaching deadline
-- **Task not completed by deadline** (new — the original PRD only notified the Owner on overdue; employees now get their own overdue notice on their own tasks too)
+- **Task not completed by deadline** (new — the original PRD only notified the Owner on overdue; employees now get their own overdue notice on their own tasks too, generated firm-wide so they land whether or not the employee has opened the app — see `API_SPEC.md` Notifications note)
 
 ### 3.5 Interface
 - Desktop only for this phase (mobile dropped, see §6)
