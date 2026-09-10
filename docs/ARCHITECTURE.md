@@ -352,7 +352,9 @@ Concrete hosting (Docker, Railway, Cloudflare, CI/CD, code-signing) is `DEPLOYME
 
 ## 8. Notification Delivery
 
-**Simple polling**: Tauri app calls `GET /notifications` (unread, per-user, filtered by `CurrentProfile`) on a 30-60 second interval. Not websockets, not Supabase Realtime. Reasoning: 10 users, and nothing in PRD §2.5/§3.4/§4.4 requires sub-second delivery. Supabase Realtime is noted as a later upgrade path if instant delivery becomes an actual requirement — not built now.
+**Simple polling**: Tauri app calls `GET /notifications` (unread, per-user, filtered by `CurrentProfile`) on a 30-60 second interval. Not websockets, not Supabase Realtime. Reasoning: the current target is 2-4 firms / ~30 users (`ca-tool-project-scope`), and nothing in PRD §2.5/§3.4/§4.4 requires sub-second delivery. Supabase Realtime is noted as a later upgrade path if instant delivery becomes an actual requirement — not built now.
+
+The 4 time-based notification types (`task_overdue`, `task_deadline_1_day`, `task_deadline_approaching`, `task_overdue_own`) have no scheduler; `GET /notifications` runs a firm-wide deadline scan itself on every poll (`crud._scan_firm_deadlines`, `API_SPEC.md` Notifications note). That scan is written firm-scoped and actor-independent specifically so it is the unit a scheduled job would call once per firm when §10's "revisit when a background job appears" triggers — at which point this endpoint becomes a pure read with no code change to the scan.
 
 ## 9. Idempotency (cross-cutting principle)
 
@@ -363,7 +365,7 @@ Every mutating endpoint that can plausibly be retried by a client (task creation
 Stated as a deliberate decision, not an oversight, so it doesn't need re-litigating later:
 
 - **No Redis / query caching this phase.** Good indexing (per `DATA_MODEL.md`) is sufficient at 10-user/single-firm scale. Revisit when a specific query is measurably slow at real tenant scale — not before.
-- **No async task queue (Celery/RQ) this phase.** FastAPI's `async def` request handling is inherent and free — not something being "added." Its built-in `BackgroundTasks` covers any fire-and-forget need (e.g., writing a notification row after a request completes) without a message broker. Nothing in Phase 1 scope is long-running or bulk (no billing computation engine yet — that's Phase 2, PRD is job-allocation only). Revisit when a genuinely long-running background job appears.
+- **No async task queue (Celery/RQ) this phase.** FastAPI's `async def` request handling is inherent and free — not something being "added." Its built-in `BackgroundTasks` covers any fire-and-forget need (e.g., writing a notification row after a request completes) without a message broker. Nothing in Phase 1 scope is long-running or bulk (no billing computation engine yet — that's Phase 2, PRD is job-allocation only). Revisit when a genuinely long-running background job appears. **The most likely first trigger:** the deadline-notification scan currently runs inside every `GET /notifications` poll (§8). `crud._scan_firm_deadlines` is deliberately firm-scoped and actor-independent so that "move it to a scheduled job (pg_cron / Supabase scheduled function / a cron-hit internal endpoint / APScheduler)" is a matter of calling the existing function per firm on a timer and deleting one line from the endpoint — not a rewrite. Expected to matter once concurrent-user count is high enough that redundant per-poll scans dominate DB load; well past the current 30-user target, well before the ~thousands-of-tenants long-run market.
 
 ## 11. Backend Project Structure
 

@@ -172,25 +172,27 @@ def test_list_job_types_is_one_query_regardless_of_row_count(session: Session) -
     assert len(many) == 1
 
 
-def test_list_notifications_deadline_scan_scales_linearly_not_worse(session: Session) -> None:
-    """5x the tasks should cost roughly 5x the statements (the known linear dedup scan), never
-    the much larger jump a nested/quadratic scan or a fresh per-row query would produce.
+def test_list_notifications_deadline_scan_is_flat_in_task_count(session: Session) -> None:
+    """After the bulk-prefetch refactor (_scan_firm_deadlines) the dedup scan is a fixed set of
+    queries — tasks, owners, existing notifications, then list_notifications' own final SELECT —
+    regardless of how many deadline tasks the firm has. Measured on a *second* poll so the
+    first poll's new-notification INSERTs aren't in the way.
     """
     past = datetime.now(UTC) - timedelta(days=2)
 
     owner_small = _owner(session, firm_id=uuid4())
     _seed_tasks(session, owner_small, 2, deadline=past)
+    crud.list_notifications(session, owner_small, 0, 50, unread_only=False)  # warm: creates rows
     with count_queries(session) as small:
         crud.list_notifications(session, owner_small, 0, 50, unread_only=False)
 
     owner_large = _owner(session, firm_id=uuid4())
-    _seed_tasks(session, owner_large, 10, deadline=past)
+    _seed_tasks(session, owner_large, 20, deadline=past)
+    crud.list_notifications(session, owner_large, 0, 50, unread_only=False)
     with count_queries(session) as large:
         crud.list_notifications(session, owner_large, 0, 50, unread_only=False)
 
-    # 8x is generous headroom over the ~5x linear factor — tight enough to catch a real
-    # regression, loose enough not to flake on the exact statement constant.
-    assert len(large) <= len(small) * 8, (
-        f"notifications scan: {len(small)} stmts for 2 tasks, {len(large)} for 10 — "
-        "grew faster than linearly, likely a new N+1 in the deadline-scan path"
+    assert len(large) == len(small), (
+        f"notifications scan: {len(small)} queries for 2 tasks, {len(large)} for 20 — "
+        "grew with task count, the per-task N+1 is back"
     )
