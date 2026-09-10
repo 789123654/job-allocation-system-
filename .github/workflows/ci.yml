@@ -84,7 +84,11 @@ jobs:
           conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/postgres', autocommit=True)
           conn.execute(\"ALTER ROLE fastapi_app WITH PASSWORD 'ci_test_password'\")
           "
-      - run: uv run pytest
+      # --cov-fail-under is a ratchet: baseline was 93% (measured in this PR's first CI run), set
+      # one point below for rounding slack. Raise it in the PR that adds the tests earning it —
+      # never toward 100%, which just breeds assertion-free tests. A PR that drops coverage below
+      # this fails here and can't merge.
+      - run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=92
 
   frontend:
     runs-on: ubuntu-latest
@@ -103,7 +107,10 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm run test
+      # test:coverage (not plain test) so the coverage % shows in the CI log every run. No
+      # threshold gate yet — the frontend is mid-scaffold (Phase 4 slice 1); add one in
+      # vite.config.ts once the auth screens and their tests land.
+      - run: npm run test:coverage
       - run: npm run build
 
   security:

@@ -16,5 +16,20 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/testing/setup-tests.ts"],
     globals: true,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "html"],
+      include: ["src/**/*.{ts,tsx}"],
+      // Scaffold, entrypoints, test infra, and generated types — nothing with logic worth asserting.
+      exclude: [
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.d.ts",
+        "src/main.tsx",
+        "src/testing/**",
+        "src/**/types/**",
+      ],
+      // No `thresholds` yet on purpose: the frontend is mid-scaffold (Phase 4 slice 1), so a gate
+      // now would be noise. Add one once the auth slice's screens land with their tests.
+    },
   },
 });
