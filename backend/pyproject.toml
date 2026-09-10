@@ -19,6 +19,7 @@ dependencies = [
 dev = [
     "pyright>=1.1.411",
     "pytest>=9.1.1",
+    "pytest-cov>=6.0.0",
     "ruff>=0.16.5",
     "schemathesis>=4.26.0",
 ]
@@ -57,3 +58,18 @@ reportUnknownLambdaType = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+# Migrations run under `alembic upgrade head` in CI, not under pytest — counting them
+# would inflate the number with lines no test actually asserts on.
+omit = ["app/alembic/*"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(typing\\.)?overload",
+]

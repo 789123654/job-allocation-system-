@@ -10,6 +10,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# Coverage artifacts (pytest-cov / coverage.py, and Vitest's v8 provider)
+.coverage
+coverage.xml
+htmlcov/
+frontend/coverage/
+
 # Rust (src-tauri/, once scaffolded)
 target/
 
