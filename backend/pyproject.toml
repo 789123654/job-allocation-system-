@@ -71,7 +71,10 @@ pythonpath = ["."]
 # (e.g. @pytest.mark.authz)" so they can be run as their own fast, legible CI gate — `uv run
 # pytest -m authz` in ci.yml. Covers tenant isolation (test_rls_isolation), object-level authz
 # (test_access_denials, test_authz_regression), and the auth dependency chain (test_deps).
-markers = ["authz: authorization / access-control regression tests"]
+markers = [
+    "authz: authorization / access-control regression tests",
+    "e2e: end-to-end tests needing a real local Supabase stack (E2E=1; the `e2e` CI job)",
+]
 
 [tool.coverage.run]
 source = ["app"]

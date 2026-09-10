@@ -1,0 +1,67 @@
+# Local Supabase stack for end-to-end auth testing — `supabase start` locally, and the `e2e` job
+# in .github/workflows/ci.yml. This is NOT the production project (that connects per DEPLOYMENT.md
+# §13, with its own dashboard settings); this file version-controls the settings the e2e stack
+# needs so CI enforces the same auth posture the real project must be given by hand.
+#
+# Only db + auth + api(kong) run — every other service is disabled below to keep the CI boot fast.
+project_id = "job-allocation-system"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+
+[db]
+port = 54322
+major_version = 17
+
+[db.pooler]
+enabled = false
+
+[db.seed]
+enabled = false
+
+[realtime]
+enabled = false
+
+[studio]
+enabled = false
+
+[storage]
+enabled = false
+
+[local_smtp]
+enabled = false
+
+[analytics]
+enabled = false
+
+[edge_runtime]
+enabled = false
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+jwt_expiry = 3600
+# Employees are provisioned only via the Auth Admin API (crud.create_employee) — public signup is
+# never a path in this product. Matches the posture the real project must be set to (DEPLOYMENT.md
+# §13); the e2e tests use the admin API, not signup.
+enable_signup = false
+# ASVS 6.2.1 — Supabase's own default is 6. DEPLOYMENT.md §2 requires >= 8 on the real project;
+# version-controlled here so the e2e stack rejects a weak password the same way.
+minimum_password_length = 8
+
+[auth.email]
+enable_confirmations = false
+# ASVS 6.2.3 — require the current password (GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_
+# PASSWORD). Without it GoTrue silently ignores the `current_password` the frontend sends on every
+# updateUser() call (DEPLOYMENT.md §2, confirmed against @supabase/auth-js's own type docs).
+secure_password_change = true
+
+# ARCHITECTURE.md §4 / migration a8e6def15927 — injects firm_id / role / must_change_password into
+# the JWT's app_metadata by reading the caller's `profiles` row. The function is created by
+# `alembic upgrade head`, which the e2e job runs after `supabase start`; GoTrue resolves the hook
+# per token issuance, so it does not need to exist at stack-boot time.
+[auth.hook.custom_access_token]
+enabled = true
+uri = "pg-functions://postgres/public/custom_access_token_hook"

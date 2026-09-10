@@ -96,6 +96,58 @@ jobs:
       # took the measured number to 94.4%.
       - run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=93
 
+  # End-to-end auth against a real local Supabase stack (GoTrue + Postgres), not the bare
+  # postgres:17 + hand-stubbed auth.users the `backend` job uses. This is where the provisioning
+  # trigger, the custom_access_token_hook, and real ES256-token verification against a real local
+  # JWKS endpoint actually run. Separate job (own ~90s Docker boot) so the fast `backend` job
+  # stays fast. NOT the live Supabase project — a disposable local stack, thrown away after.
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --dev
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
+        with:
+          version: 2.117.0
+      - name: Start local Supabase (db + auth + api only, per supabase/config.toml)
+        working-directory: .
+        run: supabase start
+      - name: Export stack connection details
+        working-directory: .
+        run: |
+          supabase status -o env \
+            --override-name api.url=SUPABASE_URL \
+            --override-name auth.service_role_key=SUPABASE_SECRET_KEY \
+            --override-name auth.anon_key=E2E_ANON_KEY >> "$GITHUB_ENV"
+      - name: Migrate the local stack's Postgres (Alembic, as the supabase superuser)
+        env:
+          MIGRATIONS_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:54322/postgres
+        run: uv run alembic upgrade head
+      - name: Give fastapi_app its CI-only password
+        run: |
+          uv run python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://postgres:postgres@127.0.0.1:54322/postgres', autocommit=True)
+          conn.execute(\"ALTER ROLE fastapi_app WITH PASSWORD 'ci_test_password'\")
+          "
+      - name: e2e tests
+        env:
+          DATABASE_URL: postgresql+psycopg://fastapi_app:ci_test_password@127.0.0.1:54322/postgres
+          MIGRATIONS_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:54322/postgres
+          TEST_DATABASE_URL: postgresql+psycopg://fastapi_app:ci_test_password@127.0.0.1:54322/postgres
+          TEST_MIGRATIONS_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:54322/postgres
+          CORS_ORIGINS: '["http://localhost"]'
+          E2E: "1"
+        run: uv run pytest -m e2e -v
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
