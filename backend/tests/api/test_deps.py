@@ -29,10 +29,12 @@ from app.core import security
 _MIGRATIONS_URL = os.environ.get("TEST_MIGRATIONS_DATABASE_URL")
 _APP_URL = os.environ.get("TEST_DATABASE_URL")
 
-pytestmark = pytest.mark.skipif(
-    not (_MIGRATIONS_URL and _APP_URL),
-    reason="needs a real Postgres — set TEST_MIGRATIONS_DATABASE_URL/TEST_DATABASE_URL (CI does)",
-)
+_SKIP_REASON = "needs a real Postgres — TEST_MIGRATIONS_DATABASE_URL/TEST_DATABASE_URL (CI does)"
+
+pytestmark = [
+    pytest.mark.authz,
+    pytest.mark.skipif(not (_MIGRATIONS_URL and _APP_URL), reason=_SKIP_REASON),
+]
 
 _PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _PUBLIC_KEY = _PRIVATE_KEY.public_key()
@@ -70,6 +72,14 @@ def _mock_jwks(  # pyright: ignore[reportUnusedFunction] — autouse pytest fixt
 def app_engine() -> Generator[Engine]:
     assert _APP_URL is not None  # guaranteed by pytestmark's skipif above
     engine = create_engine(_APP_URL)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def admin_engine() -> Generator[Engine]:
+    assert _MIGRATIONS_URL is not None  # guaranteed by pytestmark's skipif above
+    engine = create_engine(_MIGRATIONS_URL)
     yield engine
     engine.dispose()
 
@@ -151,3 +161,50 @@ def test_unknown_profile_id_is_rejected(app_engine: Engine) -> None:
         with pytest.raises(HTTPException) as exc_info:
             deps.get_current_profile(session, credentials)
         assert exc_info.value.status_code == 401
+
+
+def test_must_change_password_flip_is_enforced_on_the_next_request(
+    app_engine: Engine, admin_engine: Engine
+) -> None:
+    """Session-lifecycle / zero-trust: a token minted while the account was clear must stop
+    passing the forced-reset gate the instant an Owner flips `must_change_password` — the JWT
+    can't carry that change, so `get_current_profile` re-reads the row every request and
+    `require_password_set` gates on the live value, not the value at login. The frontend has its
+    own mirror of this gate (router.test.tsx), but that's advisory; this is the server-side one.
+    """
+    firm_id, profile_id = uuid4(), uuid4()
+    with admin_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO firms (id, name, plan, status) VALUES (:id, 'x', 'free', 'active')"),
+            {"id": firm_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO profiles "
+                "(id, firm_id, role, full_name, email, is_active, must_change_password) "
+                "VALUES (:pid, :fid, 'owner', 'x', :email, true, false)"
+            ),
+            {"pid": profile_id, "fid": firm_id, "email": f"{profile_id}@example.com"},
+        )
+    token = _make_token(sub=str(profile_id), firm_id=str(firm_id))
+    try:
+        # A fresh session per call — each real request gets its own (core/db.get_session).
+        with Session(app_engine) as session:
+            cleared = deps.get_current_profile(session, _bearer(token))
+            assert deps.require_password_set(cleared) is cleared  # gate passes
+
+        with admin_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE profiles SET must_change_password = true WHERE id = :pid"),
+                {"pid": profile_id},
+            )
+
+        with Session(app_engine) as session:
+            flipped = deps.get_current_profile(session, _bearer(token))
+            with pytest.raises(HTTPException) as exc_info:
+                deps.require_password_set(flipped)
+            assert exc_info.value.status_code == 403
+    finally:
+        with admin_engine.begin() as conn:
+            conn.execute(text("DELETE FROM profiles WHERE firm_id = :fid"), {"fid": firm_id})
+            conn.execute(text("DELETE FROM firms WHERE id = :fid"), {"fid": firm_id})

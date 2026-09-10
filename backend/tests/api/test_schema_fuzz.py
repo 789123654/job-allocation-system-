@@ -193,3 +193,20 @@ def test_api_contract(case: "schemathesis.Case[Any]", owner_token: str) -> None:
         # in the library's stubs, not a wrong call here (confirmed: it's the exact object
         # schemathesis's own tutorial docs pass to this same parameter).
     )
+
+
+@pytest.mark.authz
+@schema.parametrize()  # pyright: ignore[reportUntypedFunctionDecorator] — schemathesis itself is untyped here
+@hypothesis_settings(max_examples=5, deadline=None)
+def test_every_operation_rejects_a_missing_token(case: "schemathesis.Case[Any]") -> None:
+    """Contract-driven authz negative (Authorization_Regression_Testing_Cheat_Sheet.md — "generate
+    negative test cases ... requests without tokens ... to ensure the API fails securely"). Every
+    documented operation must reject an unauthenticated call with 401/403 — never a 2xx and never
+    a 5xx. `/health` is the one intentionally public route.
+    """
+    if case.path == "/health":
+        pytest.skip("intentionally public")
+    response = case.call()  # no Authorization header
+    assert response.status_code in (401, 403), (
+        f"{case.method} {case.path} returned {response.status_code} without a token"
+    )

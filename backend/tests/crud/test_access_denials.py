@@ -16,6 +16,9 @@ from app import crud
 from app.api.deps import require_owner
 from app.models import AccessDenial, Notification, Profile, Task
 
+# Authorization_Regression_Testing_Cheat_Sheet.md — part of the `authz` gate (`pytest -m authz`).
+pytestmark = pytest.mark.authz
+
 _FIRM_ID = uuid4()
 
 

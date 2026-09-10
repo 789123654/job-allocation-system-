@@ -20,10 +20,12 @@ from sqlalchemy import Connection, Engine, create_engine, text
 _MIGRATIONS_URL = os.environ.get("TEST_MIGRATIONS_DATABASE_URL")
 _APP_URL = os.environ.get("TEST_DATABASE_URL")
 
-pytestmark = pytest.mark.skipif(
-    not (_MIGRATIONS_URL and _APP_URL),
-    reason="needs a real Postgres — set TEST_MIGRATIONS_DATABASE_URL/TEST_DATABASE_URL (CI does)",
-)
+_SKIP_REASON = "needs a real Postgres — TEST_MIGRATIONS_DATABASE_URL/TEST_DATABASE_URL (CI does)"
+
+pytestmark = [
+    pytest.mark.authz,
+    pytest.mark.skipif(not (_MIGRATIONS_URL and _APP_URL), reason=_SKIP_REASON),
+]
 
 
 def _set_tenant(conn: Connection, firm_id: object) -> None:
