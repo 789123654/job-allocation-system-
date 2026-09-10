@@ -84,10 +84,11 @@ jobs:
           conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/postgres', autocommit=True)
           conn.execute(\"ALTER ROLE fastapi_app WITH PASSWORD 'ci_test_password'\")
           "
-      # TODO(this PR): add --cov-fail-under=<measured baseline> in the next commit once CI has
-      # printed the real number. The gate is a ratchet — holds today's coverage and only goes up,
-      # never a 100% target (that just breeds assertion-free tests).
-      - run: uv run pytest --cov=app --cov-report=term-missing
+      # --cov-fail-under is a ratchet: baseline was 93% (measured in this PR's first CI run), set
+      # one point below for rounding slack. Raise it in the PR that adds the tests earning it —
+      # never toward 100%, which just breeds assertion-free tests. A PR that drops coverage below
+      # this fails here and can't merge.
+      - run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=92
 
   frontend:
     runs-on: ubuntu-latest
