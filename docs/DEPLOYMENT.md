@@ -89,6 +89,12 @@ Three legs actually exist:
 - **Railway (FastAPI) → Supabase Postgres**: the connection string must include `sslmode=verify-full` —
   Supabase's own documented `psql` connection example uses exactly this (`supabase/database/psql.md`), and
   ASVS 12.3.2 requires the client actually validate the certificate, not just encrypt opportunistically.
+  **Enforced 2026-09-11, not just documented:** `Settings._require_tls_to_remote_db`
+  (`backend/app/core/config.py`) rejects a `DATABASE_URL` / `MIGRATIONS_DATABASE_URL` whose host is not
+  loopback and whose query string is not exactly `sslmode=verify-full` — `Settings()` runs at import, so a
+  misconfigured deploy fails to boot rather than silently connecting without cert validation. Loopback hosts
+  (local dev, the CI postgres service) are exempt: that connection never crosses a network. Tested in
+  `backend/tests/core/test_config.py`.
 
 (The fourth leg, frontend → Supabase Auth directly, is HTTPS by construction via the Supabase SDK's own URL —
 nothing to configure.)

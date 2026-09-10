@@ -1,5 +1,12 @@
+from urllib.parse import parse_qs
+
 from pydantic import PostgresDsn, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# A DB connection to one of these never leaves the host, so there is no network segment to
+# intercept — local dev and CI's postgres service container both connect this way. Every other
+# host is treated as remote and must prove TLS with full cert validation (see the validator below).
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class Settings(BaseSettings):
@@ -39,6 +46,28 @@ class Settings(BaseSettings):
         if v.scheme != "postgresql+psycopg":
             raise ValueError(
                 f"must use postgresql+psycopg://, got {v.scheme}:// (psycopg2 isn't installed)"
+            )
+        return v
+
+    @field_validator("DATABASE_URL", "MIGRATIONS_DATABASE_URL")
+    @classmethod
+    def _require_tls_to_remote_db(cls, v: PostgresDsn) -> PostgresDsn:
+        # ASVS 5 §12.3.1 ("encrypted protocol for all ... database connections; no fallback to
+        # cleartext") + §12.3.2 ("TLS clients validate received certificates"). DEPLOYMENT.md §2
+        # already mandates `sslmode=verify-full` on the Railway→Supabase leg; this makes it
+        # impossible to *boot* against a remote Postgres without it, the same fail-loud-at-startup
+        # stance as `_require_psycopg_driver` above. `verify-full` specifically — `require`/`prefer`
+        # encrypt but skip cert validation, so they satisfy §12.3.1 but not §12.3.2.
+        # Loopback is the one exemption (see `_LOOPBACK_HOSTS`) — "regardless of network location"
+        # still holds for anything that actually crosses a network.
+        hosts = v.hosts()
+        host = hosts[0]["host"] if hosts else None
+        if host in _LOOPBACK_HOSTS:
+            return v
+        if parse_qs(v.query or "").get("sslmode") != ["verify-full"]:
+            raise ValueError(
+                f"remote DB host {host!r} must use sslmode=verify-full "
+                "(ASVS 12.3, DEPLOYMENT.md §2) — encrypt and validate the certificate"
             )
         return v
 
