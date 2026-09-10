@@ -107,6 +107,17 @@ nothing to configure.)
   `fastapi_app` `BYPASSRLS` assertion (`ARCHITECTURE.md` §5), and the authorization-matrix suite
   (`API_SPEC.md` §4) — these become required status checks the moment they're written, not folded into a
   generic "tests, eventually."
+- **Two backend test jobs (2026-09-11).** `backend` runs against a bare `postgres:17` service container with
+  `auth.users` and the Supabase roles hand-stubbed — fast, covers RLS / tenant isolation / crud / the auth
+  dependency chain (with a forged RS256 token + mocked JWKS). `e2e` runs against a **real disposable local
+  Supabase stack** (`supabase/setup-cli` → `supabase start`, db + auth + api only, per `supabase/config.toml`)
+  with `alembic upgrade head` applied on top: this is the only place the `handle_new_user` provisioning
+  trigger, the `custom_access_token_hook` claim injector, the Auth Admin API, and real ES256-token
+  verification against a real local JWKS endpoint actually run (`backend/tests/e2e/`, `pytest -m e2e`, gated
+  on `E2E=1`). Still not the live project — a container stack, thrown away after the job. Locally: `supabase
+  start` then `E2E=1 uv run pytest -m e2e`. `supabase/config.toml` also version-controls the auth settings
+  the real project must be given by hand (`minimum_password_length`, `secure_password_change`, the hook
+  registration) — see §2's TLS-chain note and the password-policy note below.
 - **Gate merges to `main` on these passing — made concrete 2026-09-04, checked against
   `owasp-cheatsheets/GitHub_Actions_Security_Cheat_Sheet.md` (not cited in this document before now).** "Gate"
   wasn't previously specified as a real mechanism — the intended one is **GitHub branch protection on `main`**:

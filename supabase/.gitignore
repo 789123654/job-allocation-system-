@@ -1,0 +1,5 @@
+# Supabase CLI local state — never committed (supabase/setup-cli regenerates it per run).
+.branches
+.temp
+.env
+signing_keys*.json
