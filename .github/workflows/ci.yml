@@ -134,10 +134,14 @@ jobs:
       - name: Export stack connection details
         working-directory: .
         run: |
-          supabase status -o env \
-            --override-name api.url=SUPABASE_URL \
-            --override-name auth.service_role_key=SUPABASE_SECRET_KEY \
-            --override-name auth.anon_key=E2E_ANON_KEY >> "$GITHUB_ENV"
+          # `-o env` emits KEY="value" (shell-quoted); $GITHUB_ENV takes the value literally, so
+          # the quotes would end up inside SUPABASE_URL and break the JWKS URL. Go via JSON.
+          status=$(supabase status -o json)
+          {
+            echo "SUPABASE_URL=$(echo "$status" | jq -r '.API_URL')"
+            echo "SUPABASE_SECRET_KEY=$(echo "$status" | jq -r '.SERVICE_ROLE_KEY')"
+            echo "E2E_ANON_KEY=$(echo "$status" | jq -r '.ANON_KEY')"
+          } >> "$GITHUB_ENV"
       - name: Migrate the local stack's Postgres (Alembic, as the supabase superuser)
         run: uv run alembic upgrade head
       - name: Give fastapi_app its CI-only password
