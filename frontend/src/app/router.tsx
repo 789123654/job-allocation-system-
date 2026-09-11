@@ -3,6 +3,7 @@ import { AccountMenu } from "@/components/app-shell/account-menu";
 import { LoginForm } from "@/features/auth/components/login-form";
 import { SetNewPasswordForm } from "@/features/auth/components/set-new-password-form";
 import { EmployeeManagementPage } from "@/features/employees/components/employee-management-page";
+import { JobTypeManagementPage } from "@/features/job-types/components/job-type-management-page";
 import { useSession } from "@/stores/session-store";
 
 // Exported for router.test.tsx — the client-side gate logic (mirroring backend/app/api/deps.py's
@@ -45,9 +46,14 @@ export function AuthenticatedLayout() {
       <header className="flex items-center justify-between border-b border-(--color-ledger-border) p-4">
         <nav className="flex gap-4 text-sm">
           {role === "owner" && (
-            <Link to="/employees" className="text-(--color-ledger-text-muted) hover:underline">
-              Employees
-            </Link>
+            <>
+              <Link to="/employees" className="text-(--color-ledger-text-muted) hover:underline">
+                Employees
+              </Link>
+              <Link to="/job-types" className="text-(--color-ledger-text-muted) hover:underline">
+                Job types
+              </Link>
+            </>
           )}
         </nav>
         <AccountMenu />
@@ -85,7 +91,10 @@ export const router = createBrowserRouter([
       { index: true, element: <AuthenticatedHome /> },
       {
         element: <OwnerRoute />,
-        children: [{ path: "employees", element: <EmployeeManagementPage /> }],
+        children: [
+          { path: "employees", element: <EmployeeManagementPage /> },
+          { path: "job-types", element: <JobTypeManagementPage /> },
+        ],
       },
     ],
   },
