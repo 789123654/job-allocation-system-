@@ -24,9 +24,14 @@ export class ApiError extends Error {
 interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
-  // FRONTEND_ARCHITECTURE.md §4/§5: client-generated per request, attached here (not
-  // per-feature) — one place, matching the single-client-instance pattern.
-  idempotent?: boolean;
+  // rest-api-guidelines Rule 230 (re-checked 2026-09-11, building the employees slice's
+  // reset-password call — its first real caller): the SAME key must survive every retry of one
+  // logical operation, or the server's dedup cache never matches and a retried request just
+  // re-executes. Generating the key inside apiRequest() (as this used to do, fresh per HTTP call)
+  // broke exactly that guarantee. The caller now owns the key's lifetime — generate it once per
+  // logical attempt (e.g. `useRef`/`useState` in a mutation hook, reused across that attempt's
+  // retries; a genuinely new attempt gets a new key) and pass it in here.
+  idempotencyKey?: string;
 }
 
 async function authHeaders(): Promise<Record<string, string>> {
@@ -40,8 +45,8 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     "Content-Type": "application/json",
     ...(await authHeaders()),
   };
-  if (options.idempotent) {
-    headers["Idempotency-Key"] = crypto.randomUUID();
+  if (options.idempotencyKey) {
+    headers["Idempotency-Key"] = options.idempotencyKey;
   }
 
   const response = await fetch(`${env.API_BASE_URL}${path}`, {
