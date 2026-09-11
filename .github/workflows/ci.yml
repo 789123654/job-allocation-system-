@@ -153,6 +153,67 @@ jobs:
           "
       - name: e2e tests
         run: uv run pytest -m e2e -v
+      - name: Seed a real owner account for the frontend contract test
+        run: |
+          uv run python -c "
+          import os, uuid
+          import httpx
+          import psycopg
+          from app.core.supabase_admin import admin_auth
+
+          firm_id = str(uuid.uuid4())
+          email = f'{uuid.uuid4()}@example.com'
+          password = 'contract-Test-Password-9'
+
+          conn = psycopg.connect('postgresql://postgres:postgres@127.0.0.1:54322/postgres', autocommit=True)
+          conn.execute(
+              'INSERT INTO firms (id, name, plan, status) VALUES (%s, %s, %s, %s)',
+              (firm_id, 'Contract', 'free', 'active'),
+          )
+
+          created = admin_auth.create_user({
+              'email': email,
+              'password': password,
+              'email_confirm': True,
+              'user_metadata': {'firm_id': firm_id, 'role': 'owner', 'full_name': 'Contract Owner'},
+          })
+          user_id = str(created.user.id)
+          conn.execute('UPDATE profiles SET must_change_password = false WHERE id = %s', (user_id,))
+          conn.close()
+
+          resp = httpx.post(
+              os.environ['SUPABASE_URL'] + '/auth/v1/token',
+              params={'grant_type': 'password'},
+              json={'email': email, 'password': password},
+              headers={'apikey': os.environ['E2E_ANON_KEY'], 'Content-Type': 'application/json'},
+          )
+          resp.raise_for_status()
+          token = resp.json()['access_token']
+
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('CONTRACT_TEST_TOKEN=' + token + '\n')
+          "
+      - name: Start the FastAPI backend against the local Supabase stack
+        run: |
+          nohup uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/uvicorn.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/health > /dev/null && exit 0
+            sleep 1
+          done
+          echo "FastAPI never became ready"; cat /tmp/uvicorn.log; exit 1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend contract test (real FastAPI + real local Supabase stack, not MSW)
+        working-directory: frontend
+        env:
+          CONTRACT_API_BASE_URL: http://127.0.0.1:8000
+        run: npx vitest run --config vitest.contract.config.ts
 
   frontend:
     runs-on: ubuntu-latest

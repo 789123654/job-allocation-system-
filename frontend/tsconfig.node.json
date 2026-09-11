@@ -3,15 +3,22 @@
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "target": "es2023",
     "lib": ["ES2023"],
-    "types": ["node"],
+    // vite/client added alongside node: contract-tests imports src/features/employees/api/* files,
+    // which transitively import src/config/env.ts (import.meta.env — a Vite-injected ambient type,
+    // otherwise only declared in tsconfig.app.json's own project).
+    "types": ["node", "vite/client"],
     "skipLibCheck": true,
 
     /* Bundler mode */
-    "module": "nodenext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    },
 
     /* Linting */
     "noUnusedLocals": true,
@@ -19,5 +26,9 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts"]
+  // vitest.contract.config.ts/contract-tests were silently outside both tsconfig.*.json projects
+  // (app.json only includes src/, this file only included vite.config.ts) — `npm run typecheck`
+  // was passing without ever actually checking them. Added here so a real type error in the
+  // contract test fails typecheck, not just a runtime import error inside vitest.
+  "include": ["vite.config.ts", "vitest.contract.config.ts", "contract-tests"]
 }

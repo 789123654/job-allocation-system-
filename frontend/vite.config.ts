@@ -13,6 +13,9 @@ export default defineConfig({
     },
   },
   test: {
+    // Scoped to src/ so this config never discovers contract-tests/ (a separate tier, its own
+    // vitest.contract.config.ts, no MSW setupFiles — see that file's own comment for why).
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: ["./src/testing/setup-tests.ts"],
     globals: true,

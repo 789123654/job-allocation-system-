@@ -1,14 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
 import { employeesQueryKey } from "@/features/employees/api/get-employees";
+import { toEmployeeCreated, type EmployeeCreatedDto } from "@/features/employees/api/mappers";
 import type { EmployeeCreated, EmployeeCreateInput } from "@/features/employees/types";
-
-interface EmployeeCreatedDto {
-  id: string;
-  full_name: string;
-  email: string;
-  generated_password: string;
-}
 
 // API_SPEC.md §3: POST /employees dedups via email's own uniqueness (Supabase auth.users), not an
 // Idempotency-Key header — a retry with the same email gets 409 (employees.py already maps that
@@ -18,13 +12,7 @@ function createEmployee(input: EmployeeCreateInput): Promise<EmployeeCreated> {
   return apiRequest<EmployeeCreatedDto>("/employees", {
     method: "POST",
     body: { full_name: input.fullName, email: input.email },
-  }).then((dto) => ({
-    id: dto.id,
-    fullName: dto.full_name,
-    email: dto.email,
-    isActive: true,
-    generatedPassword: dto.generated_password,
-  }));
+  }).then(toEmployeeCreated);
 }
 
 export function useCreateEmployee() {
