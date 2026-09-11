@@ -24,6 +24,7 @@ function mockSession(overrides: {
   vi.mocked(useSession).mockReturnValue({
     session: overrides.session,
     role: overrides.role ?? null,
+    firmId: null,
     mustChangePassword: overrides.mustChangePassword,
     isLoading: overrides.isLoading ?? false,
   });

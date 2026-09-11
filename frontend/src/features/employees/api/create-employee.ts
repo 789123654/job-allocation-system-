@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
-import { employeesQueryKey } from "@/features/employees/api/get-employees";
+import { employeesQueryKeyPrefix } from "@/features/employees/api/get-employees";
 import { toEmployeeCreated, type EmployeeCreatedDto } from "@/features/employees/api/mappers";
 import type { EmployeeCreated, EmployeeCreateInput } from "@/features/employees/types";
 
@@ -20,7 +20,7 @@ export function useCreateEmployee() {
   return useMutation({
     mutationFn: createEmployee,
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: employeesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: employeesQueryKeyPrefix });
     },
   });
 }

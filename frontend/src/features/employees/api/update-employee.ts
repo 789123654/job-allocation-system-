@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
-import { employeesQueryKey } from "@/features/employees/api/get-employees";
+import { employeesQueryKeyPrefix } from "@/features/employees/api/get-employees";
 import { toEmployee, type EmployeeOutDto } from "@/features/employees/api/mappers";
 import type { Employee } from "@/features/employees/types";
 
@@ -20,7 +20,7 @@ export function useUpdateEmployee() {
   return useMutation({
     mutationFn: updateEmployee,
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: employeesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: employeesQueryKeyPrefix });
     },
   });
 }
