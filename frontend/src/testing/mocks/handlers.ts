@@ -38,6 +38,19 @@ export function resetEmployeesFixture(): void {
 }
 resetEmployeesFixture();
 
+interface JobTypeRecord {
+  id: string;
+  name: string;
+  is_active: boolean;
+}
+
+let jobTypes: JobTypeRecord[] = [];
+
+export function resetJobTypesFixture(): void {
+  jobTypes = [{ id: "jt1", name: "Tax Audit", is_active: true }];
+}
+resetJobTypesFixture();
+
 export const handlers = [
   http.post(`${SUPABASE_URL}/auth/v1/token`, () => HttpResponse.json(fakeSession)),
   http.put(`${SUPABASE_URL}/auth/v1/user`, () => HttpResponse.json(fakeUser)),
@@ -78,6 +91,34 @@ export const handlers = [
     const employee = employees.find((e) => e.id === params.id);
     if (!employee) return new HttpResponse(null, { status: 404 });
     return HttpResponse.json({ generated_password: "NewTempPass456!" });
+  }),
+
+  // job_types.py — mirrors the real route shapes.
+  http.get(`${API_BASE_URL}/job-types`, () => HttpResponse.json(jobTypes)),
+  http.post(`${API_BASE_URL}/job-types`, async ({ request }) => {
+    const body = (await request.json()) as { name: string };
+    if (jobTypes.some((jt) => jt.name === body.name)) {
+      return HttpResponse.json(
+        {
+          type: "about:blank",
+          title: "Conflict",
+          status: 409,
+          detail: "Job type name already in use",
+          instance: "",
+        },
+        { status: 409 },
+      );
+    }
+    const created: JobTypeRecord = { id: crypto.randomUUID(), name: body.name, is_active: true };
+    jobTypes.push(created);
+    return HttpResponse.json(created, { status: 201 });
+  }),
+  http.patch(`${API_BASE_URL}/job-types/:id`, async ({ params, request }) => {
+    const jobType = jobTypes.find((jt) => jt.id === params.id);
+    if (!jobType) return new HttpResponse(null, { status: 404 });
+    const body = (await request.json()) as { is_active: boolean };
+    jobType.is_active = body.is_active;
+    return HttpResponse.json(jobType);
   }),
 ];
 
