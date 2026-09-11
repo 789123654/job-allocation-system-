@@ -4,13 +4,30 @@ import { useEmployees } from "@/features/employees/api/get-employees";
 import { useUpdateEmployee } from "@/features/employees/api/update-employee";
 import { ResetPasswordDialog } from "@/features/employees/components/reset-password-dialog";
 import type { Employee } from "@/features/employees/types";
+import { useSession } from "@/stores/session-store";
 
 export function EmployeeList() {
   // TanStack Query v5: isPending (not isLoading, which is now isPending && isFetching — verified
   // against tanstack.com's own v5 migration guide) is the "no data yet" first-render flag.
   const { data: employees, isPending, isError } = useEmployees();
+  const { firmId, isLoading: isSessionLoading } = useSession();
   const updateEmployee = useUpdateEmployee();
   const [resetTarget, setResetTarget] = useState<Employee | null>(null);
+
+  // useEmployees() disables its query (enabled: firmId !== null) until firmId resolves — correct
+  // for the brief initial-session-loading render, but if the session finishes loading, the user
+  // is authenticated (OwnerRoute already required that), and firmId is STILL null (a malformed/
+  // stale JWT missing app_metadata.firm_id — a backend provisioning bug, not a transient state),
+  // the query would otherwise stay disabled forever: isPending never turns false, so this
+  // screen would show an infinite "Loading…" spinner with no way to know anything is wrong.
+  // Found during the Employees-slice security audit (2026-09-11, code-review pass).
+  if (!isSessionLoading && firmId === null) {
+    return (
+      <p className="text-sm text-(--color-ledger-danger)">
+        Could not determine your firm — try signing out and back in.
+      </p>
+    );
+  }
 
   if (isPending) return <p className="text-sm text-(--color-ledger-text-muted)">Loading…</p>;
   if (isError) {

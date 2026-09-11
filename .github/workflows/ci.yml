@@ -190,6 +190,12 @@ jobs:
           resp.raise_for_status()
           token = resp.json()['access_token']
 
+          # GitHub_Actions_Security_Cheat_Sheet.md: 'Mask all sensitive information that is not a
+          # GitHub secret by using ::add-mask::{value}' — this is a real bearer token (scoped to a
+          # throwaway per-run local stack, but explicit, not relied on any unconfirmed automatic
+          # runner behavior).
+          print('::add-mask::' + token)
+
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write('CONTRACT_TEST_TOKEN=' + token + '\n')
           "
