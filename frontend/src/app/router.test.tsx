@@ -2,7 +2,7 @@ import type { Session } from "@supabase/supabase-js";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
-import { AuthenticatedLayout, LoginPage, SetNewPasswordPage } from "@/app/router";
+import { AuthenticatedLayout, LoginPage, OwnerRoute, SetNewPasswordPage } from "@/app/router";
 import { useSession } from "@/stores/session-store";
 
 // The one thing worth an automated test here: the client-side mirror of backend/app/api/deps.py's
@@ -19,10 +19,11 @@ function mockSession(overrides: {
   session: Session | null;
   mustChangePassword: boolean;
   isLoading?: boolean;
+  role?: "owner" | "employee" | null;
 }) {
   vi.mocked(useSession).mockReturnValue({
     session: overrides.session,
-    role: null,
+    role: overrides.role ?? null,
     mustChangePassword: overrides.mustChangePassword,
     isLoading: overrides.isLoading ?? false,
   });
@@ -36,6 +37,9 @@ function renderAt(path: string) {
         <Route path="/set-new-password" element={<SetNewPasswordPage />} />
         <Route path="/" element={<AuthenticatedLayout />}>
           <Route index element={<div>HOME-CONTENT</div>} />
+          <Route element={<OwnerRoute />}>
+            <Route path="employees" element={<div>EMPLOYEES-CONTENT</div>} />
+          </Route>
         </Route>
       </Routes>
     </MemoryRouter>,
@@ -106,6 +110,27 @@ describe("AuthenticatedLayout", () => {
   it("renders nothing while the session is still loading — never a flash of the gate's wrong state", () => {
     mockSession({ session: null, mustChangePassword: false, isLoading: true });
     const { container } = renderAt("/");
+    expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("OwnerRoute", () => {
+  it("redirects an Employee hitting an Owner route to / — FRONTEND_ARCHITECTURE.md §6's redirect-not-403 pattern, applied at the route", () => {
+    mockSession({ session: _FAKE_SESSION, mustChangePassword: false, role: "employee" });
+    renderAt("/employees");
+    expect(screen.getByText("HOME-CONTENT")).toBeInTheDocument();
+    expect(screen.queryByText("EMPLOYEES-CONTENT")).not.toBeInTheDocument();
+  });
+
+  it("renders the route for an Owner", () => {
+    mockSession({ session: _FAKE_SESSION, mustChangePassword: false, role: "owner" });
+    renderAt("/employees");
+    expect(screen.getByText("EMPLOYEES-CONTENT")).toBeInTheDocument();
+  });
+
+  it("renders nothing while the session is still loading", () => {
+    mockSession({ session: _FAKE_SESSION, mustChangePassword: false, isLoading: true });
+    const { container } = renderAt("/employees");
     expect(container).toBeEmptyDOMElement();
   });
 });

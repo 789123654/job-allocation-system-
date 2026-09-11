@@ -30,7 +30,7 @@ describe("apiRequest", () => {
     expect(capturedAuth).toBe("Bearer fake-access-token");
   });
 
-  it("attaches a fresh Idempotency-Key only when requested", async () => {
+  it("attaches the Idempotency-Key exactly as given, only when one is passed", async () => {
     let capturedKey: string | null = null;
     server.use(
       http.post(`${env.API_BASE_URL}/tasks`, ({ request }) => {
@@ -39,9 +39,42 @@ describe("apiRequest", () => {
       }),
     );
 
-    await apiRequest("/tasks", { method: "POST", body: { title: "x" }, idempotent: true });
+    await apiRequest("/tasks", {
+      method: "POST",
+      body: { title: "x" },
+      idempotencyKey: "caller-owned-key-1",
+    });
 
-    // crypto.randomUUID() format — asserting shape, not a specific value.
-    expect(capturedKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(capturedKey).toBe("caller-owned-key-1");
+  });
+
+  it("reuses the exact same key across two calls when the caller passes the same one — rest-api-guidelines Rule 230: this is what lets a retry of one logical operation dedupe server-side, instead of looking like a brand-new request", async () => {
+    const capturedKeys: Array<string | null> = [];
+    server.use(
+      http.post(`${env.API_BASE_URL}/tasks`, ({ request }) => {
+        capturedKeys.push(request.headers.get("Idempotency-Key"));
+        return HttpResponse.json({ ok: true }, { status: 201 });
+      }),
+    );
+
+    const key = "retry-of-one-logical-operation";
+    await apiRequest("/tasks", { method: "POST", body: { title: "x" }, idempotencyKey: key });
+    await apiRequest("/tasks", { method: "POST", body: { title: "x" }, idempotencyKey: key });
+
+    expect(capturedKeys).toEqual([key, key]);
+  });
+
+  it("sends no Idempotency-Key header when none is passed", async () => {
+    let capturedKey: string | null = "unset";
+    server.use(
+      http.get(`${env.API_BASE_URL}/ping`, ({ request }) => {
+        capturedKey = request.headers.get("Idempotency-Key");
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+
+    await apiRequest("/ping");
+
+    expect(capturedKey).toBeNull();
   });
 });
