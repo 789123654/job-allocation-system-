@@ -1,18 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
+import { toEmployee, type EmployeeOutDto } from "@/features/employees/api/mappers";
 import type { Employee } from "@/features/employees/types";
-
-// backend/app/api/routes/employees.py's EmployeeOut — snake_case on the wire.
-interface EmployeeOutDto {
-  id: string;
-  full_name: string;
-  email: string;
-  is_active: boolean;
-}
-
-function toEmployee(dto: EmployeeOutDto): Employee {
-  return { id: dto.id, fullName: dto.full_name, email: dto.email, isActive: dto.is_active };
-}
 
 export const employeesQueryKey = ["employees"] as const;
 
