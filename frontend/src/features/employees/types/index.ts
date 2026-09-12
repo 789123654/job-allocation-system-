@@ -17,6 +17,10 @@ export interface Employee {
   fullName: string;
   email: string;
   isActive: boolean;
+  // PRD §2.4 workload count — added 2026-09-13 for the Owner Dashboard slice (backend deferred
+  // this until `tasks` existed; it now does). "Pending" = assigned/in_progress, per
+  // crud.list_employees' own docstring.
+  pendingTaskCount: number;
 }
 
 export interface EmployeeCreated extends Employee {

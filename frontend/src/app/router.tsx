@@ -4,6 +4,7 @@ import { LoginForm } from "@/features/auth/components/login-form";
 import { SetNewPasswordForm } from "@/features/auth/components/set-new-password-form";
 import { EmployeeManagementPage } from "@/features/employees/components/employee-management-page";
 import { useEmployees } from "@/features/employees/api/get-employees";
+import { OwnerDashboardPage } from "@/app/owner-dashboard-page";
 import { JobTypeManagementPage } from "@/features/job-types/components/job-type-management-page";
 import { MyTasksPage } from "@/features/tasks/components/my-tasks-page";
 import { OwnerTaskReviewPage } from "@/features/tasks/components/owner-task-review-page";
@@ -74,8 +75,14 @@ export function AuthenticatedLayout() {
   );
 }
 
+// Owner's real landing page as of this pass; Employee's landing page is My Tasks (redirect, not
+// a duplicate placeholder) — the last remaining use of the Phase 4 Step 1 scaffolding text is
+// gone now that Dashboard exists.
 function AuthenticatedHome() {
-  return <p>Signed in — Phase 4 Step 1 scaffolding.</p>;
+  const { role, isLoading } = useSession();
+  if (isLoading) return null;
+  if (role === "employee") return <Navigate to="/tasks" replace />;
+  return <OwnerDashboardPage />;
 }
 
 // FRONTEND_ARCHITECTURE.md §6: "an Employee hitting an Owner route by URL redirects, same

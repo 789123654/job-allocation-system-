@@ -21,6 +21,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
@@ -160,9 +161,32 @@ def create_employee(
     return new_id, password
 
 
-def list_employees(session: Session, offset: int, limit: int) -> list[Profile]:
-    stmt = select(Profile).where(Profile.role == "employee").offset(offset).limit(limit)
-    return list(session.exec(stmt).all())
+def list_employees(session: Session, offset: int, limit: int) -> list[tuple[Profile, int]]:
+    """Returns (employee, pending_job_count) pairs — PRD §2.4's workload count, deliberately
+    omitted when this function was first written (Phase 1, before `tasks` existed — see the
+    route's own prior comment, now removed). One query, not N+1: `tests/crud/test_query_counts.py`
+    already guards this function at exactly one query regardless of row count, re-verified this
+    pass still holds with the added subquery+outerjoin (a single query's own internal join, not an
+    extra round-trip). "Pending" = assigned/in_progress, the same two statuses `submit_task`
+    treats as the task's active-work window (crud.submit_task's own status check).
+    """
+    workload = (
+        select(
+            col(Task.assigned_to).label("employee_id"),  # type: ignore[reportUnknownArgumentType] — known SQLModel/pyright interaction, same as models.py's __tablename__ ignores
+            func.count(col(Task.id)).label("pending_count"),
+        )
+        .where(col(Task.status).in_(("assigned", "in_progress")))
+        .group_by(col(Task.assigned_to))
+        .subquery()
+    )
+    stmt = (
+        select(Profile, func.coalesce(workload.c.pending_count, 0))
+        .where(Profile.role == "employee")
+        .outerjoin(workload, workload.c.employee_id == col(Profile.id))
+        .offset(offset)
+        .limit(limit)
+    )
+    return [(row[0], row[1]) for row in session.exec(stmt).all()]
 
 
 def get_employee(session: Session, employee_id: UUID) -> Profile | None:

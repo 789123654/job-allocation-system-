@@ -23,6 +23,63 @@ commit:
 
 ## Completed Audits
 
+### Phase 4 — Tasks, Owner Side, Part 2: Dashboard (2026-09-13)
+
+```
+status: complete
+phase: Phase 4 — Tasks, Owner side, part 2 (Dashboard: All Tasks table + filters, workload counts, Awaiting Review + Issues Raised panels), CODING_STRUCTURE.md §4 item 5, fifth and final post-auth Phase 4 Tasks resource slice — completes the 11-screen Phase 4 inventory's Tasks resource. First cross-feature composition point (app/-level, per FRONTEND_ARCHITECTURE.md §2's "features cannot import each other"); first aggregate/JOIN query in the whole codebase (crud.list_employees' new workload count); first frontend consumer of GET /notifications and of GET /tasks' Owner-only query filters.
+scope_files: frontend/src/app/{owner-dashboard-page.tsx,router.tsx}, frontend/src/features/tasks/api/get-all-tasks.ts, frontend/src/features/notifications/**, frontend/src/features/employees/{types/index.ts,api/mappers.ts}, frontend/contract-tests/employees.contract.test.ts, frontend/src/testing/mocks/handlers.ts, backend/app/crud.py (list_employees), backend/app/api/routes/employees.py (EmployeeOut.pending_job_count), backend/tests/crud/test_employee_workload.py
+date: 2026-09-13
+commit: (uncommitted — base HEAD is the Tasks-Owner-Part-1 merge commit 88c929e)
+```
+
+**A. Fixed enumeration**
+
+- `asvs_chapters_opened`: v8-authorization (§8.2.2/8.4.1 re-confirmed apply unchanged to the new Owner-scoped `GET /tasks` filters and the workload aggregate — no new authorization decision point, both reuse `RequireOwnerDep`/RLS already in force); v2-validation-business-logic (checked whether the aggregate query introduces any new input-validation surface — it doesn't, `assigned_to`/`job_type_id` filters were already `UUID`-typed FastAPI query params, unchanged this pass).
+- `skills_reopened_fresh`: `owasp-cheatsheets` (2 fresh greps below); `postgres-official`'s row-security-policies.md, re-read fresh for a genuinely new question this pass (does RLS apply correctly when a single query JOINs two independently-RLS-protected tables?) — not reused from any earlier read, since no prior slice ever built a cross-table JOIN.
+- `cheatsheet_grep_keywords`: `query parameter.*filter|filter.*query parameter|mass assignment|IDOR` (11 files — checked whether accepting `?assigned_to=`/`?job_type_id=` from an Owner-controlled query string is itself an IDOR vector); `aggregate|count.*leak|inference attack` (9 files, none actually about cross-table DB aggregation specifically — confirmed this is a database-mechanics question `postgres-official` answers, not an OWASP web-topic, rather than silently assuming cheat sheets must cover it).
+- `cheatsheet_grep_output`: `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md` re-read for the query-parameter angle specifically (not just re-cited from memory) — its general rule (access-control check on every object reference) is already satisfied: `crud.list_tasks` gates the filters behind `actor.role == "owner"`, and an Owner already has full-firm task visibility with no filter at all, so a filter query param can only ever *narrow* a set the caller could already see in full — not a privilege-escalation vector, confirmed by re-reading `crud.list_tasks` fresh (quoted in code comment) rather than assumed from the Employee-side pass's citation of the same function.
+
+**B. Fixed-domain sweep**
+
+- `auth`: Unchanged — `AuthenticatedHome`'s new role-branch (`router.tsx`) reuses `useSession()`'s existing `role`/`isLoading`, same pattern as every other route guard in this file.
+- `session_token_lifecycle`: N/A, no new mechanism.
+- `tenant_isolation`: **Real, load-bearing check — the first cross-table JOIN in this codebase.** `crud.list_employees`'s new workload query JOINs `profiles` and `tasks`, both independently RLS-protected (`ENABLE`+`FORCE ROW LEVEL SECURITY`, distinct `tenant_isolation` policies, confirmed via each table's own migration). Verified fresh against `postgres-official/chapters/row-security-policies.md` (quoted, not paraphrased from memory): "policies are table-specific... each policy for a table must have a unique name" — RLS is enforced per-relation regardless of how many tables one query touches, so this JOIN carries no new cross-tenant risk beyond what each table's own policy already guarantees independently. Frontend: `useAllTasks`/`useNotifications` are the 5th and 6th consumers of `tenantQueryKey`, each with a distinct resource string (`"tasks"`+`"all"`+filters, `"notifications"`) — confirmed no key collision with the other four.
+- `object_level_authz`: N/A for new code — `GET /issues/{id}` (consumed here for the first time by a real caller) was already audited and regression-tested in the prior pass; `GET /notifications` is unchanged, already recipient-scoped server-side.
+- `input_validation`: N/A, no new user input this pass — Dashboard is read-only except for the already-audited `CreateTaskDialog`, reused unchanged.
+- `cors`: N/A, unchanged.
+- `secrets`: N/A — no new response body cached by `with_idempotency` this pass; the workload count and task list are both plain, already-re-fetchable operational data.
+- `supply_chain`: No new dependency this pass (checked `git status` on `package.json`/`package-lock.json` — no diff). `npm audit --omit=dev` → **0 vulnerabilities**.
+
+**C. Self-check gate (mapped to skill-verification-discipline.md's 10 failure modes)**
+
+1. `reapplied_general_principle_to_every_instance`: `tenantQueryKey` reused a 5th and 6th time, each with its own resource string, not reinvented.
+2. `stress_tested_design_against_its_own_stated_logic`: Stress-tested the new `list_employees` aggregate with a **negative control** — temporarily removed the `WHERE status IN (assigned, in_progress)` filter, re-ran `test_employee_workload.py`, confirmed it failed (3 vs. expected 2), restored the filter, confirmed it passed again. Same discipline as the earlier session's Job Types finding, applied proactively this time rather than reactively.
+3. `ran_fixed_domain_sweep_regardless_of_conversation_focus`: The RLS-across-a-JOIN question (Section B `tenant_isolation`) was checked specifically because the sweep runs every pass on every new mechanism, not because the conversation's own framing ("build the Dashboard") ever asked about it.
+4. `reopened_skills_already_read_this_convo_for_a_new_subtask`: `postgres-official`'s row-security-policies.md was reopened and grepped fresh for the cross-table-JOIN question — a different question from any prior read of that same file this session (which was about `FORCE ROW LEVEL SECURITY` on job_types/issues, not about JOIN behavior).
+5. `compound_source_not_partial`: The tenant-isolation finding cites both tables' own migrations (already-established) **and** a fresh, direct quote from `postgres-official` **and** a re-read of `crud.list_tasks`'s actual filter-gating code — three independent checks.
+6. `grepped_whole_cheatsheet_dir_not_just_familiar_titles`: 2 fresh whole-directory greps this pass (listed in A) — one confirmed a real gap in OWASP's own coverage (cross-table DB aggregation isn't a cheat-sheet topic) rather than silently assuming it must be covered somewhere and moving on.
+7. `new_call_site_of_shared_mechanism_asked_whats_different_about_its_data`: Asked what's different about `GET /tasks`'s Owner-filter query params being exercised by a real caller for the first time (Section A's last bullet) — confirmed narrowing-only, no new exposure, rather than assuming a previously-unused code path is automatically safe just because it already existed.
+8. `comprehensiveness_claim_backed_by_the_actual_checklist`: This audit **is** that engagement — set to `in-progress` (now `complete`) before this write-up, with real evidence, not a retroactive summary.
+9. `pre_write_check_run_before_writing_the_code_not_after`: The RLS-per-table question was actually researched and quoted **before** `list_employees` was written (visible earlier in this session, in the same message as the fact-forcing-gate statement for that edit) — not reconstructed afterward for this audit.
+10. `blind_test_authoring_used_where_it_mattered`: **Yes, run this pass** — a fresh agent, given only the API/component contract for `OwnerDashboardPage` (not its source), wrote its own test suite. 3/5 passed independently; the 2 failures were the test's own query-ambiguity bugs (`findByText` matching "Alex Employee"/"Already submitted" in more than one legitimate place), not implementation defects — confirmed by inspecting the actual rendered DOM in both failures, which showed the correct behavior (workload count "2", not "3") already present. Not "fixed" to force a pass, per the same discipline as the previous blind-test pass.
+
+**D. Verification-of-verification**
+
+- `library_behavior_claims_checked_against_installed_source`: None newly claimed this pass — Radix Select reused unchanged (already verified against its own `.d.mts` last pass); no new library introduced.
+- `fix_verified_by_real_command_output`: Negative control on the workload count (above) — confirmed fails on broken code (3≠2), passes restored. Full suite: `npm run lint` → 0 errors, 5 pre-existing warnings; `npm run typecheck` → clean; `npx vitest run` → **53 passed**, 12 test files; `npm run build` → succeeded. Backend: `uv run ruff check .` → clean; `uv run pyright` → 0 errors; `uv run pytest` → **110 passed**, 70 skipped (real-DB tests, run in CI). Blind-authored test suite run separately (above): 3/5 passed, 2 confirmed-not-bugs.
+
+**E. Bounded claim**
+
+- `standard_and_scope`: ASVS 5 (v8, v2), L1+L2, `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md`, `postgres-official`'s row-security-policies.md — scoped to `scope_files` above, base commit `88c929e`, plus this pass's own additions, none pushed yet.
+- `severity_trend_vs_last_pass`: **Zero security findings this pass** — lower than every prior Tasks pass. Read as the expected, healthy outcome of a slice that composes already-audited pieces (Select, Idempotency-Key patterns, RLS, object-level-authz on `GET /issues/{id}`) rather than introducing new security-relevant mechanisms of its own; the one genuinely new mechanism (the cross-table aggregate JOIN) was checked against its own real question (RLS-per-table) and cleared, not skipped for lack of an obvious finding to report.
+
+**F. Independent pass**
+
+- `security_review_run`: Not run as a separate `code-review` agent pass — this pass's one novel mechanism (the aggregate JOIN) was verified directly against official Postgres docs plus a negative-control test; its other novelty (cross-feature composition) is an architecture concern already resolved by `FRONTEND_ARCHITECTURE.md`'s own explicit rule, not a fresh security question. This completes the full Tasks resource (both Employee and Owner sides) — a natural point for the deferred full independent `code-review` sweep across the whole resource, named again as still outstanding, not silently dropped.
+
+## Completed Audits
+
 ### Phase 4 — Tasks, Owner Side, Part 1: Create Task + Task Review (2026-09-12)
 
 ```

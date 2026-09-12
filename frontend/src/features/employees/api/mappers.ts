@@ -11,10 +11,17 @@ export interface EmployeeOutDto {
   full_name: string;
   email: string;
   is_active: boolean;
+  pending_job_count: number;
 }
 
 export function toEmployee(dto: EmployeeOutDto): Employee {
-  return { id: dto.id, fullName: dto.full_name, email: dto.email, isActive: dto.is_active };
+  return {
+    id: dto.id,
+    fullName: dto.full_name,
+    email: dto.email,
+    isActive: dto.is_active,
+    pendingTaskCount: dto.pending_job_count,
+  };
 }
 
 export interface EmployeeCreatedDto {
@@ -30,6 +37,9 @@ export function toEmployeeCreated(dto: EmployeeCreatedDto): EmployeeCreated {
     fullName: dto.full_name,
     email: dto.email,
     isActive: true,
+    // Not on the wire (EmployeeCreated, employees.py, has no pending_job_count field) — a
+    // brand-new employee has never been assigned a task, so 0 is a real fact, not a guess.
+    pendingTaskCount: 0,
     generatedPassword: dto.generated_password,
   };
 }

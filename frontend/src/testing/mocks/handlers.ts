@@ -38,6 +38,16 @@ export function resetEmployeesFixture(): void {
 }
 resetEmployeesFixture();
 
+// Mirrors crud.list_employees' real join against `tasks` (pending_job_count = assigned/
+// in_progress) rather than a hardcoded fixture number, so a test that seeds different tasks for
+// "e1" sees the count actually change — computed at request time, not module-load time, since
+// `tasks` is reset independently per test.
+function pendingJobCount(employeeId: string): number {
+  return tasks.filter(
+    (t) => t.assigned_to === employeeId && (t.status === "assigned" || t.status === "in_progress"),
+  ).length;
+}
+
 interface JobTypeRecord {
   id: string;
   name: string;
@@ -145,12 +155,34 @@ export function resetIssuesFixture(): void {
 }
 resetIssuesFixture();
 
+interface NotificationRecord {
+  id: string;
+  type: string;
+  task_id: string | null;
+  issue_id: string | null;
+  is_read: boolean;
+  created_at: string;
+}
+
+let notifications: NotificationRecord[] = [];
+
+export function resetNotificationsFixture(): void {
+  notifications = [
+    { id: "n1", type: "issue_raised", task_id: "t1", issue_id: "i1", is_read: false, created_at: NOW },
+  ];
+}
+resetNotificationsFixture();
+
 export const handlers = [
   http.post(`${SUPABASE_URL}/auth/v1/token`, () => HttpResponse.json(fakeSession)),
   http.put(`${SUPABASE_URL}/auth/v1/user`, () => HttpResponse.json(fakeUser)),
 
   // API_SPEC.md §3 Employees — mirrors backend/app/api/routes/employees.py's actual shapes.
-  http.get(`${API_BASE_URL}/employees`, () => HttpResponse.json(employees)),
+  http.get(`${API_BASE_URL}/employees`, () =>
+    HttpResponse.json(
+      employees.map((e) => ({ ...e, pending_job_count: pendingJobCount(e.id) })),
+    ),
+  ),
   http.post(`${API_BASE_URL}/employees`, async ({ request }) => {
     const body = (await request.json()) as { full_name: string; email: string };
     if (employees.some((e) => e.email === body.email)) {
@@ -215,10 +247,22 @@ export const handlers = [
     return HttpResponse.json(jobType);
   }),
 
-  // tasks.py — mirrors the real route shapes. No status/assigned_to/job_type_id/task_type filters
-  // applied here (crud.list_tasks is role-scoped server-side, not filtered) — this fixture only
-  // ever plays the Employee role in this session's tests, so it always returns every seeded task.
-  http.get(`${API_BASE_URL}/tasks`, () => HttpResponse.json(tasks)),
+  // tasks.py — mirrors the real route shapes. Query filters applied unconditionally here (the
+  // fixture has no concept of role) — Employee-side tests never send any, so this is a no-op for
+  // them; Dashboard tests do, mirroring crud.list_tasks' real Owner-only filter behavior.
+  http.get(`${API_BASE_URL}/tasks`, ({ request }) => {
+    const url = new URL(request.url);
+    let filtered = tasks;
+    const status = url.searchParams.get("status");
+    const assignedTo = url.searchParams.get("assigned_to");
+    const jobTypeId = url.searchParams.get("job_type_id");
+    const taskType = url.searchParams.get("task_type");
+    if (status) filtered = filtered.filter((t) => t.status === status);
+    if (assignedTo) filtered = filtered.filter((t) => t.assigned_to === assignedTo);
+    if (jobTypeId) filtered = filtered.filter((t) => t.job_type_id === jobTypeId);
+    if (taskType) filtered = filtered.filter((t) => t.task_type === taskType);
+    return HttpResponse.json(filtered);
+  }),
   http.post(`${API_BASE_URL}/tasks`, async ({ request }) => {
     const body = (await request.json()) as {
       title: string;
@@ -345,6 +389,11 @@ export const handlers = [
       { status: 201 },
     );
   }),
+
+  // notifications.py — mirrors the real route shape. unread_only defaults true server-side; the
+  // fixture's own seeded notification is already unread, so no filtering logic needed to match
+  // that default for what this pass actually tests.
+  http.get(`${API_BASE_URL}/notifications`, () => HttpResponse.json(notifications)),
 ];
 
 export const server = setupServer(...handlers);
