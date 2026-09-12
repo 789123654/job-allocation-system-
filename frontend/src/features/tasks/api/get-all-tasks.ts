@@ -23,6 +23,12 @@ export function useAllTasks(filters: TaskFilters) {
   if (filters.assignedTo) params.set("assigned_to", filters.assignedTo);
   if (filters.jobTypeId) params.set("job_type_id", filters.jobTypeId);
   if (filters.taskType) params.set("task_type", filters.taskType);
+  // The route defaults to limit=20 (API_SPEC.md) with no explicit page control on the Dashboard —
+  // found by an independent code-review pass (2026-09-13): past 20 tasks, rows silently went
+  // missing with no indication. 100 is the route's own max (tasks.py's Query(le=100)) and covers
+  // this project's current target scale (2-4 firms / ~30 users, [[ca-tool-project-scope]]). Real
+  // pagination for the All Tasks table is a separate feature if a firm ever exceeds this.
+  params.set("limit", "100");
   const qs = params.toString();
 
   return useQuery({

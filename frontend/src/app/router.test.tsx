@@ -141,7 +141,7 @@ describe("AuthenticatedHome", () => {
     resetNotificationsFixture();
   });
 
-  function renderHome(role: "owner" | "employee") {
+  function renderHome(role: "owner" | "employee" | null) {
     mockSession({ session: _FAKE_SESSION, mustChangePassword: false, role });
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -166,6 +166,15 @@ describe("AuthenticatedHome", () => {
   it("renders the Owner Dashboard for an Owner", async () => {
     renderHome("owner");
     expect(await screen.findByRole("heading", { name: /dashboard/i })).toBeInTheDocument();
+  });
+
+  // Regression for the code-review finding (2026-09-13): this previously fell through to
+  // <OwnerDashboardPage /> for any role other than "employee", including the reachable null case
+  // (a signed-in session whose app_metadata.role claim is missing/malformed). Must default-deny,
+  // same as OwnerRoute/EmployeeRoute below — never default to the highest-privilege view.
+  it("renders nothing for a session with no recognized role, rather than defaulting to the Owner Dashboard", () => {
+    const { container } = renderHome(null);
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

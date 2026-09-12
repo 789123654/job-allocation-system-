@@ -25,7 +25,14 @@ export function OwnerDashboardPage() {
     taskType: searchParams.get("task_type") ?? undefined,
   };
 
-  const { data: tasks } = useAllTasks(filters);
+  // Two separate fetches, deliberately not one shared list: Awaiting Review and Issues Raised
+  // must always reflect every task regardless of what the Owner has selected in the All Tasks
+  // filter — found by an independent code-review pass (2026-09-13) after both panels were
+  // previously derived from the same filtered list, so e.g. filtering All Tasks to "billing"
+  // silently hid an unrelated submitted task from Awaiting Review too. `allTasks` feeds those two
+  // panels; `filteredTasks` feeds only the All Tasks table itself.
+  const { data: allTasks } = useAllTasks({});
+  const { data: filteredTasks } = useAllTasks(filters);
   const { data: employees } = useEmployees();
   const { data: jobTypes } = useJobTypes();
   const { data: notifications } = useNotifications();
@@ -35,7 +42,7 @@ export function OwnerDashboardPage() {
   const jobTypeOptions = (jobTypes ?? []).map((jt) => ({ id: jt.id, label: jt.name }));
   const employeeOptions = (employees ?? []).map((e) => ({ id: e.id, label: e.fullName }));
 
-  const awaitingReview = (tasks ?? []).filter((t) => t.status === "submitted");
+  const awaitingReview = (allTasks ?? []).filter((t) => t.status === "submitted");
   const issueNotifications = (notifications ?? []).filter((n) => n.type === "issue_raised");
 
   function setFilter(key: string, value: string) {
@@ -86,7 +93,7 @@ export function OwnerDashboardPage() {
               <IssueRow
                 key={n.id}
                 issueId={n.issueId}
-                taskTitle={n.taskId ? ((tasks ?? []).find((t) => t.id === n.taskId)?.title ?? n.taskId) : "—"}
+                taskTitle={n.taskId ? ((allTasks ?? []).find((t) => t.id === n.taskId)?.title ?? n.taskId) : "—"}
               />
             ))}
           </ul>
@@ -137,7 +144,7 @@ export function OwnerDashboardPage() {
             </tr>
           </thead>
           <tbody>
-            {(tasks ?? []).map((t: Task) => (
+            {(filteredTasks ?? []).map((t: Task) => (
               <tr key={t.id}>
                 <td>
                   <Link to={`/owner-tasks/${t.id}/review`} className="hover:underline">
@@ -161,7 +168,14 @@ function IssueRow({ issueId, taskTitle }: { issueId: string | null; taskTitle: s
   const { data: issue } = useIssue(issueId ?? "");
   return (
     <li>
-      <span className="font-medium">{taskTitle}:</span> {issue?.description ?? "Loading…"}
+      {issueId ? (
+        <Link to={`/owner-issues/${issueId}/resolve`} className="font-medium hover:underline">
+          {taskTitle}
+        </Link>
+      ) : (
+        <span className="font-medium">{taskTitle}</span>
+      )}
+      : {issue?.description ?? "Loading…"}
     </li>
   );
 }

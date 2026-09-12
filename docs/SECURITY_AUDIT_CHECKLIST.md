@@ -23,6 +23,64 @@ commit:
 
 ## Completed Audits
 
+### Phase 4 — Issue Resolution (Owner Side) (2026-09-13)
+
+```
+status: complete
+phase: Phase 4 — Issue Resolution (Owner clarifies/adjusts-deadline/reassigns a raised issue), PRD §2.7/§3.3/§4.3, FRONTEND_ARCHITECTURE.md's Issue Resolution screen row — second-to-last of the 11-screen Phase 4 inventory. Backend (GET /issues/{id}, POST /issues/{id}/resolve) already fully built and audited in earlier passes (Phase 3, Tasks-Owner-Part-2); this slice is the frontend screen consuming it for the first time.
+scope_files: frontend/src/features/tasks/{components/issue-resolution-page.tsx,api/resolve-issue.ts,types/index.ts (issueResolveSchema)}, frontend/src/app/{router.tsx,owner-dashboard-page.tsx}, frontend/src/testing/mocks/handlers.ts (POST /issues/:id/resolve mock)
+date: 2026-09-13
+commit: (uncommitted — base HEAD is the Owner-Dashboard-regression-tests merge)
+```
+
+**A. Fixed enumeration**
+
+- `asvs_chapters_opened`: v8-authorization (§8.2.2 BOLA/IDOR — the new `/owner-issues/:issueId/resolve` URL exposes an issue id the same way the already-cleared `/owner-tasks/:taskId/review` exposes a task id; re-confirmed, not assumed, that `resolve_issue`/`get_issue` are both `RequireOwnerDep` + RLS-scoped with no per-object check needed beyond that, same shape already audited for `GET /issues/{id}` in the prior Dashboard pass); v2-validation-business-logic (the new `issueResolveSchema` combination rules mirror `IssueResolveRequest`'s `_validate_resolution_fields` field-for-field, re-read fresh this pass, not assumed from `taskReviewSchema`'s similar-looking shape — confirmed `resolution_notes` is unconditionally required here, unlike `TaskReviewCreate.notes`).
+- `skills_reopened_fresh`: `owasp-cheatsheets` (whole-directory grep below); `owasp-asvs-5/chapters/v8-authorization.md` (re-read for the id-in-URL question specifically).
+- `cheatsheet_grep_keywords`: `object reference|IDOR|mass assignment|validate combinations|business logic` (surfaced `Authorization_Regression_Testing_Cheat_Sheet.md`, `Business_Logic_Security_Cheat_Sheet.md`, `Mass_Assignment_Cheat_Sheet.md`, `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md`, `Multi_Tenant_Security_Cheat_Sheet.md` among others — not just the titles that sounded relevant from memory).
+- `cheatsheet_grep_output`: Confirmed no new finding — the object-reference/mass-assignment/combination-validation concerns this screen touches are all reused, already-audited backend mechanisms (`RequireOwnerDep`, RLS, `_validate_assignee`/`UnknownAssigneeError`, `_validate_resolution_fields`); this slice adds zero new backend surface, only a frontend consumer of it.
+
+**B. Fixed-domain sweep**
+
+- `auth`: Unchanged — reuses `OwnerRoute`'s existing gate via a new `OwnerIssueResolutionRoute` wrapper, same pattern as `OwnerTaskReviewRoute`.
+- `session_token_lifecycle`: N/A, no new mechanism.
+- `tenant_isolation`: N/A for new code — `resolve_issue`/`get_issue` were already RLS-audited; this pass adds no new query.
+- `object_level_authz`: Re-confirmed, not re-audited — same 404-not-403 IDOR-cleared shape as `GET /issues/{id}` (prior pass) and `/owner-tasks/:taskId/review` (Tasks-Owner-Part-1 pass), now with a second URL exposing an issue id (`/owner-issues/:issueId/resolve`). No new backend check needed; the frontend route itself is Owner-gated same as its sibling.
+- `input_validation`: `issueResolveSchema`'s combination rules mirror the backend's exactly (re-read fresh, not assumed) — `resolutionNotes` always required, `newDeadline` only for `deadline_adjusted`, `remainingWorkDescription`/`assignedTo` only for `reassigned`.
+- `cors`: N/A, unchanged.
+- `secrets`: N/A — `IssueOut` response body is plain operational data, same as the already-cleared `create_task`/`resolve_issue` response-body check from the earlier Phase 3 pass.
+- `supply_chain`: No new dependency (`git status` on `package.json`/`package-lock.json` — no diff).
+
+**C. Self-check gate (mapped to skill-verification-discipline.md's 11 failure modes)**
+
+1. `reapplied_general_principle_to_every_instance`: `OwnerTaskReviewRoute`'s cross-feature-import workaround (fetch `useEmployees()` at the `app/` composition layer, pass down as plain `{id,label}` options) reapplied identically for `OwnerIssueResolutionRoute` — not reinvented.
+2. `stress_tested_design_against_its_own_stated_logic`: Explicitly checked, for **every one of the 3** `resolutionType` branches (not just the 1-2 most obvious), that the combination-validation rejects fields invalid for that branch — caught by the blind test suite that a 4th case (switching branches after partially filling a different one) leaked a stale field value past the branch-specific checks; see Section D for the real bug this found and its fix.
+3. `ran_fixed_domain_sweep_regardless_of_conversation_focus`: Section B run in full even though this slice reuses an already-audited backend wholesale — confirmed there's genuinely nothing new to find there, rather than skipping the sweep because "it's just a form."
+4. `reopened_skills_already_read_this_convo_for_a_new_subtask`: `owasp-asvs-5/chapters/v8-authorization.md` reopened for the *new* id-in-URL question this pass (a second URL parameter, not the same one already cleared for tasks), not cited from memory of the earlier tasks-focused read.
+5. `compound_source_not_partial`: Cheat sheets *and* ASVS 5 both checked this pass (A above), not just one.
+6. `grepped_whole_cheatsheet_dir_not_just_familiar_titles`: Whole-directory grep (A above) surfaced `Authorization_Regression_Testing_Cheat_Sheet.md` — a file whose title gives no hint it's about designing regression test suites, exactly the failure-mode-6 trap; used to brief the blind-test agent (Section D), not just noted and dropped.
+7. `new_call_site_of_shared_mechanism_asked_whats_different_about_its_data`: `with_idempotency`/`RequireOwnerDep`/RLS are all reused unchanged at this new call site — checked (not assumed) that `IssueOut`'s response body carries no secret/one-time value the existing idempotency-cache vetting wouldn't already cover.
+8. `comprehensiveness_claim_backed_by_the_actual_checklist`: This audit entry is that engagement, written with real evidence, not a retroactive summary.
+9. `pre_write_check_run_before_writing_the_code_not_after`: Sections A/B's checks were done and stated (fact-forcing-gate messages) before each file was written this pass, not reconstructed afterward.
+10. `blind_test_authoring_used_where_it_mattered`: **Run this pass, and this time authored exclusively by the blind agent** — per the user's explicit instruction, no test in this slice was self-authored; every test came from a fresh subagent given only the PRD/API contract, told to consult `skill-verification-discipline.md` failure modes 6/8, `owasp-asvs-5`, a whole-directory `owasp-cheatsheets` grep, and `bulletproof-react/docs/testing.md`, and to design tests against the 3 bug-shapes the prior Dashboard code-review pass found. Result: 19 tests, 15 passed, 4 failed — all 4 failures traced to the blind test's own artifacts (3 used a non-UUID fixture id `"e1"`/`"no-such-employee"` for `assigned_to`, tripping the schema's real `.uuid()` check before ever reaching the network — the same "malformed test UUID" class already documented earlier this session; 1 was a plain error-copy wording mismatch, "already been resolved" vs. the guessed regex `already resolved`) — reported honestly, not adjusted to force a pass, then the blind test file deleted per this session's standing convention.
+11. `code_review_decision_asked_not_assumed`: Per Rule 11, whether to run an independent `/code-review` pass on this slice is being asked of the user (with reasons for/against) rather than either auto-run or silently skipped — see the conversation for that exchange.
+
+**D. Verification-of-verification**
+
+- `library_behavior_claims_checked_against_installed_source`: None newly claimed — Radix Select/react-hook-form/Zod all reused in their already-established patterns.
+- `fix_verified_by_real_command_output`: **Real bug found by the blind suite, not by me**: `useForm` had no `shouldUnregister: true`, so react-hook-form kept a conditionally-rendered field's stale value (e.g. a deadline entered while on "Adjust deadline") in form state after switching to a different `resolutionType` — the schema's own combination guard correctly rejected the resulting invalid combination, but with **no visible error message** (a separate, compounding omission: `errors.resolutionType`/`errors.assignedTo` were never rendered), so the screen just silently refused to submit with no explanation. Fixed with `shouldUnregister: true` plus the two missing error-message renders. Negative control: reverted `shouldUnregister`, reran the blind suite's leak test, confirmed it failed (timed out waiting for navigation), restored, confirmed it passed. **Also found (not by the blind suite, by the Dashboard's own existing self-authored tests)**: linking each Issues Raised entry to this new screen made a task's title legitimately appear twice in the DOM whenever it has both an open issue and a spot in the All Tasks table — updated 4 assertions in `owner-dashboard-page.test.tsx` to `findAllByText(...).toHaveLength(n)` instead of a bare single-match query, same convention already used there for "Already submitted". Full suite after both fixes: `npm run lint` → 0 errors; `npm run typecheck` → clean; `npx vitest run` → **74 passed**, 13 test files (12 real + the now-deleted blind one); `npm run build` → succeeded.
+- **Noted, not fixed — deferred**: `owner-task-review-page.tsx`'s own "reassigned"/"billing" branches likely share the same two gaps (no `shouldUnregister`, no `errors.assignedTo` render in its reassign block) — not touched this pass to keep scope to the slice actually being built; flagged here so it isn't silently forgotten if it ever causes a real report.
+- **One permanent regression test added, on the user's explicit decision** (asked directly, per Rule 11's spirit of not silently deciding a token-cost tradeoff): the blind suite that found the `shouldUnregister` bug was deleted per this session's usual verification-only convention, which would have left zero permanent guard against it regressing. `issue-resolution-page.test.tsx` — one test, self-authored this time (the user explicitly approved this one exception to "blind-only" for this slice, since it's guarding a real bug rather than authoring the slice's initial coverage) — re-verified with the same negative control (reverted `shouldUnregister`, confirmed this test fails too, restored, confirmed it passes).
+
+**E. Bounded claim**
+
+- `standard_and_scope`: ASVS 5 (v8, v2), L1+L2, `Authorization_Regression_Testing_Cheat_Sheet.md`, `Business_Logic_Security_Cheat_Sheet.md`, `Mass_Assignment_Cheat_Sheet.md` — scoped to `scope_files` above, none pushed yet.
+- `severity_trend_vs_last_pass`: **Zero new security findings** — this slice adds no new backend surface at all, only a frontend consumer of an already-thrice-audited backend. The one real bug found (stale conditional-field leak) is a correctness/UX defect, not a security one — the schema's combination guard correctly blocked the bad request either way, just silently.
+
+**F. Independent pass**
+
+- `security_review_run`: **Asked, not assumed** (Rule 11) — user chose to skip an independent `/code-review` pass for this slice, given zero new backend surface (the endpoint was already thrice-audited), the one real bug already found and fixed by the blind pass, and the fixed-domain sweep + ASVS/cheatsheet checks above coming back clean. Not silently skipped and not auto-run — a real decision, recorded here.
+
 ### Phase 4 — Tasks, Owner Side, Part 2: Dashboard (2026-09-13)
 
 ```
@@ -77,6 +135,50 @@ commit: (uncommitted — base HEAD is the Tasks-Owner-Part-1 merge commit 88c929
 **F. Independent pass**
 
 - `security_review_run`: Not run as a separate `code-review` agent pass — this pass's one novel mechanism (the aggregate JOIN) was verified directly against official Postgres docs plus a negative-control test; its other novelty (cross-feature composition) is an architecture concern already resolved by `FRONTEND_ARCHITECTURE.md`'s own explicit rule, not a fresh security question. This completes the full Tasks resource (both Employee and Owner sides) — a natural point for the deferred full independent `code-review` sweep across the whole resource, named again as still outstanding, not silently dropped.
+
+**Follow-up (2026-09-13) — the deferred independent `code-review` pass named above was run against this
+slice plus its regression-test follow-up commit (`HEAD~2..HEAD` on `main`: PRs #52 and #53). 6 findings,
+none security-critical on their own, but 3 were real correctness/authorization-adjacent bugs that every
+standing gate (pre-write skill check, this checklist, negative-controlled tests) had already passed. Fixed,
+each proven by negative control (temporarily reverted, confirmed the regression test failed, restored):**
+
+1. **`router.tsx`'s `AuthenticatedHome`** defaulted to `<OwnerDashboardPage />` for any role other than
+   `"employee"`, including the reachable `role === null` case (a signed-in session with a missing/malformed
+   `app_metadata.role` claim) — diverging from this same file's own `OwnerRoute`/`EmployeeRoute` default-deny
+   convention. Fixed to explicit-allow (`role === "owner"` → Dashboard, `role === "employee"` → redirect,
+   anything else → render nothing). New test: `router.test.tsx`'s "renders nothing for a session with no
+   recognized role" — negative-controlled (reverted, confirmed the Dashboard leaked through, restored).
+2. **Awaiting Review / Issues Raised were derived from the same *filtered* task list as the All Tasks
+   table**, so an Owner-selected filter silently hid unrelated entries from those other panels — and the
+   slice's own prior test asserted that disappearance as expected, passing behavior (exactly the self-
+   grading bias rule 10.2 exists to catch). Fixed by fetching an unfiltered `allTasks` list for those two
+   panels, separate from the `filteredTasks` list the All Tasks table alone uses. New test:
+   `owner-dashboard-page.test.tsx`'s "keeps a submitted task in Awaiting Review even when the All Tasks
+   status filter excludes it" — negative-controlled.
+3. **`crud.list_tasks` had no `ORDER BY`**, and this slice's `useAllTasks` never sent `limit`/`offset` —
+   past the route's default of 20 rows, tasks could silently vanish in non-deterministic order. This bug
+   pre-dated this slice; it only became reachable once the Dashboard was the first caller needing >20 rows.
+   Fixed with a deterministic `.order_by(created_at desc, id)` (matching `list_notifications`' own existing
+   precedent) plus an explicit `limit=100` sent from the Dashboard (the route's own max, sufficient for this
+   project's current ~30-user/2-4-firm target scale — real pagination is a separate future feature if that
+   changes). New tests: `backend/tests/crud/test_task_ordering.py` — negative-controlled (the ordering test
+   failed without the fix; the pagination test happened to still pass on SQLite's coincidental rowid order,
+   which is itself the expected shape of a "no guarantee" bug, not a flaw in the test).
+
+**Noted, not fixed this pass — deferred, to be revisited if they cause a real problem:**
+- Task-mutation hooks (`create-task.ts` and its siblings) invalidate only the `tasks` query cache, never
+  `employeesQueryKeyPrefix`, so the Workload panel's `pendingTaskCount` can go stale until an unrelated
+  remount/refocus. Self-heals; no data loss.
+- `IssueRow` calls `useIssue(issueId ?? "")` without gating on a non-empty id — currently unreachable, since
+  the backend always sets `issue_id` on an `issue_raised` notification; dormant defense-in-depth only.
+- Issues Raised fires one `GET /issues/{id}` request per row instead of batching — a real N+1, but pure
+  efficiency, not correctness, and this project's current scale keeps the open-issue count small.
+
+This is Rule 11's decision protocol in `skill-verification-discipline.md` applied for real, not just stated:
+weighed running `/code-review` against its token cost, ran it because this slice was a cross-cutting `app/`-
+layer composition point with self-authored tests, found 3 real bugs the standing gates missed, fixed and
+negative-control-verified those 3, and explicitly deferred the other 3 rather than fixing everything found
+indiscriminately.
 
 ## Completed Audits
 

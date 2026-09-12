@@ -87,6 +87,65 @@ export const taskReviewSchema = z
 
 export type TaskReviewInput = z.infer<typeof taskReviewSchema>;
 
+// Mirrors backend/app/api/routes/issues.py's IssueResolveRequest + its _validate_resolution_fields
+// combination rules exactly (re-read fresh this pass) — same FRONTEND_ARCHITECTURE.md §7 mirroring
+// convention as taskReviewSchema above. Unlike TaskReviewCreate's optional `notes`,
+// IssueResolveRequest.resolution_notes has no default (`Field(min_length=1, max_length=2000)`) —
+// always required regardless of resolution_type, confirmed by reading the backend model directly
+// rather than assuming it follows taskReviewSchema's own shape.
+export const issueResolveSchema = z
+  .object({
+    resolutionType: z.enum(["clarified", "deadline_adjusted", "reassigned"]),
+    resolutionNotes: z.string().min(1, "Notes are required").max(2000, "Notes are too long"),
+    newDeadline: z.string().optional(),
+    assignedTo: z.string().uuid().optional(),
+    remainingWorkDescription: z.string().max(2000, "Description is too long").optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.resolutionType === "deadline_adjusted") {
+      if (!val.newDeadline) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["newDeadline"],
+          message: "A new deadline is required when adjusting the deadline",
+        });
+      }
+      if (val.assignedTo || val.remainingWorkDescription) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["resolutionType"],
+          message: "assignedTo/remainingWorkDescription are only valid for resolutionType=reassigned",
+        });
+      }
+    } else if (val.resolutionType === "reassigned") {
+      if (!val.remainingWorkDescription) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["remainingWorkDescription"],
+          message: "Remaining work description is required when reassigning",
+        });
+      }
+      if (val.newDeadline) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["newDeadline"],
+          message: "newDeadline is only valid for resolutionType=deadline_adjusted",
+        });
+      }
+    } else {
+      // clarified
+      if (val.newDeadline || val.assignedTo || val.remainingWorkDescription) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["resolutionType"],
+          message: "Only notes is valid for resolutionType=clarified",
+        });
+      }
+    }
+  });
+
+export type IssueResolveInput = z.infer<typeof issueResolveSchema>;
+
 // API_SPEC.md / tasks.py's TaskOut — full field set, since GET /tasks/{id} returns every field
 // (including Owner-review-only ones like billing_amount/last_reassignment_*) to an Employee
 // viewing their own task, not just the fields this pass's screens read. Read data, not form

@@ -1,0 +1,43 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { apiRequest } from "@/lib/api-client";
+import { tenantQueryKeyPrefix } from "@/lib/tenant-query-key";
+import { tasksQueryKeyPrefix } from "@/features/tasks/api/get-tasks";
+import { toIssue, type IssueOutDto } from "@/features/tasks/api/mappers";
+import type { Issue, IssueResolveInput } from "@/features/tasks/types";
+
+// POST /issues/{id}/resolve — issues.py's resolve_issue, IdempotencyKeyHeader required (same
+// pattern as create-task-review.ts). Field names mirror IssueResolveRequest exactly;
+// issueResolveSchema's superRefine already stops an invalid combination from reaching this call.
+function resolveIssue(
+  input: { issueId: string; idempotencyKey: string } & IssueResolveInput,
+): Promise<Issue> {
+  return apiRequest<IssueOutDto>(`/issues/${input.issueId}/resolve`, {
+    method: "POST",
+    idempotencyKey: input.idempotencyKey,
+    body: {
+      resolution_type: input.resolutionType,
+      resolution_notes: input.resolutionNotes,
+      new_deadline: input.newDeadline ?? null,
+      assigned_to: input.assignedTo ?? null,
+      remaining_work_description: input.remainingWorkDescription ?? null,
+    },
+  }).then(toIssue);
+}
+
+export function useResolveIssue() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: resolveIssue,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: tasksQueryKeyPrefix });
+      // A "reassigned" resolution moves the task back to in_progress under possibly a different
+      // assignee (crud._reassign_task) — the same pendingTaskCount-goes-stale gap already logged
+      // as deferred (SECURITY_AUDIT_CHECKLIST.md, 2026-09-13 follow-up) for create-task/submit-
+      // task/review-task/mark-billed. Fixed here instead of repeated, since this hook is new:
+      // invalidated via the shared tenantQueryKeyPrefix helper, not features/employees' own
+      // export — that cross-feature import would violate FRONTEND_ARCHITECTURE.md §2's
+      // features-cannot-import-each-other rule.
+      void queryClient.invalidateQueries({ queryKey: tenantQueryKeyPrefix("employees") });
+    },
+  });
+}

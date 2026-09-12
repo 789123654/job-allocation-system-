@@ -6,6 +6,7 @@ import { EmployeeManagementPage } from "@/features/employees/components/employee
 import { useEmployees } from "@/features/employees/api/get-employees";
 import { OwnerDashboardPage } from "@/app/owner-dashboard-page";
 import { JobTypeManagementPage } from "@/features/job-types/components/job-type-management-page";
+import { IssueResolutionPage } from "@/features/tasks/components/issue-resolution-page";
 import { MyTasksPage } from "@/features/tasks/components/my-tasks-page";
 import { OwnerTaskReviewPage } from "@/features/tasks/components/owner-task-review-page";
 import { TaskDetailPage } from "@/features/tasks/components/task-detail-page";
@@ -82,8 +83,14 @@ export function AuthenticatedLayout() {
 export function AuthenticatedHome() {
   const { role, isLoading } = useSession();
   if (isLoading) return null;
+  if (role === "owner") return <OwnerDashboardPage />;
   if (role === "employee") return <Navigate to="/tasks" replace />;
-  return <OwnerDashboardPage />;
+  // Default-deny, matching OwnerRoute/EmployeeRoute below: an authenticated session with a
+  // missing/malformed role claim (session-store.tsx's role is "owner" | "employee" | null) must
+  // never fall through to the highest-privilege view. Renders nothing, same as the isLoading case
+  // above — found by an independent code-review pass (2026-09-13) after this previously defaulted
+  // to <OwnerDashboardPage /> for any non-"employee" role, including null.
+  return null;
 }
 
 // FRONTEND_ARCHITECTURE.md §6: "an Employee hitting an Owner route by URL redirects, same
@@ -134,6 +141,15 @@ function OwnerTaskReviewRoute() {
   return <OwnerTaskReviewPage key={taskId} employeeOptions={employeeOptions} />;
 }
 
+// Same reasoning as OwnerTaskReviewRoute above, applied to IssueResolutionPage's reassign
+// employee picker — same cross-feature-import restriction, same fix.
+function OwnerIssueResolutionRoute() {
+  const { issueId } = useParams<{ issueId: string }>();
+  const { data: employees } = useEmployees();
+  const employeeOptions = (employees ?? []).map((e) => ({ id: e.id, label: e.fullName }));
+  return <IssueResolutionPage key={issueId} employeeOptions={employeeOptions} />;
+}
+
 export const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
   { path: "/set-new-password", element: <SetNewPasswordPage /> },
@@ -148,6 +164,7 @@ export const router = createBrowserRouter([
           { path: "employees", element: <EmployeeManagementPage /> },
           { path: "job-types", element: <JobTypeManagementPage /> },
           { path: "owner-tasks/:taskId/review", element: <OwnerTaskReviewRoute /> },
+          { path: "owner-issues/:issueId/resolve", element: <OwnerIssueResolutionRoute /> },
         ],
       },
       {
