@@ -98,7 +98,7 @@ export function OwnerDashboardPage() {
           <h2 className="text-lg font-medium">All Tasks</h2>
           <div className="flex gap-2">
             <Select value={filters.status ?? ALL} onValueChange={(v) => setFilter("status", v)}>
-              <SelectTrigger id="status-filter" className="w-40">
+              <SelectTrigger id="status-filter" aria-label="Filter by status" className="w-40">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -115,7 +115,7 @@ export function OwnerDashboardPage() {
               value={filters.taskType ?? ALL}
               onValueChange={(v) => setFilter("task_type", v)}
             >
-              <SelectTrigger id="task-type-filter" className="w-40">
+              <SelectTrigger id="task-type-filter" aria-label="Filter by task type" className="w-40">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
