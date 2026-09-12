@@ -41,6 +41,7 @@ class EmployeeOut(BaseModel):
     full_name: str
     email: str
     is_active: bool
+    pending_job_count: int = 0
 
 
 class EmployeeUpdate(BaseModel):
@@ -76,12 +77,18 @@ def list_employees(
     offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> list[EmployeeOut]:
-    # Pending-job workload count (PRD §2.4) needs `tasks`, which doesn't exist until Phase 3 —
-    # deliberately omitted here, not silently dropped (CODING_STRUCTURE.md's vertical-slice order).
+    # Pending-job workload count (PRD §2.4) — deferred when this route was first written (Phase 1,
+    # before `tasks` existed); added now that Phase 4's Dashboard slice actually needs it.
     employees = crud.list_employees(session, offset, limit)
     return [
-        EmployeeOut(id=e.id, full_name=e.full_name, email=e.email, is_active=e.is_active)
-        for e in employees
+        EmployeeOut(
+            id=e.id,
+            full_name=e.full_name,
+            email=e.email,
+            is_active=e.is_active,
+            pending_job_count=count,
+        )
+        for e, count in employees
     ]
 
 

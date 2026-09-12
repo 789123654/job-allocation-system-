@@ -53,6 +53,7 @@ describeIfConfigured("employees API contract (real backend, not MSW)", () => {
       fullName: "Contract Test",
       email,
       isActive: true,
+      pendingTaskCount: 0,
     });
 
     const patchRes = await call(`/employees/${created.id}`, {
