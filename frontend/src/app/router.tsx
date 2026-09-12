@@ -77,8 +77,9 @@ export function AuthenticatedLayout() {
 
 // Owner's real landing page as of this pass; Employee's landing page is My Tasks (redirect, not
 // a duplicate placeholder) — the last remaining use of the Phase 4 Step 1 scaffolding text is
-// gone now that Dashboard exists.
-function AuthenticatedHome() {
+// gone now that Dashboard exists. Exported (like LoginPage/OwnerRoute below) so router.test.tsx
+// can exercise the real role branch directly, not a stub.
+export function AuthenticatedHome() {
   const { role, isLoading } = useSession();
   if (isLoading) return null;
   if (role === "employee") return <Navigate to="/tasks" replace />;

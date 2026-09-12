@@ -1,8 +1,21 @@
 import type { Session } from "@supabase/supabase-js";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
-import { AuthenticatedLayout, LoginPage, OwnerRoute, SetNewPasswordPage } from "@/app/router";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  AuthenticatedHome,
+  AuthenticatedLayout,
+  LoginPage,
+  OwnerRoute,
+  SetNewPasswordPage,
+} from "@/app/router";
+import {
+  resetEmployeesFixture,
+  resetJobTypesFixture,
+  resetNotificationsFixture,
+  resetTasksFixture,
+} from "@/testing/mocks/handlers";
 import { useSession } from "@/stores/session-store";
 
 // The one thing worth an automated test here: the client-side mirror of backend/app/api/deps.py's
@@ -112,6 +125,47 @@ describe("AuthenticatedLayout", () => {
     mockSession({ session: null, mustChangePassword: false, isLoading: true });
     const { container } = renderAt("/");
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// AuthenticatedHome (the "/" index route) wasn't covered by any test at all — every test above
+// renders a <div>HOME-CONTENT</div> stub in its place, deliberately isolating the gate logic from
+// the real screens. This describe block exercises the real component instead, since the
+// Owner-vs-Employee branch it added is exactly the kind of "must never show the wrong role their
+// screen" logic worth a real regression test, not a stub-based one.
+describe("AuthenticatedHome", () => {
+  beforeEach(() => {
+    resetTasksFixture();
+    resetEmployeesFixture();
+    resetJobTypesFixture();
+    resetNotificationsFixture();
+  });
+
+  function renderHome(role: "owner" | "employee") {
+    mockSession({ session: _FAKE_SESSION, mustChangePassword: false, role });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/"]}>
+          <Routes>
+            <Route index element={<AuthenticatedHome />} />
+            <Route path="tasks" element={<div>MY-TASKS-CONTENT</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it("redirects an Employee to /tasks instead of showing the Owner Dashboard", () => {
+    renderHome("employee");
+    expect(screen.getByText("MY-TASKS-CONTENT")).toBeInTheDocument();
+  });
+
+  it("renders the Owner Dashboard for an Owner", async () => {
+    renderHome("owner");
+    expect(await screen.findByRole("heading", { name: /dashboard/i })).toBeInTheDocument();
   });
 });
 
