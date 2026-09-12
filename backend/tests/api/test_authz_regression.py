@@ -274,6 +274,31 @@ def test_owner_is_not_the_assignee_and_cannot_submit(client: TestClient, seeded:
     assert r.status_code == 403
 
 
+# submit/mark-billed/issues all route through the same _get_task_or_404 + _require_assignee pair
+# (tasks.py), so this is the same code path as test_other_employees_task_cannot_be_submitted above,
+# not a different mechanism — added anyway per Authorization_Regression_Testing_Cheat_Sheet.md
+# (2026-09-12 Tasks-Employee-side audit): a shared check being correct at one call site is not
+# evidence it's wired the same way at every call site until a test actually exercises each one.
+def test_other_employees_task_cannot_be_marked_billed(
+    client: TestClient, seeded: _Seeded
+) -> None:
+    r = client.post(
+        f"/tasks/{seeded.task_a1}/mark-billed", headers=_auth_idem(seeded.token_emp_a2)
+    )
+    assert r.status_code == 404
+
+
+def test_other_employees_task_cannot_have_an_issue_raised_on_it(
+    client: TestClient, seeded: _Seeded
+) -> None:
+    r = client.post(
+        f"/tasks/{seeded.task_a1}/issues",
+        headers=_auth_idem(seeded.token_emp_a2),
+        json={"description": "Blocked"},
+    )
+    assert r.status_code == 404
+
+
 def test_employee_cannot_read_another_accounts_notification(
     client: TestClient, seeded: _Seeded
 ) -> None:
