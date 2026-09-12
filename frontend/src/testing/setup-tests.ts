@@ -7,6 +7,21 @@ beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
+// jsdom doesn't implement scrollIntoView/hasPointerCapture/setPointerCapture/releasePointerCapture
+// at all (a real, documented jsdom gap, not a project bug) — @radix-ui/react-select's own
+// internals call these when its item list opens, first hit 2026-09-12 building the Owner Task
+// Review outcome picker (this codebase's first Radix Select — Dialog/DropdownMenu don't need
+// them). Confirmed empirically: the Select-interaction test failed with
+// "candidate?.scrollIntoView is not a function" from inside @radix-ui/react-select's own source
+// before this was added. No-op stubs are the standard workaround, since jsdom has no real layout
+// engine to scroll within.
+if (typeof Element !== "undefined") {
+  Element.prototype.scrollIntoView ??= () => {};
+  Element.prototype.hasPointerCapture ??= () => false;
+  Element.prototype.setPointerCapture ??= () => {};
+  Element.prototype.releasePointerCapture ??= () => {};
+}
+
 // tauri-plugin-store's LazyStore (lib/supabase-client.ts) calls real Tauri IPC as soon as
 // createClient() runs auth session recovery — which happens at module-import time (module-level
 // `export const supabase = createClient(...)`), before any test's own beforeEach fires. Must be

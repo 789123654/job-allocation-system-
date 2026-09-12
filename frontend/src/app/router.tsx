@@ -3,8 +3,10 @@ import { AccountMenu } from "@/components/app-shell/account-menu";
 import { LoginForm } from "@/features/auth/components/login-form";
 import { SetNewPasswordForm } from "@/features/auth/components/set-new-password-form";
 import { EmployeeManagementPage } from "@/features/employees/components/employee-management-page";
+import { useEmployees } from "@/features/employees/api/get-employees";
 import { JobTypeManagementPage } from "@/features/job-types/components/job-type-management-page";
 import { MyTasksPage } from "@/features/tasks/components/my-tasks-page";
+import { OwnerTaskReviewPage } from "@/features/tasks/components/owner-task-review-page";
 import { TaskDetailPage } from "@/features/tasks/components/task-detail-page";
 import { useSession } from "@/stores/session-store";
 
@@ -111,6 +113,19 @@ function TaskDetailRoute() {
   return <TaskDetailPage key={taskId} />;
 }
 
+// Same key-remount reasoning as TaskDetailRoute above, applied to OwnerTaskReviewPage's own
+// per-task Idempotency-Key. Also the composition point FRONTEND_ARCHITECTURE.md §2's "features
+// cannot import each other" requires: features/tasks can't import features/employees directly,
+// so this app/-level wrapper fetches the employee list and passes it down as plain {id,label}
+// options — not the Dashboard yet (deferred, this session's scoping decision), just enough to
+// make Task Review's reassign/billing employee picker functional and testable now.
+function OwnerTaskReviewRoute() {
+  const { taskId } = useParams<{ taskId: string }>();
+  const { data: employees } = useEmployees();
+  const employeeOptions = (employees ?? []).map((e) => ({ id: e.id, label: e.fullName }));
+  return <OwnerTaskReviewPage key={taskId} employeeOptions={employeeOptions} />;
+}
+
 export const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
   { path: "/set-new-password", element: <SetNewPasswordPage /> },
@@ -124,6 +139,7 @@ export const router = createBrowserRouter([
         children: [
           { path: "employees", element: <EmployeeManagementPage /> },
           { path: "job-types", element: <JobTypeManagementPage /> },
+          { path: "owner-tasks/:taskId/review", element: <OwnerTaskReviewRoute /> },
         ],
       },
       {

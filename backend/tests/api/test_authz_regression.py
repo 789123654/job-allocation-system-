@@ -248,6 +248,15 @@ def test_cross_tenant_issue_resolve_is_404(client: TestClient, seeded: _Seeded) 
     assert r.status_code == 404
 
 
+# GET /issues/{id} (added 2026-09-12, Owner-side Tasks slice — Dashboard's Issues Raised panel)
+# is a new call site of the issues table's RLS/tenant_isolation policy, not a re-verification of
+# resolve_issue's — added its own cross-tenant test rather than assuming resolve's coverage
+# transfers, same reasoning as this file's mark-billed/issues-create tests above.
+def test_cross_tenant_issue_read_is_404(client: TestClient, seeded: _Seeded) -> None:
+    r = client.get(f"/issues/{seeded.issue_a1}", headers=_auth(seeded.token_owner_b))
+    assert r.status_code == 404
+
+
 def test_cross_tenant_notification_read_is_404(client: TestClient, seeded: _Seeded) -> None:
     r = client.patch(f"/notifications/{seeded.notif_a}/read", headers=_auth(seeded.token_owner_b))
     assert r.status_code == 404

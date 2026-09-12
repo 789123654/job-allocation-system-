@@ -65,6 +65,26 @@ def _fake_issue(**overrides: object) -> Issue:
     return Issue(**defaults)  # pyright: ignore[reportArgumentType]
 
 
+def test_get_issue_returns_issue(owner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    issue = _fake_issue()
+    monkeypatch.setattr(crud, "get_issue", lambda *a, **kw: issue)
+
+    response = owner_client.get(f"/issues/{issue.id}")
+
+    assert response.status_code == 200
+    assert response.json()["description"] == "Blocked"
+
+
+def test_get_nonexistent_issue_is_404(
+    owner_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(crud, "get_issue", lambda *a, **kw: None)
+
+    response = owner_client.get(f"/issues/{uuid4()}")
+
+    assert response.status_code == 404
+
+
 def test_resolve_requires_idempotency_key_header(owner_client: TestClient) -> None:
     response = owner_client.post(
         f"/issues/{uuid4()}/resolve",

@@ -110,6 +110,41 @@ export function resetTasksFixture(): void {
 }
 resetTasksFixture();
 
+interface IssueRecord {
+  id: string;
+  task_id: string;
+  raised_by: string;
+  description: string;
+  status: string;
+  resolution_type: string | null;
+  resolution_notes: string | null;
+  remaining_work_description: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+let issues: IssueRecord[] = [];
+
+export function resetIssuesFixture(): void {
+  issues = [
+    {
+      id: "i1",
+      task_id: "t1",
+      raised_by: EMPLOYEE_ID,
+      description: "Client hasn't sent the required documents",
+      status: "open",
+      resolution_type: null,
+      resolution_notes: null,
+      remaining_work_description: null,
+      resolved_by: null,
+      resolved_at: null,
+      created_at: NOW,
+    },
+  ];
+}
+resetIssuesFixture();
+
 export const handlers = [
   http.post(`${SUPABASE_URL}/auth/v1/token`, () => HttpResponse.json(fakeSession)),
   http.put(`${SUPABASE_URL}/auth/v1/user`, () => HttpResponse.json(fakeUser)),
@@ -184,6 +219,26 @@ export const handlers = [
   // applied here (crud.list_tasks is role-scoped server-side, not filtered) — this fixture only
   // ever plays the Employee role in this session's tests, so it always returns every seeded task.
   http.get(`${API_BASE_URL}/tasks`, () => HttpResponse.json(tasks)),
+  http.post(`${API_BASE_URL}/tasks`, async ({ request }) => {
+    const body = (await request.json()) as {
+      title: string;
+      description: string | null;
+      job_type_id: string | null;
+      assigned_to: string | null;
+      deadline: string | null;
+    };
+    const created = makeTask({
+      id: crypto.randomUUID(),
+      title: body.title,
+      description: body.description,
+      job_type_id: body.job_type_id,
+      assigned_to: body.assigned_to,
+      deadline: body.deadline,
+      status: body.assigned_to ? "assigned" : "created",
+    });
+    tasks.push(created);
+    return HttpResponse.json(created, { status: 201 });
+  }),
   http.get(`${API_BASE_URL}/tasks/:id`, ({ params }) => {
     const task = tasks.find((t) => t.id === params.id);
     if (!task) return new HttpResponse(null, { status: 404 });
@@ -224,6 +279,50 @@ export const handlers = [
     }
     task.status = "billed";
     return HttpResponse.json(task);
+  }),
+  http.post(`${API_BASE_URL}/tasks/:id/review`, async ({ params, request }) => {
+    const task = tasks.find((t) => t.id === params.id);
+    if (!task) return new HttpResponse(null, { status: 404 });
+    if (task.status !== "submitted") {
+      return HttpResponse.json(
+        {
+          type: "about:blank",
+          title: "Conflict",
+          status: 409,
+          detail: "Task cannot be reviewed from its current status",
+          instance: "",
+        },
+        { status: 409 },
+      );
+    }
+    const body = (await request.json()) as {
+      outcome: "approved" | "reassigned" | "billing";
+      notes: string | null;
+      remaining_work_description: string | null;
+      assigned_to: string | null;
+      billing_amount: number | null;
+      billing_recipient: string | null;
+    };
+    if (body.outcome === "approved") {
+      task.status = "completed";
+    } else if (body.outcome === "reassigned") {
+      task.status = "in_progress";
+      task.last_reassignment_notes = body.notes;
+      task.last_reassignment_remaining_work = body.remaining_work_description;
+      task.last_reassignment_source = "review";
+      task.last_reassignment_at = NOW;
+      if (body.assigned_to) task.assigned_to = body.assigned_to;
+    } else {
+      task.status = "completed";
+      task.billing_amount = body.billing_amount;
+      task.billing_recipient = body.billing_recipient;
+    }
+    return HttpResponse.json(task);
+  }),
+  http.get(`${API_BASE_URL}/issues/:id`, ({ params }) => {
+    const issue = issues.find((i) => i.id === params.id);
+    if (!issue) return new HttpResponse(null, { status: 404 });
+    return HttpResponse.json(issue);
   }),
   http.post(`${API_BASE_URL}/tasks/:id/issues`, async ({ params, request }) => {
     const task = tasks.find((t) => t.id === params.id);
