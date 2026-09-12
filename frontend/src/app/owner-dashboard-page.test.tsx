@@ -46,7 +46,10 @@ describe("OwnerDashboardPage", () => {
 
   it("lists all seeded tasks in the All Tasks table", async () => {
     renderDashboard();
-    expect(await screen.findByText("File GST return")).toBeInTheDocument();
+    // "File GST return" (t1) now legitimately appears twice: once in the All Tasks table, once
+    // in Issues Raised (t1 has the seeded open issue i1) — a real consequence of linking each
+    // Issues Raised entry to the new Issue Resolution screen, not a duplicate-render bug.
+    expect(await screen.findAllByText("File GST return")).toHaveLength(2);
     expect(screen.getByText("Collect billing details")).toBeInTheDocument();
     // "Already submitted" (t3) legitimately appears twice — Awaiting Review panel + All Tasks
     // table both render it, same as test below; getByText would throw on 2 matches.
@@ -90,12 +93,14 @@ describe("OwnerDashboardPage", () => {
   it("narrows the All Tasks table to only submitted tasks when the status filter is set", async () => {
     const user = userEvent.setup();
     renderDashboard();
-    await screen.findByText("File GST return");
+    await screen.findByText("Collect billing details");
 
     await user.click(screen.getByRole("combobox", { name: /filter by status/i }));
     await user.click(await screen.findByRole("option", { name: /^submitted$/i }));
 
-    expect(screen.queryByText("File GST return")).not.toBeInTheDocument();
+    // "File GST return" (t1) is excluded from the (now-filtered) All Tasks table, but still
+    // appears once via the filter-independent Issues Raised panel — it must not vanish entirely.
+    expect(await screen.findAllByText("File GST return")).toHaveLength(1);
     expect(screen.queryByText("Collect billing details")).not.toBeInTheDocument();
     // "Already submitted" (t3) still legitimately renders twice — Awaiting Review + All Tasks —
     // same reasoning as the unfiltered test above; the filter narrows the underlying task list,
@@ -106,13 +111,39 @@ describe("OwnerDashboardPage", () => {
   it("narrows the All Tasks table to only billing tasks when the task-type filter is set", async () => {
     const user = userEvent.setup();
     renderDashboard();
-    await screen.findByText("File GST return");
+    await screen.findByText("Collect billing details");
 
     await user.click(screen.getByRole("combobox", { name: /filter by task type/i }));
     await user.click(await screen.findByRole("option", { name: /^billing$/i }));
 
     expect(await screen.findByText("Collect billing details")).toBeInTheDocument();
-    expect(screen.queryByText("File GST return")).not.toBeInTheDocument();
-    expect(screen.queryByText("Already submitted")).not.toBeInTheDocument();
+    // "File GST return" (t1) is excluded from the (now-filtered) All Tasks table, but still
+    // appears once via the filter-independent Issues Raised panel — it must not vanish entirely.
+    expect(screen.getAllByText("File GST return")).toHaveLength(1);
+    // "Already submitted" (t3) isn't a billing task, so the All Tasks table correctly excludes
+    // it — but it must still appear once, in Awaiting Review, since that panel is deliberately
+    // filter-independent (see the dedicated test below for why).
+    expect(screen.getAllByText("Already submitted")).toHaveLength(1);
+  });
+
+  // Regression for the code-review finding (2026-09-13): Awaiting Review and Issues Raised were
+  // previously derived from the same filtered task list as the All Tasks table, so applying any
+  // All Tasks filter silently hid unrelated entries from those other panels too. A prior version
+  // of this test suite actually asserted that disappearance as expected, passing behavior.
+  it("keeps a submitted task in Awaiting Review even when the All Tasks status filter excludes it", async () => {
+    const user = userEvent.setup();
+    renderDashboard();
+    await screen.findByText("Collect billing details");
+
+    await user.click(screen.getByRole("combobox", { name: /filter by status/i }));
+    await user.click(await screen.findByRole("option", { name: /^assigned$/i }));
+
+    // All Tasks now shows only the two assigned tasks — "Already submitted" (t3, status=submitted)
+    // is correctly excluded from that table. "File GST return" (t1) appears twice here: once in
+    // All Tasks (still assigned, so included by this filter) and once in Issues Raised.
+    expect(await screen.findAllByText("File GST return")).toHaveLength(2);
+    expect(screen.getByText("Collect billing details")).toBeInTheDocument();
+    // ...but Awaiting Review must never be affected by the All Tasks filter, so it still shows up.
+    expect(screen.getByText("Already submitted")).toBeInTheDocument();
   });
 });

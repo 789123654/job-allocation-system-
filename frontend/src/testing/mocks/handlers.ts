@@ -368,6 +368,50 @@ export const handlers = [
     if (!issue) return new HttpResponse(null, { status: 404 });
     return HttpResponse.json(issue);
   }),
+  // issues.py's resolve_issue — mirrors crud.resolve_issue/_reassign_task's real behavior: a
+  // "reassigned" resolution converges through the exact same task mutation as /tasks/:id/review's
+  // reassign branch above (DATA_MODEL.md's stated convergence), not a separate mock shape.
+  http.post(`${API_BASE_URL}/issues/:id/resolve`, async ({ params, request }) => {
+    const issue = issues.find((i) => i.id === params.id);
+    if (!issue) return new HttpResponse(null, { status: 404 });
+    if (issue.status !== "open") {
+      return HttpResponse.json(
+        {
+          type: "about:blank",
+          title: "Conflict",
+          status: 409,
+          detail: "Issue has already been resolved",
+          instance: "",
+        },
+        { status: 409 },
+      );
+    }
+    const body = (await request.json()) as {
+      resolution_type: "clarified" | "deadline_adjusted" | "reassigned";
+      resolution_notes: string;
+      new_deadline: string | null;
+      assigned_to: string | null;
+      remaining_work_description: string | null;
+    };
+    issue.status = "resolved";
+    issue.resolution_type = body.resolution_type;
+    issue.resolution_notes = body.resolution_notes;
+    issue.resolved_by = EMPLOYEE_ID;
+    issue.resolved_at = NOW;
+    const task = tasks.find((t) => t.id === issue.task_id);
+    if (task && body.resolution_type === "deadline_adjusted") {
+      task.deadline = body.new_deadline;
+    } else if (task && body.resolution_type === "reassigned") {
+      issue.remaining_work_description = body.remaining_work_description;
+      task.status = "in_progress";
+      task.last_reassignment_notes = body.resolution_notes;
+      task.last_reassignment_remaining_work = body.remaining_work_description;
+      task.last_reassignment_source = "issue";
+      task.last_reassignment_at = NOW;
+      if (body.assigned_to) task.assigned_to = body.assigned_to;
+    }
+    return HttpResponse.json(issue);
+  }),
   http.post(`${API_BASE_URL}/tasks/:id/issues`, async ({ params, request }) => {
     const task = tasks.find((t) => t.id === params.id);
     if (!task) return new HttpResponse(null, { status: 404 });

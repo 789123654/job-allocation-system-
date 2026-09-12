@@ -421,7 +421,15 @@ def list_tasks(
             stmt = stmt.where(Task.task_type == task_type_filter)
     else:
         stmt = stmt.where(Task.assigned_to == actor.id)
-    stmt = stmt.offset(offset).limit(limit)
+    # Deterministic order, same pattern as list_notifications' own .order_by (crud.py:827) — found
+    # by an independent code-review pass (2026-09-13): without this, Postgres has no ordering
+    # guarantee at all, so which rows land in a `limit`-bounded page (and in what order) could
+    # silently vary between requests. `.id` is the tiebreaker for rows sharing a `created_at`.
+    # Deterministic order, same pattern as list_notifications' own .order_by (crud.py:827) — found
+    # by an independent code-review pass (2026-09-13): without this, Postgres has no ordering
+    # guarantee at all, so which rows land in a `limit`-bounded page (and in what order) could
+    # silently vary between requests. `.id` is the tiebreaker for rows sharing a `created_at`.
+    stmt = stmt.order_by(col(Task.created_at).desc(), col(Task.id)).offset(offset).limit(limit)
     return list(session.exec(stmt).all())
 
 
