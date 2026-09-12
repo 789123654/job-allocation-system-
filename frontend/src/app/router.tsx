@@ -1,9 +1,11 @@
-import { Link, Navigate, Outlet, createBrowserRouter } from "react-router-dom";
+import { Link, Navigate, Outlet, createBrowserRouter, useParams } from "react-router-dom";
 import { AccountMenu } from "@/components/app-shell/account-menu";
 import { LoginForm } from "@/features/auth/components/login-form";
 import { SetNewPasswordForm } from "@/features/auth/components/set-new-password-form";
 import { EmployeeManagementPage } from "@/features/employees/components/employee-management-page";
 import { JobTypeManagementPage } from "@/features/job-types/components/job-type-management-page";
+import { MyTasksPage } from "@/features/tasks/components/my-tasks-page";
+import { TaskDetailPage } from "@/features/tasks/components/task-detail-page";
 import { useSession } from "@/stores/session-store";
 
 // Exported for router.test.tsx — the client-side gate logic (mirroring backend/app/api/deps.py's
@@ -55,6 +57,11 @@ export function AuthenticatedLayout() {
               </Link>
             </>
           )}
+          {role === "employee" && (
+            <Link to="/tasks" className="text-(--color-ledger-text-muted) hover:underline">
+              My tasks
+            </Link>
+          )}
         </nav>
         <AccountMenu />
       </header>
@@ -81,6 +88,29 @@ export function OwnerRoute() {
   return <Outlet />;
 }
 
+// Same redirect-not-403 pattern as OwnerRoute, inverted — My Tasks/Task Detail & Submit are
+// Employee-only (FRONTEND_ARCHITECTURE.md §1); an Owner has no screen here yet (the Owner
+// Dashboard is a later Tasks pass), so redirect to / rather than show nothing or crash.
+export function EmployeeRoute() {
+  const { role, isLoading } = useSession();
+  if (isLoading) return null;
+  if (role !== "employee") return <Navigate to="/" replace />;
+  return <Outlet />;
+}
+
+// task-detail-page.tsx generates a one-time-per-task Idempotency-Key with a plain useState lazy
+// initializer (runs once per component *instance*, not per taskId) — so navigating from one
+// task's detail page directly to another's needs a real remount to get a fresh key, not just a
+// re-render. React's own core guarantee (react-official's preserving-and-resetting-state.md,
+// re-checked this pass): a changed `key` always forces unmount+remount, independent of whatever
+// react-router itself does internally on a dynamic-segment change (undocumented in any installed
+// skill, so not depended on here). This wrapper is the one place that reads the param and keys
+// the child on it.
+function TaskDetailRoute() {
+  const { taskId } = useParams<{ taskId: string }>();
+  return <TaskDetailPage key={taskId} />;
+}
+
 export const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
   { path: "/set-new-password", element: <SetNewPasswordPage /> },
@@ -94,6 +124,13 @@ export const router = createBrowserRouter([
         children: [
           { path: "employees", element: <EmployeeManagementPage /> },
           { path: "job-types", element: <JobTypeManagementPage /> },
+        ],
+      },
+      {
+        element: <EmployeeRoute />,
+        children: [
+          { path: "tasks", element: <MyTasksPage /> },
+          { path: "tasks/:taskId", element: <TaskDetailRoute /> },
         ],
       },
     ],

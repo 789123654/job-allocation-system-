@@ -51,6 +51,65 @@ export function resetJobTypesFixture(): void {
 }
 resetJobTypesFixture();
 
+interface TaskRecord {
+  id: string;
+  job_type_id: string | null;
+  task_type: string;
+  parent_task_id: string | null;
+  title: string;
+  description: string | null;
+  assigned_to: string | null;
+  deadline: string | null;
+  status: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  last_reassignment_notes: string | null;
+  last_reassignment_remaining_work: string | null;
+  last_reassignment_source: string | null;
+  last_reassignment_at: string | null;
+  billing_amount: number | null;
+  billing_recipient: string | null;
+}
+
+const EMPLOYEE_ID = "e1";
+const NOW = "2026-09-01T00:00:00Z";
+
+function makeTask(overrides: Partial<TaskRecord>): TaskRecord {
+  return {
+    id: crypto.randomUUID(),
+    job_type_id: null,
+    task_type: "standard",
+    parent_task_id: null,
+    title: "Untitled task",
+    description: null,
+    assigned_to: EMPLOYEE_ID,
+    deadline: null,
+    status: "assigned",
+    created_by: "owner-1",
+    created_at: NOW,
+    updated_at: NOW,
+    last_reassignment_notes: null,
+    last_reassignment_remaining_work: null,
+    last_reassignment_source: null,
+    last_reassignment_at: null,
+    billing_amount: null,
+    billing_recipient: null,
+    ...overrides,
+  };
+}
+
+let tasks: TaskRecord[] = [];
+
+export function resetTasksFixture(): void {
+  tasks = [
+    makeTask({ id: "t1", title: "File GST return", status: "assigned" }),
+    makeTask({ id: "t2", title: "Collect billing details", task_type: "billing", status: "assigned" }),
+    makeTask({ id: "t3", title: "Already submitted", status: "submitted" }),
+  ];
+}
+resetTasksFixture();
+
 export const handlers = [
   http.post(`${SUPABASE_URL}/auth/v1/token`, () => HttpResponse.json(fakeSession)),
   http.put(`${SUPABASE_URL}/auth/v1/user`, () => HttpResponse.json(fakeUser)),
@@ -119,6 +178,73 @@ export const handlers = [
     const body = (await request.json()) as { is_active: boolean };
     jobType.is_active = body.is_active;
     return HttpResponse.json(jobType);
+  }),
+
+  // tasks.py — mirrors the real route shapes. No status/assigned_to/job_type_id/task_type filters
+  // applied here (crud.list_tasks is role-scoped server-side, not filtered) — this fixture only
+  // ever plays the Employee role in this session's tests, so it always returns every seeded task.
+  http.get(`${API_BASE_URL}/tasks`, () => HttpResponse.json(tasks)),
+  http.get(`${API_BASE_URL}/tasks/:id`, ({ params }) => {
+    const task = tasks.find((t) => t.id === params.id);
+    if (!task) return new HttpResponse(null, { status: 404 });
+    return HttpResponse.json(task);
+  }),
+  http.post(`${API_BASE_URL}/tasks/:id/submit`, ({ params }) => {
+    const task = tasks.find((t) => t.id === params.id);
+    if (!task) return new HttpResponse(null, { status: 404 });
+    if (task.status !== "assigned" && task.status !== "in_progress") {
+      return HttpResponse.json(
+        {
+          type: "about:blank",
+          title: "Conflict",
+          status: 409,
+          detail: "Task cannot be submitted from its current status",
+          instance: "",
+        },
+        { status: 409 },
+      );
+    }
+    task.status = "submitted";
+    return HttpResponse.json(task);
+  }),
+  http.post(`${API_BASE_URL}/tasks/:id/mark-billed`, ({ params }) => {
+    const task = tasks.find((t) => t.id === params.id);
+    if (!task) return new HttpResponse(null, { status: 404 });
+    if (task.task_type !== "billing" || (task.status !== "assigned" && task.status !== "in_progress")) {
+      return HttpResponse.json(
+        {
+          type: "about:blank",
+          title: "Conflict",
+          status: 409,
+          detail: "Task cannot be marked billed — wrong task_type or status",
+          instance: "",
+        },
+        { status: 409 },
+      );
+    }
+    task.status = "billed";
+    return HttpResponse.json(task);
+  }),
+  http.post(`${API_BASE_URL}/tasks/:id/issues`, async ({ params, request }) => {
+    const task = tasks.find((t) => t.id === params.id);
+    if (!task) return new HttpResponse(null, { status: 404 });
+    const body = (await request.json()) as { description: string };
+    return HttpResponse.json(
+      {
+        id: crypto.randomUUID(),
+        task_id: task.id,
+        raised_by: EMPLOYEE_ID,
+        description: body.description,
+        status: "open",
+        resolution_type: null,
+        resolution_notes: null,
+        remaining_work_description: null,
+        resolved_by: null,
+        resolved_at: null,
+        created_at: NOW,
+      },
+      { status: 201 },
+    );
   }),
 ];
 
