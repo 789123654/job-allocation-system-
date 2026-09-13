@@ -42,7 +42,20 @@ also_copy = ["app"]
 # CI, 2026-09-14: the "advisory" mutmut step was silently crashing on every mutant before this fix,
 # masked by the step's own continue-on-error/`|| true` — a broken check that always no-ops is not
 # actually advisory, it's just noise, so this was fixed rather than left).
-pytest_add_cli_args = ["-x", "-q", "-m", "not e2e and not authz"]
+#
+# -k deselects tests/core/test_db.py::test_every_rollback_site_is_accounted_for — a structural
+# tripwire that text-scans app/*.py counting literal `session.rollback()` occurrences (confirmed
+# live in CI, 2026-09-14: it failed against the mutants/ sandbox). Not a real bug: mutmut's
+# mutation technique duplicates each function into many `__mutmut_N` variants in the same file, so
+# a function containing that literal string (crud.py's create_job_type) is textually multiplied —
+# this test's whole job is catching drift in the real source tree, and has nothing meaningful to
+# say about a synthetic mutated copy of it.
+pytest_add_cli_args = [
+    "-x",
+    "-q",
+    "-m", "not e2e and not authz",
+    "-k", "not test_every_rollback_site_is_accounted_for",
+]
 use_git_change_detection = true
 
 [tool.ruff]
