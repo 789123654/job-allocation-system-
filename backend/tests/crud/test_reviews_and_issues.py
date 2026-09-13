@@ -289,3 +289,31 @@ def test_resolve_issue_already_resolved_raises(session: Session) -> None:
 
     with pytest.raises(crud.InvalidIssueStateError):
         crud.resolve_issue(session, actor, issue, "clarified", "too late", None, None, None)
+
+
+def test_resolve_issue_marks_originating_notification_read(session: Session) -> None:
+    """Regression guard (code-review finding, whole-Phase-4 sweep, 2026-09-13): resolving an issue
+    previously never touched the issue_raised notification that prompted it, so the Owner
+    Dashboard's Issues Raised panel (driven by GET /notifications) kept showing a resolved issue
+    forever.
+    """
+    task = _task(session, status="in_progress")
+    issue = _issue(session, task)
+    actor = _actor()
+    owner_notified = Notification(
+        firm_id=_FIRM_ID,
+        recipient_id=actor.id,
+        type="issue_raised",
+        task_id=task.id,
+        issue_id=issue.id,
+        is_read=False,
+        created_at=datetime.now(UTC),
+    )
+    session.add(owner_notified)
+    session.commit()
+
+    crud.resolve_issue(session, actor, issue, "clarified", "explained scope", None, None, None)
+    session.commit()
+    session.refresh(owner_notified)
+
+    assert owner_notified.is_read is True

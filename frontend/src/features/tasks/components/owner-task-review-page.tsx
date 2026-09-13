@@ -38,6 +38,12 @@ export function OwnerTaskReviewPage({
   } = useForm<TaskReviewInput>({
     resolver: zodResolver(taskReviewSchema),
     defaultValues: { outcome: "approved" },
+    // Same fix as the sibling issue-resolution-page.tsx (code-review finding, whole-Phase-4 sweep,
+    // 2026-09-13): without this, react-hook-form keeps a conditionally-rendered field's value in
+    // form state after its input unmounts, so switching outcome away from a partially-filled
+    // "reassigned"/"billing" branch leaves a stale value that trips taskReviewSchema's own
+    // combination guard and silently blocks submission.
+    shouldUnregister: true,
   });
   const outcome = useWatch({ control, name: "outcome" });
 
@@ -45,6 +51,17 @@ export function OwnerTaskReviewPage({
   if (isPending) return <p className="text-sm text-(--color-ledger-text-muted)">Loading…</p>;
   if (isError || !task) {
     return <p className="text-sm text-(--color-ledger-danger)">Could not load this task.</p>;
+  }
+  // Code-review finding (whole-Phase-4 sweep, 2026-09-13): every entry point (deadline/overdue
+  // notifications, the All Tasks table) links here regardless of status, but review_task only
+  // succeeds for "submitted" — surfacing that as a 409 only at submit time let an Owner fill out
+  // an entire form for a task that was never reviewable. Pre-check instead.
+  if (task.status !== "submitted") {
+    return (
+      <p className="text-sm text-(--color-ledger-danger)">
+        This task isn't awaiting review right now.
+      </p>
+    );
   }
 
   async function onSubmit(input: TaskReviewInput) {
@@ -60,9 +77,11 @@ export function OwnerTaskReviewPage({
   const errorMessage =
     createTaskReview.error instanceof ApiError && createTaskReview.error.status === 409
       ? "This task can't be reviewed from its current status — refresh and check again"
-      : createTaskReview.isError
-        ? "Something went wrong — try again"
-        : null;
+      : createTaskReview.error instanceof ApiError && createTaskReview.error.status === 422
+        ? "The chosen assignee is not an active employee of this firm"
+        : createTaskReview.isError
+          ? "Something went wrong — try again"
+          : null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -89,6 +108,9 @@ export function OwnerTaskReviewPage({
               </Select>
             )}
           />
+          {errors.outcome && (
+            <p className="mt-1 text-sm text-(--color-ledger-danger)">{errors.outcome.message}</p>
+          )}
         </div>
         <div>
           <Label htmlFor="notes">Notes</Label>
@@ -125,6 +147,11 @@ export function OwnerTaskReviewPage({
                   </Select>
                 )}
               />
+              {errors.assignedTo && (
+                <p className="mt-1 text-sm text-(--color-ledger-danger)">
+                  {errors.assignedTo.message}
+                </p>
+              )}
             </div>
           </>
         )}
@@ -177,9 +204,6 @@ export function OwnerTaskReviewPage({
               <Label htmlFor="billingRecipient">Billing recipient</Label>
               <Input id="billingRecipient" {...register("billingRecipient")} />
             </div>
-            {errors.outcome && (
-              <p className="text-sm text-(--color-ledger-danger)">{errors.outcome.message}</p>
-            )}
           </>
         )}
         {errorMessage && <p className="text-sm text-(--color-ledger-danger)">{errorMessage}</p>}

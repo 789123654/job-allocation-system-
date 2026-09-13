@@ -1,5 +1,6 @@
-import { Link, Navigate, Outlet, createBrowserRouter, useParams } from "react-router-dom";
+import { Link, Navigate, Outlet, createBrowserRouter, useLocation, useParams } from "react-router-dom";
 import { AccountMenu } from "@/components/app-shell/account-menu";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { LoginForm } from "@/features/auth/components/login-form";
 import { SetNewPasswordForm } from "@/features/auth/components/set-new-password-form";
 import { EmployeeManagementPage } from "@/features/employees/components/employee-management-page";
@@ -45,6 +46,7 @@ export function SetNewPasswordPage() {
 // independently enforce both gates server-side on every request regardless of what this shows.
 export function AuthenticatedLayout() {
   const { session, role, mustChangePassword, isLoading } = useSession();
+  const location = useLocation();
   if (isLoading) return null;
   if (!session) return <Navigate to="/login" replace />;
   if (mustChangePassword) return <Navigate to="/set-new-password" replace />;
@@ -74,7 +76,14 @@ export function AuthenticatedLayout() {
         <AccountMenu />
       </header>
       <main className="p-6">
-        <Outlet />
+        {/* Scoped to page content only, not the header/nav/AccountMenu above — a crash rendering
+            one screen must not take the notification link or account menu down with it
+            (CODING_STRUCTURE.md's error-handling section, code-review finding, whole-Phase-4
+            sweep, 2026-09-13). Keyed on the path so navigating away from a crashed screen actually
+            recovers, instead of the boundary's tripped state persisting across every later route. */}
+        <ErrorBoundary key={location.pathname} fallbackMessage="Something went wrong loading this page — try navigating away and back.">
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   );

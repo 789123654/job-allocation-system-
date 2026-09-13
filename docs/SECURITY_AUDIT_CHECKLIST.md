@@ -23,6 +23,99 @@ commit:
 
 ## Completed Audits
 
+### Phase 4 — Whole-Slice Code Review Fixes (2026-09-13)
+
+```
+status: complete
+phase: Independent /code-review pass across the entire Phase 4 frontend slice (base commit 2f5e940
+  — end of Phase 0-2 backend scaffolding — against main at 2a5ab89, after the Notifications slice
+  merged), per Rule 11's ask-before-running protocol (user explicitly requested it this time). Not
+  a new feature slice — fixing the 10 findings that pass surfaced. Rules 10.1/10.2/11 (skill-
+  verification-discipline.md) followed: negative control run for every fix with a regression test
+  (backend); ask-before-code-review already satisfied since the user directly requested this review.
+scope_files: backend/app/crud.py (resolve_issue notification mark-read, list_employees/
+  list_job_types ORDER BY), frontend/src/features/tasks/api/resolve-issue.ts (notifications cache
+  invalidation), frontend/src/features/tasks/components/owner-task-review-page.tsx (shouldUnregister,
+  errors.outcome/errors.assignedTo renders, 422 message, status pre-check),
+  frontend/src/features/tasks/api/get-task.ts (enabled guard), frontend/src/features/notifications/
+  components/notifications-page.tsx (firmId/isPending/isError guard),
+  frontend/src/features/auth/components/change-password-form.tsx (success-message reachability),
+  frontend/src/components/error-boundary.tsx (new), frontend/src/app/router.tsx (ErrorBoundary
+  wiring), docs/FRONTEND_ARCHITECTURE.md (§2 deviation recorded), backend/tests/crud/
+  test_employee_and_job_type_ordering.py (new), backend/tests/crud/test_reviews_and_issues.py
+  (+1 test), frontend/src/features/tasks/components/owner-task-review-page.test.tsx (+1 updated
+  test), frontend/src/features/tasks/components/issue-resolution-page.test.tsx (timeout bump —
+  unrelated pre-existing two-hop-query timing sensitivity under full-suite load, not a fix target)
+date: 2026-09-13
+commit: (pending — not yet pushed/merged)
+```
+
+**A. Findings and fixes (ranked by the review, most-severe first):**
+1. Resolving an issue never invalidated the notifications cache (frontend) or marked the
+   originating `issue_raised` notification read (backend) — the Owner Dashboard's Issues Raised
+   panel showed a resolved issue forever. Fixed both sides; backend fix covered by a new negative-
+   control-verified regression test (`test_resolve_issue_marks_originating_notification_read`).
+2. `owner-task-review-page.tsx` had the exact stale-conditional-field bug already fixed on its
+   sibling `issue-resolution-page.tsx` (missing `shouldUnregister`, `errors.outcome` rendered only
+   inside the billing branch) — left unfixed here per this project's own prior "noted, not fixed"
+   deferral. Fixed identically; also added the missing `errors.assignedTo` render on the reassigned
+   branch for consistency.
+3. `NotificationsPage` had no `firmId`-null / `isPending` / `isError` guard, unlike every sibling
+   screen — a malformed JWT rendered as a silent, wrong "No notifications." Added the same guard
+   `employee-list.tsx` already uses.
+4. Every entry point to the Owner review screen (deadline notifications, the All Tasks table)
+   linked there regardless of task status, surfacing the 409 only after a full form fill. Added a
+   status pre-check; updated the existing test that had encoded the old (wrong) behavior as correct
+   to assert the new guard instead.
+5. `issue-resolution-page.tsx` fired a wasted `/tasks/` request with an empty id on every mount,
+   before `useIssue` resolved. Fixed `useTask`'s `enabled` guard to require a non-empty id.
+6. `owner-task-review-page.tsx` had no 422-specific error message (deactivated assignee), unlike
+   its sibling. Added the same message.
+7. `list_employees`/`list_job_types` had no `ORDER BY`, the same non-deterministic-pagination bug
+   already fixed on `list_tasks`. Backported the fix; covered by a new negative-control-verified
+   regression test file.
+8. Change-password's own success message was unreachable — the dialog closed (unmounting the
+   child) in the same tick the child set its success state, under React 18 batching. Fixed by
+   moving the close to an explicit "Done" button, matching `reset-password-dialog.tsx`'s existing
+   one-time-result convention.
+9. Zero error boundaries anywhere in the frontend, despite `CODING_STRUCTURE.md` explicitly
+   requiring "multiple error boundaries, scoped per section, not one global boundary." Added a
+   plain React class-based boundary (no new dependency — react.dev's own componentDidCatch/
+   getDerivedStateFromError pattern, not documented in any installed skill), wrapping only
+   `<Outlet />` inside `AuthenticatedLayout` (not the header/nav/AccountMenu), keyed on
+   `location.pathname` so navigating away from a crashed screen actually recovers instead of the
+   boundary's tripped state persisting across every later route.
+10. `features/issues/`/`features/billing/` were never built as their own folders per
+    `FRONTEND_ARCHITECTURE.md` §2 — issue/billing code lives under `features/tasks/` instead, with
+    no recorded decision reversing the doc. Investigated rather than moved: issue-raise
+    (`raise-issue-dialog.tsx`, `create-task-issue.ts`) and mark-billed (`mark-task-billed.ts`) are
+    both invoked directly from `task-detail-page.tsx`/`create-task-dialog.tsx`, and issue-resolution
+    shares `create-task-review.ts`'s single review endpoint — splitting either into its own feature
+    folder would make `features/tasks/` import from `features/issues/`/`features/billing/`, exactly
+    what §2's own features-cannot-import-each-other ESLint rule forbids. Recorded the deviation and
+    its reason in `FRONTEND_ARCHITECTURE.md` §2 instead of moving files into a structure the
+    project's own lint rule would reject.
+
+**B. Verification:** Backend — full suite 115 passed, 70 skipped (0 failed); `ruff check .` clean;
+`uv run pyright` 0 errors (matching CI's exact invocation — a bare `pyright`/`python -m pyright`
+run outside `uv` falsely reports hundreds of `sqlmodel`-unresolved errors across pre-existing files
+too, a local-invocation artifact, not a real regression). Both new/changed backend fixes negative-
+control verified (reverted, confirmed the new test fails, restored, confirmed it passes again).
+Frontend — `npm run lint` 0 errors; `npm run typecheck` clean; `npm run build` succeeds; full test
+suite 62/62 passing across 4 consecutive full-suite runs (one incidental pre-existing flaky test,
+unrelated to any of the 10 fixes, surfaced during this pass — see note below — and was fixed
+separately, verified reproducible before the fix and clean across 4 runs after).
+
+**Note — incidental flaky-test fix, not a code-review finding:** `issue-resolution-page.test.tsx`'s
+existing "does not leak a previously entered deadline" test started failing reproducibly (3/3) in
+full-suite runs only, never in isolation, after this pass's other changes. Root-caused by reverting
+each change individually: not caused by any of the 10 fixes (confirmed by temporarily reverting the
+`get-task.ts` `enabled` guard and observing the same failure) — this page's initial render depends
+on two sequential queries (`useIssue`, then `useTask` once `issue.taskId` resolves), and the default
+1000ms `findBy` timeout was too tight for that two-hop round trip under the full 14-file suite's
+parallel CPU load. Bumped that one assertion's timeout to 3000ms; verified clean across 4
+consecutive full-suite runs after.
+
 ### Phase 4 — Notifications (Both Roles) (2026-09-13)
 
 ```

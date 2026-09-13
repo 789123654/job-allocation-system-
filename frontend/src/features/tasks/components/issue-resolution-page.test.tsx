@@ -52,7 +52,11 @@ describe("IssueResolutionPage", () => {
   it("does not leak a previously entered deadline into a Clarify submission after switching resolution types", async () => {
     const user = userEvent.setup();
     renderAt("i1");
-    await screen.findByRole("heading", { name: /file gst return/i });
+    // This page's initial render depends on two sequential queries (useIssue, then useTask once
+    // issue.taskId resolves), not one — under the full suite's parallel CPU load the default 1000ms
+    // findBy timeout was observed to be too tight for that two-hop round trip (reproduced
+    // consistently in full-suite runs, never in isolation), unrelated to the fixes in this pass.
+    await screen.findByRole("heading", { name: /file gst return/i }, { timeout: 3000 });
 
     await user.click(screen.getByRole("combobox", { name: /resolution/i }));
     await user.click(await screen.findByRole("option", { name: /^adjust deadline$/i }));

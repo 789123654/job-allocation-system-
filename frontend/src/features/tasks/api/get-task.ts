@@ -14,6 +14,11 @@ export function useTask(taskId: string) {
   return useQuery({
     queryKey: [...tenantQueryKey("tasks", firmId), taskId],
     queryFn: () => apiRequest<TaskOutDto>(`/tasks/${taskId}`).then(toTask),
-    enabled: firmId !== null,
+    // taskId !== "" matters for issue-resolution-page.tsx, which calls this with
+    // `issue?.taskId ?? ""` before the issue query resolves — without this, that empty id fired a
+    // real, guaranteed-to-fail request on every mount (code-review finding, whole-Phase-4 sweep,
+    // 2026-09-13). Harmless no-op for every other call site, whose taskId always comes from a
+    // route param and is never empty.
+    enabled: firmId !== null && taskId !== "",
   });
 }
