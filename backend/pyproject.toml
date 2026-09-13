@@ -29,7 +29,12 @@ dev = [
 # app/api/routes and app/core/config are thin/declarative (routing, settings) — crud.py and the
 # workflow-state-transition logic it holds is where a surviving mutant would actually matter.
 source_paths = ["app/crud.py", "app/core/idempotency.py"]
-pytest_add_cli_args = "-x -q -m 'not e2e and not authz'"
+# Must be a list, not a single string — mutmut's harness.py does `["--rootdir=.", "--tb=native"]
+# + params + self._pytest_add_cli_args` internally, and list + str raises TypeError (caught live in
+# CI, 2026-09-14: the "advisory" mutmut step was silently crashing on every mutant before this fix,
+# masked by the step's own continue-on-error/`|| true` — a broken check that always no-ops is not
+# actually advisory, it's just noise, so this was fixed rather than left).
+pytest_add_cli_args = ["-x", "-q", "-m", "not e2e and not authz"]
 use_git_change_detection = true
 
 [tool.ruff]
