@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Stryker mutation-testing artifacts (generated; reports/stryker-incremental.json is cached in CI
+# via actions/cache, not committed to the repo).
+.stryker-tmp
+reports
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

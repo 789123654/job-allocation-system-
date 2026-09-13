@@ -17,12 +17,20 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mutmut>=3.8.0",
     "pyright>=1.1.411",
     "pytest>=9.1.1",
     "pytest-cov>=6.0.0",
     "ruff>=0.16.5",
     "schemathesis>=4.26.0",
 ]
+
+[tool.mutmut]
+# app/api/routes and app/core/config are thin/declarative (routing, settings) — crud.py and the
+# workflow-state-transition logic it holds is where a surviving mutant would actually matter.
+source_paths = ["app/crud.py", "app/core/idempotency.py"]
+pytest_add_cli_args = "-x -q -m 'not e2e and not authz'"
+use_git_change_detection = true
 
 [tool.ruff]
 line-length = 100

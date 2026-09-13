@@ -23,6 +23,146 @@ commit:
 
 ## Completed Audits
 
+### Phase 5 (Hardening) follow-up — Mutation Testing in CI (2026-09-14)
+
+```
+status: complete
+phase: Wire mutation testing (Stryker for frontend/TS, mutmut for backend/Python) into CI, per
+  user's explicit approval after discussing it as a Phase 5 candidate. Documented in memory
+  (skill-verification-discipline.md) as a mechanized supplement to manual rule 10.1 negative
+  control, not a replacement for it. Added as advisory (non-blocking) steps in the existing
+  backend/frontend CI jobs, not new jobs — both tools already have everything they need there
+  (live Postgres + migrations for mutmut, the existing Vitest/MSW setup for Stryker), so a
+  duplicate job would only duplicate setup boilerplate.
+scope_files: frontend/package.json (+3 @stryker-mutator devDependencies, +test:mutation script),
+  frontend/stryker.config.json (new), frontend/.gitignore (+.stryker-tmp, +reports),
+  backend/pyproject.toml (+mutmut dev dependency, +[tool.mutmut] config),
+  .github/workflows/ci.yml (+mutmut step in the backend job, +actions/cache and Stryker step in
+  the frontend job), .gitignore (+mutants/), .trivyignore (+3 GHSA ids, see D below)
+date: 2026-09-14
+commit: (pending — not yet pushed/merged)
+```
+
+**A. Why advisory, not blocking:** Checked both tools' current official docs directly (no installed
+skill covers either). Stryker has a real `thresholds.break` config for hard-failing CI on score —
+set to `null` here deliberately. Mutmut has no documented CI exit-code or threshold-gate mechanism
+at all. Neither tool has ever run against this codebase before, so there's no baseline score to
+gate against yet — same ratchet reasoning already used for the coverage `--cov-fail-under` gate
+(measure first, gate later once a real number exists to set the bar from).
+
+**B. Scope decision:** Backend scoped to `crud.py`/`idempotency.py` only (not the whole `app/`) —
+these are the modules every real bug found by this project's code reviews and audits has actually
+lived in (workflow-state races, missing guards, missing invalidations); `api/routes` and
+`core/config` are thin/declarative and not worth the mutation-testing runtime. Frontend mutates all
+of `src/**/*.{ts,tsx}` except tests/types/testing infra/`main.tsx` — no equivalent "this is where
+the bugs concentrate" narrowing was as clear-cut on the frontend side (bugs this project has found
+there span components, hooks, and mappers fairly evenly), so left broader; Stryker's `incremental`
+mode keeps repeat runs fast regardless.
+
+**C. Verification:** Backend — `ruff check .` clean, `uv run pyright` 0 errors, full pytest suite
+115/115 passing (unaffected by the new dev dependency); `[tool.mutmut]` TOML section parses
+correctly and its `pytest_add_cli_args` marker filter (`not e2e and not authz`) matches this
+project's actually-registered pytest markers. **Mutmut itself could not be smoke-tested on this
+machine** — it requires fork support and refuses to run at all on native Windows (confirmed
+directly, not assumed); CI runs on `ubuntu-latest`, so this doesn't block the CI job, but its first
+real execution will only ever happen in CI, not locally on this dev's machine. Frontend — `npm run
+lint`/`typecheck` clean; Stryker's config was smoke-tested locally against one real file
+(`notifications/types/index.ts`) and confirmed it parses the config, discovers the file, instruments
+25 mutants, and reaches the dry-run test-execution stage before being killed by the smoke test's own
+external timeout (not a config failure).
+
+**D. Supply-chain side effect, handled:** installing `@stryker-mutator/core` pulled in a transitive
+`qs` dependency (via `typed-rest-client`) with 3 known moderate DoS advisories and no resolvable
+upgrade path yet (`npm audit fix --dry-run` confirms). Waived in `.trivyignore` with a reason and
+removal condition, matching the file's existing waiver precedent (the Tauri/glib entry) — not
+reachable in this project's context (a CI/local dev tool, never processes untrusted request data).
+
+## Completed Audits
+
+### Phase 5 (Hardening) — Frontend Error Tracking (Sentry) (2026-09-13)
+
+```
+status: complete
+phase: Phase 5 (Hardening) — Frontend error tracking (Sentry). Backend Sentry was already wired
+  (app/main.py, app/api/deps.py); the frontend ErrorBoundary added in the whole-Phase-4 code-review
+  pass (frontend/src/components/error-boundary.tsx) only console.error'd, with its own comment
+  flagging "no error-tracking service wired up yet" as pending. Closed that gap: @sentry/react,
+  guarded on an optional VITE_SENTRY_DSN (unset = no-op, matches backend's SENTRY_DSN pattern),
+  wired into the existing scoped ErrorBoundary's componentDidCatch (not a second, competing
+  boundary or a global createRoot-level handler — would undermine the "scoped per section, not one
+  global boundary" design that pass just built). Chosen as this session's Phase 5 slice after
+  checking current state directly: Semgrep/CodeQL/Trivy/gitleaks/zizmor were already wired into CI,
+  the Dockerfile already runs as non-root, backend Sentry already existed, and the authz-regression
+  suite already covers every current resource including Notifications — this was the one concretely
+  incomplete, explicitly-flagged item left.
+scope_files: frontend/src/config/env.ts (+SENTRY_DSN, optional), frontend/.env.example
+  (+VITE_SENTRY_DSN, documented), frontend/package.json (+@sentry/react ^10.74.0),
+  frontend/src/main.tsx (new — guarded Sentry.init), frontend/src/components/error-boundary.tsx
+  (+Sentry.captureReactException, guarded), frontend/src/components/error-boundary.test.tsx (new —
+  blind-authored, see C below), frontend/src-tauri/tauri.conf.json (CSP connect-src +
+  https://*.ingest.sentry.io), docs/DEPLOYMENT.md (frontend coverage recorded)
+date: 2026-09-13
+commit: (pending — not yet pushed/merged)
+```
+
+**A. Pre-write check (rule 9), done before any code:** Grepped `owasp-cheatsheets` by keyword
+(third-party data destinations, PII/error-tracking, logging) — relevant:
+`Third_Party_Javascript_Management_Cheat_Sheet.md` (a new external destination gets primary access
+to whatever it's given), `Logging_Cheat_Sheet.md`/`User_Privacy_Protection_Cheat_Sheet.md` (PII
+handling). ASVS 5 chapter: `v16-security-logging-error-handling.md` — V16.5.4 ("last resort handler
+preserves error details for logs, prevents a crash from killing the whole process") is exactly what
+the existing `ErrorBoundary` + this new reporting call satisfies; V16.2.5/V16.4 (sensitive-data
+logging) is why PII collection was deliberately left at its default-off setting on both ends. Call-
+site diff from the backend's already-vetted Sentry use (skill-verification-discipline.md failure
+mode 7): different destination-payload shape (browser errors/component stacks vs. request
+bodies/query params) — checked independently, not inherited; same "don't forward user data by
+default" conclusion reached both times.
+
+**B. What's not from any installed skill:** no installed skill documents `@sentry/react`'s API.
+Verified against Sentry's own current docs (WebFetch, 2026-09-13) before writing: exact
+`Sentry.init()` shape, that events go to `*.ingest.sentry.io` (→ CSP `connect-src`), that
+`sendDefaultPii` defaults to `false` and is being deprecated in favor of `dataCollection` (left both
+unset — same as leaving the default), and that `Sentry.captureReactException(error, info)` — not a
+plain `captureException` — is the SDK's current dedicated API for a class-component error boundary
+(requires SDK >=9.8.0; this installs ^10.74.0).
+
+**C. Blind-authored test (rule 10.2):** A separate Haiku-tier subagent, given only the behavioral
+contract (never the implementation), wrote `error-boundary.test.tsx`. First attempt claimed success
+but never actually wrote the file (verified absent from disk) — re-spawned with an explicit
+"Read the file back and paste the result" requirement; second attempt confirmed genuine. Cost:
+~58k+72k tokens across both attempts (the token-efficiency addendum's other four points — pasted
+contract, capped exploration, cheaper model — still worked as intended; the retry was a delegation-
+reliability miss, not a token-efficiency miss). Result: 7 of 8 tests passed against the real
+implementation on the first run; 1 failure was a test-authoring artifact (assumed
+`console.error(error)` when the real call is `console.error("ErrorBoundary caught:", error, info)`
+— error is the 2nd argument, not the 1st). All 3 of the higher-stakes "must never call Sentry when
+unconfigured" guard tests passed without modification. Per this session's established precedent
+(asked, approved), fixed the one artifact assertion and kept the file as the permanent regression
+test — this is the only coverage `error-boundary.tsx` has.
+
+**D. Negative control (rule 10.1) — partial, honestly incomplete.** Every other fix this session got
+a real break-it-and-confirm-it-fails cycle. This one didn't complete: removing the
+`if (env.SENTRY_DSN)` guard from `error-boundary.tsx` to prove the "never calls Sentry when
+unconfigured" test actually catches its absence was refused by the auto-mode security classifier
+("weakening a security control"), including as a temporary, immediately-reverted edit. Did not
+attempt a workaround. What stands in its place: the test's own two branches (DSN set → asserts
+exactly 1 call; DSN unset/empty → asserts 0 calls) already demonstate the guard's two paths behave
+differently, and the guard itself is a single `if` wrapping a single call, directly readable. This
+is weaker evidence than an actual negative control and is recorded as such, not silently upgraded to
+"verified."
+
+**E. Verification:** `npm run lint` 0 errors (2 pre-existing warnings, unrelated); `npm run
+typecheck` clean; `npm run build` succeeds. Full suite: 15 files / 70 tests. One transient timeout
+(`owner-task-review-page.test.tsx`'s billing test, the known pre-existing Select-interaction timing
+class, not touched by this slice) appeared once; passed in isolation and clean across 2 further full
+consecutive runs (70/70 each) — not a regression from this slice.
+
+**F. Deferred, not done this slice:** mutation testing (Stryker/mutmut) — discussed and documented
+in memory as a future option, not installed; the outstanding whole-frontend `/code-review` sweep
+beyond this one slice (still flagged in the Notifications entry).
+
+## Completed Audits
+
 ### Phase 4 — Whole-Slice Code Review Fixes (2026-09-13)
 
 ```

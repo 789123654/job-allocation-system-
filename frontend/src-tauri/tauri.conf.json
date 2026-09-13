@@ -22,7 +22,7 @@
     "security": {
       "csp": {
         "default-src": "'self'",
-        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:8000 https://*.supabase.co",
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:8000 https://*.supabase.co https://*.ingest.sentry.io",
         "font-src": "https://fonts.gstatic.com",
         "style-src": "'self' https://fonts.googleapis.com",
         "img-src": "'self' asset: http://asset.localhost data:",

@@ -1,4 +1,6 @@
+import * as Sentry from "@sentry/react";
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { env } from "@/config/env";
 
 // Plain React error boundary (react.dev's own componentDidCatch/getDerivedStateFromError pattern
 // — only a class component can catch render errors, no hook equivalent exists). No third-party
@@ -23,9 +25,20 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    // No error-tracking service wired up yet (CODING_STRUCTURE.md §4's Sentry decision is still
-    // pending implementation) — this is the only surface until then.
     console.error("ErrorBoundary caught:", error, info);
+    // Explicitly guarded, same as deps.py's sentry_sdk.set_tag call on the backend — Sentry's own
+    // docs don't state whether SDK functions are safe to call before init() (checked directly,
+    // 2026-09-13, not assumed either way), so this doesn't rely on that being true. main.tsx only
+    // calls Sentry.init() when VITE_SENTRY_DSN is set; this mirrors that same condition rather
+    // than trusting an unverified implicit no-op.
+    //
+    // captureReactException (not a plain captureException) is the SDK's own current, dedicated API
+    // for this exact call site — it parses `info.componentStack` and attaches it via `error.cause`
+    // automatically (verified against Sentry's current React SDK docs, 2026-09-13; requires SDK
+    // >=9.8.0, this project installs ^10.74.0).
+    if (env.SENTRY_DSN) {
+      Sentry.captureReactException(error, info);
+    }
   }
 
   render() {
