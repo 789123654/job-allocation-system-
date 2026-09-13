@@ -1,12 +1,46 @@
 // API_SPEC.md / notifications.py's NotificationOut — read data, not form input, no Zod schema
-// needed. Minimal on purpose: only the Dashboard's Issues Raised panel needs this right now
-// (2026-09-13) — mark-read/polling UI is a separate, later Notifications screen
-// (FRONTEND_ARCHITECTURE.md §1's own 11-screen inventory lists it apart from Dashboard).
+// needed. The 8 type values below mirror DATA_MODEL.md §5's table exactly (its own 1:1 mapping
+// to PRD §2.5/§3.4 bullets), re-read fresh this pass rather than assumed from the bare `type:
+// string` this interface had when only the Dashboard's Issues Raised panel consumed it.
+export type NotificationType =
+  | "task_submitted"
+  | "task_overdue"
+  | "task_deadline_1_day"
+  | "issue_raised"
+  | "task_assigned"
+  | "task_reassigned"
+  | "task_deadline_approaching"
+  | "task_overdue_own";
+
 export interface Notification {
   id: string;
-  type: string;
+  type: NotificationType;
   taskId: string | null;
   issueId: string | null;
   isRead: boolean;
   createdAt: string;
+}
+
+// PRD §2.5: "Task is exactly 1 day from deadline — a distinct, visually highlighted warning,
+// separate from the general 'approaching deadline' view" — the one type-specific UI requirement
+// the PRD states explicitly, so it's centralized here rather than left to each consumer to notice.
+export function notificationMessage(type: NotificationType): string {
+  switch (type) {
+    case "task_submitted":
+      return "An employee submitted a task for review";
+    case "task_overdue":
+      return "A task is overdue";
+    case "task_deadline_1_day":
+      return "A task is due in 1 day";
+    case "issue_raised":
+      return "An employee raised an issue on a task";
+    case "task_assigned":
+      return "You were assigned a new task";
+    case "task_reassigned":
+      return "A task was reassigned to you";
+    case "task_deadline_approaching":
+      return "A task is approaching its deadline";
+    case "task_overdue_own":
+      return "One of your tasks is overdue";
+  }
 }

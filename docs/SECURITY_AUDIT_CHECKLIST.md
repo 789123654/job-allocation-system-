@@ -23,6 +23,64 @@ commit:
 
 ## Completed Audits
 
+### Phase 4 — Notifications (Both Roles) (2026-09-13)
+
+```
+status: complete
+phase: Phase 4 — Notifications (both roles), PRD §2.5/§3.4/§4.4, FRONTEND_ARCHITECTURE.md's Notifications screen row — the 11th and final Phase 4 screen, completing the Phase 4 inventory. Backend (GET /notifications, PATCH /notifications/{id}/read) already fully built and audited in Phase 3; this slice adds polling (FRONTEND_ARCHITECTURE.md §8, refetchInterval) and mark-read to the existing minimal read-only hook, plus the dedicated screen and both-roles route.
+scope_files: frontend/src/features/notifications/{api/get-notifications.ts,api/mark-notification-read.ts,components/notifications-page.tsx,components/notifications-page.test.tsx,types/index.ts}, frontend/src/app/router.tsx, frontend/src/testing/mocks/handlers.ts
+date: 2026-09-13
+commit: (uncommitted — base HEAD is the Issue Resolution merge ebd3c5a)
+```
+
+**A. Fixed enumeration**
+
+- `asvs_chapters_opened`: v8-authorization (§8.3.1 — re-confirmed, this time for a genuinely new question: does a role-conditional client-side link *target* need its own authorization check? §8.3.1's own text — "authorization must be enforced at a trusted service layer... never relies on client-side JS" — confirms it doesn't: whichever URL the component builds, the real access decision happens again server-side when that route is actually requested, same as every other client-side routing decision in this app); v2.4.1 (resource-exhaustion/anti-automation — re-confirmed unchanged from the Phase 3 audit, this pass adds a client poll, not a new server computation).
+- `skills_reopened_fresh`: `owasp-cheatsheets` (whole-directory grep below, run twice — once directly, once again via the blind-test agent's own independent pass); `owasp-asvs-5/chapters/v8-authorization.md` reopened for the role-conditional-link-target question specifically, distinct from the id-in-URL question it was reopened for in the Issue Resolution pass.
+- `cheatsheet_grep_keywords`: `polling|denial of service|rate limit` (surfaced `Denial_of_Service_Cheat_Sheet.md` among others); `open redirect|unvalidated redirect|IDOR|object reference` (surfaced `Unvalidated_Redirects_and_Forwards_Cheat_Sheet.md` and `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md`) — not just the titles that sounded relevant from memory.
+- `cheatsheet_grep_output`: `Denial_of_Service_Cheat_Sheet.md` — no direct guidance on client polling intervals; conclusion: the existing Cloudflare-edge rate limiting plus the backend's own bounded/indexed firm-wide scan (already audited in the Phase 3 API_SPEC.md entries) still fully covers a 45s client poll, no new gap. `Unvalidated_Redirects_and_Forwards_Cheat_Sheet.md` — doesn't apply: the component builds fixed-shape *internal* route strings from a server-supplied id, never a full attacker-controlled destination URL, so there's no open-redirect surface. `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md` — confirms the client-side role branch is UI routing, not an access-control decision; a correct href is never treated as proof of authorization anywhere in this slice's tests.
+
+**B. Fixed-domain sweep**
+
+- `auth`: Unchanged — the new `/notifications` route sits directly under `AuthenticatedLayout` (both roles, no `OwnerRoute`/`EmployeeRoute` wrapper needed, matching the PRD's "both roles" requirement), reusing the existing session gate.
+- `session_token_lifecycle`: N/A, no new mechanism.
+- `tenant_isolation`: N/A, no new query — `GET /notifications` is unchanged, already `recipient_id = current profile`-scoped.
+- `object_level_authz`: N/A for new code — `GET`/`PATCH /notifications` were already audited (404-not-403, recipient-only) in the Phase 3 pass; this slice adds no new backend surface at all, only a frontend consumer.
+- `input_validation`: N/A — mark-read has no request body; polling adds no new user input.
+- `cors`: N/A, unchanged.
+- `secrets`: N/A — `NotificationOut` is plain operational data.
+- `supply_chain`: No new dependency (`git status` on `package.json`/`package-lock.json` — no diff).
+
+**C. Self-check gate (mapped to skill-verification-discipline.md's 12 failure modes)**
+
+1. `reapplied_general_principle_to_every_instance`: the app-level "role decides which screen/target" pattern (already used by `AuthenticatedHome`, `OwnerRoute`/`EmployeeRoute`) reapplied to per-notification link-target selection, not reinvented.
+2. `stress_tested_design_against_its_own_stated_logic`: explicitly tested **both** roles receiving the **same** notification type, specifically to avoid repeating the Dashboard pass's finding #1 (an incomplete role branch) — not just tested for whichever role came to mind first.
+3. `ran_fixed_domain_sweep_regardless_of_conversation_focus`: Section B run in full even though this reads as "just a notifications list."
+4. `reopened_skills_already_read_this_convo_for_a_new_subtask`: `v8-authorization.md` reopened for the new role-conditional-link question, not cited from the Issue Resolution pass's id-in-URL reasoning.
+5. `compound_source_not_partial`: cheat sheets and ASVS 5 both checked this pass.
+6. `grepped_whole_cheatsheet_dir_not_just_familiar_titles`: two separate keyword-cluster greps (A above), surfacing two cheat sheets whose titles gave no obvious hint they'd apply to a notifications list.
+7. `new_call_site_of_shared_mechanism_asked_whats_different_about_its_data`: `useMarkNotificationRead`'s cache invalidation reuses the standard `invalidateQueries` pattern; checked (not assumed) that `NotificationOut`'s response body carries no secret/one-time value.
+8. `comprehensiveness_claim_backed_by_the_actual_checklist`: **`status: in-progress` was set genuinely before any code was written this pass**, not backfilled as `complete` after the fact — a direct, explicit fix of the gap named on the Issue Resolution pass, per the user's "don't repeat, or mention explicitly" instruction.
+9. `pre_write_check_run_before_writing_the_code_not_after`: `refetchInterval`/`refetchIntervalInBackground` verified against the actually-installed `@tanstack/react-query` 5.102.8's own `.d.ts` (quoted below) *before* `get-notifications.ts` was edited, not after.
+10. `blind_test_authoring_used_where_it_mattered`: **Run this pass, scoped tightly per the new token-efficiency addendum** — 109k tokens / 12 tool calls / ~4 min, down from the prior pass's 163k / 44 / ~10 min. Found zero implementation bugs; all 5 of 8 tests failed on the blind agent's own mock using the wrong wire-format field casing (camelCase instead of the real snake_case `NotificationOut` shape) — see failure mode 12 below, a gap in *this pass's own prompt*, named honestly rather than glossed over.
+11. `code_review_decision_asked_not_assumed`: Asked the user directly (Rule 11); answer was to skip it for this slice, given zero new backend surface and the one real risk (role routing) already negative-control-verified.
+12. `blind_test_contract_states_wire_format_not_just_mapped_type` (new, named by this very pass): documented in `skill-verification-discipline.md` as failure mode 12 for future blind-test prompts to apply — this pass is the one that found the gap, not one that avoided it.
+
+**D. Verification-of-verification**
+
+- `library_behavior_claims_checked_against_installed_source`: `refetchInterval?: number | false | ((query) => ...)` and `refetchIntervalInBackground?: boolean` both confirmed present in `node_modules/@tanstack/query-core/build/legacy/hydration-*.d.ts` for the installed 5.102.8 before writing the hook — no installed skill documents this library, so this was the genuine fallback-to-official-source case the base rule requires.
+- `fix_verified_by_real_command_output`: Negative control on the one real behavior this slice needed guarded — reverted the role branch in `notifications-page.tsx` to always return the Owner's target, reran `notifications-page.test.tsx`, confirmed the Employee-role test failed (`href="/owner-tasks/t1/review"` instead of `/tasks/t1"`), restored, confirmed both pass. Full suite: `npm run lint` → 0 errors, 2 pre-existing warnings; `npm run typecheck` → clean; `npx vitest run` → **62 passed**, 14 test files; `npm run build` → succeeded.
+- Also noted honestly, not swept aside: observed transient flakiness across repeated full-suite runs this pass (2 of 6 consecutive runs had one unrelated Select-interaction test fail — a different test each time, both passing cleanly on immediate rerun in isolation). Investigated whether this pass's new `refetchInterval` real-timer usage (no fake timers configured anywhere in this suite) could be the cause; inconclusive, but leaning toward pre-existing jsdom/pointer-event timing sensitivity (already documented in this project's own history) rather than a new regression — the failures were scattered across files this pass never touched and didn't correlate with notification-related tests specifically. Flagged for awareness, not treated as a closed non-issue.
+
+**E. Bounded claim**
+
+- `standard_and_scope`: ASVS 5 (v8 §8.3.1, v2.4.1 re-confirmed), `Denial_of_Service_Cheat_Sheet.md`, `Unvalidated_Redirects_and_Forwards_Cheat_Sheet.md`, `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md` — scoped to `scope_files` above, none pushed yet.
+- `severity_trend_vs_last_pass`: **Zero new security findings** — no new backend surface at all this pass, only a frontend consumer of Phase-3-audited endpoints plus a client poll. The one real gap found (the blind-test prompt's wire-format ambiguity) is a testing-process finding, not a security one, and is itself now documented as a reusable lesson.
+
+**F. Independent pass**
+
+- `security_review_run`: **Asked, not assumed** (Rule 11) — user chose to skip `/code-review` for this slice: zero new backend surface, and the one real branch-completeness risk (role-aware routing) already has a negative-control-verified permanent test. This completes the full 11-screen Phase 4 inventory — a natural point to note the still-outstanding, repeatedly-deferred full independent `code-review` sweep across the whole frontend, named again here rather than silently dropped.
+
 ### Phase 4 — Issue Resolution (Owner Side) (2026-09-13)
 
 ```

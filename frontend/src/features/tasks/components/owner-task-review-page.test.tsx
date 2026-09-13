@@ -84,7 +84,7 @@ describe("OwnerTaskReviewPage", () => {
     await user.click(screen.getByRole("combobox", { name: /outcome/i }));
     await user.click(await screen.findByRole("option", { name: /^billing$/i }));
 
-    await user.click(screen.getByRole("combobox", { name: /bill via/i }));
+    await user.click(await screen.findByRole("combobox", { name: /bill via/i }));
     await user.click(await screen.findByRole("option", { name: /alex employee/i }));
 
     fireEvent.change(screen.getByLabelText(/billing deadline/i), {
