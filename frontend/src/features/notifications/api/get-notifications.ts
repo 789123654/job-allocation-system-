@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
-import { tenantQueryKey } from "@/lib/tenant-query-key";
-import type { Notification } from "@/features/notifications/types";
+import { tenantQueryKey, tenantQueryKeyPrefix } from "@/lib/tenant-query-key";
+import type { Notification, NotificationType } from "@/features/notifications/types";
 import { useSession } from "@/stores/session-store";
 
 interface NotificationOutDto {
   id: string;
-  type: string;
+  type: NotificationType;
   task_id: string | null;
   issue_id: string | null;
   is_read: boolean;
@@ -24,15 +24,27 @@ function toNotification(dto: NotificationOutDto): Notification {
   };
 }
 
-// GET /notifications — notifications.py. No polling/mark-read here (YAGNI, deferred to the
-// dedicated Notifications screen) — the Dashboard's Issues Raised panel just needs the current
-// unread list once per page load, same as any other TanStack Query read.
-export function useNotifications() {
+export const notificationsQueryKeyPrefix = tenantQueryKeyPrefix("notifications");
+
+// GET /notifications — notifications.py. `unreadOnly` defaults true, matching the route's own
+// server-side default (API_SPEC.md) and the Dashboard's Issues Raised panel's existing usage
+// (unchanged by this pass); the dedicated Notifications screen passes `unreadOnly: false` to see
+// full history. Polling per FRONTEND_ARCHITECTURE.md §8/§91 — refetchInterval/
+// refetchIntervalInBackground confirmed against the installed @tanstack/react-query 5.102.8's own
+// type declarations this pass, not assumed from memory (no installed skill documents this
+// library). refetchIntervalInBackground: false since the Tauri window is the only "background"
+// case that matters here (ARCHITECTURE.md §8's own reasoning) — no point polling while unfocused.
+export function useNotifications(options: { unreadOnly?: boolean } = {}) {
   const { firmId } = useSession();
+  const unreadOnly = options.unreadOnly ?? true;
   return useQuery({
-    queryKey: tenantQueryKey("notifications", firmId),
+    queryKey: [...tenantQueryKey("notifications", firmId), { unreadOnly }],
     queryFn: () =>
-      apiRequest<NotificationOutDto[]>("/notifications").then((dtos) => dtos.map(toNotification)),
+      apiRequest<NotificationOutDto[]>(unreadOnly ? "/notifications" : "/notifications?unread_only=false").then(
+        (dtos) => dtos.map(toNotification),
+      ),
     enabled: firmId !== null,
+    refetchInterval: 45_000,
+    refetchIntervalInBackground: false,
   });
 }

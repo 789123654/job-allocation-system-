@@ -56,7 +56,7 @@ describe("IssueResolutionPage", () => {
 
     await user.click(screen.getByRole("combobox", { name: /resolution/i }));
     await user.click(await screen.findByRole("option", { name: /^adjust deadline$/i }));
-    fireEvent.change(screen.getByLabelText(/new deadline/i), { target: { value: "2026-12-25" } });
+    fireEvent.change(await screen.findByLabelText(/new deadline/i), { target: { value: "2026-12-25" } });
 
     await user.click(screen.getByRole("combobox", { name: /resolution/i }));
     await user.click(await screen.findByRole("option", { name: /^clarify$/i }));

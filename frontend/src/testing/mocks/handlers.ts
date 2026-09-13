@@ -434,10 +434,20 @@ export const handlers = [
     );
   }),
 
-  // notifications.py — mirrors the real route shape. unread_only defaults true server-side; the
-  // fixture's own seeded notification is already unread, so no filtering logic needed to match
-  // that default for what this pass actually tests.
-  http.get(`${API_BASE_URL}/notifications`, () => HttpResponse.json(notifications)),
+  // notifications.py — mirrors the real route shape, including its unread_only default (true),
+  // now actually honored (previously a no-op — fine while every consuming test's fixture was
+  // already unread; the dedicated Notifications screen needs real filtering to show full history).
+  http.get(`${API_BASE_URL}/notifications`, ({ request }) => {
+    const unreadOnly = new URL(request.url).searchParams.get("unread_only") !== "false";
+    const filtered = unreadOnly ? notifications.filter((n) => !n.is_read) : notifications;
+    return HttpResponse.json(filtered);
+  }),
+  http.patch(`${API_BASE_URL}/notifications/:id/read`, ({ params }) => {
+    const notification = notifications.find((n) => n.id === params.id);
+    if (!notification) return new HttpResponse(null, { status: 404 });
+    notification.is_read = true;
+    return HttpResponse.json(notification);
+  }),
 ];
 
 export const server = setupServer(...handlers);

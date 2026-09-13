@@ -8,6 +8,7 @@ import { OwnerDashboardPage } from "@/app/owner-dashboard-page";
 import { JobTypeManagementPage } from "@/features/job-types/components/job-type-management-page";
 import { IssueResolutionPage } from "@/features/tasks/components/issue-resolution-page";
 import { MyTasksPage } from "@/features/tasks/components/my-tasks-page";
+import { NotificationsPage } from "@/features/notifications/components/notifications-page";
 import { OwnerTaskReviewPage } from "@/features/tasks/components/owner-task-review-page";
 import { TaskDetailPage } from "@/features/tasks/components/task-detail-page";
 import { useSession } from "@/stores/session-store";
@@ -66,6 +67,9 @@ export function AuthenticatedLayout() {
               My tasks
             </Link>
           )}
+          <Link to="/notifications" className="text-(--color-ledger-text-muted) hover:underline">
+            Notifications
+          </Link>
         </nav>
         <AccountMenu />
       </header>
@@ -158,6 +162,7 @@ export const router = createBrowserRouter([
     element: <AuthenticatedLayout />,
     children: [
       { index: true, element: <AuthenticatedHome /> },
+      { path: "notifications", element: <NotificationsPage /> },
       {
         element: <OwnerRoute />,
         children: [
