@@ -183,6 +183,7 @@ def list_employees(session: Session, offset: int, limit: int) -> list[tuple[Prof
         select(Profile, func.coalesce(workload.c.pending_count, 0))
         .where(Profile.role == "employee")
         .outerjoin(workload, workload.c.employee_id == col(Profile.id))
+        .order_by(col(Profile.created_at).desc(), col(Profile.id))
         .offset(offset)
         .limit(limit)
     )
@@ -338,7 +339,14 @@ def create_job_type(session: Session, actor: Profile, name: str) -> JobType:
 
 
 def list_job_types(session: Session, offset: int, limit: int) -> list[JobType]:
-    stmt = select(JobType).offset(offset).limit(limit)
+    # Deterministic pagination — same non-deterministic-offset/limit bug already fixed on
+    # list_tasks, backported here (code-review finding, whole-Phase-4 sweep, 2026-09-13).
+    stmt = (
+        select(JobType)
+        .order_by(col(JobType.created_at).desc(), col(JobType.id))
+        .offset(offset)
+        .limit(limit)
+    )
     return list(session.exec(stmt).all())
 
 
@@ -688,6 +696,22 @@ def resolve_issue(
         session.add(task)
 
     session.add(locked)
+
+    # Code-review finding (whole-Phase-4 sweep, 2026-09-13): resolving an issue never marked its
+    # originating issue_raised notification read, so the Owner Dashboard's Issues Raised panel
+    # (driven by GET /notifications) showed it forever. Bulk mark-read, same transaction as the
+    # resolution itself — no separate commit (this function's own docstring rule).
+    stale_notifications = session.exec(
+        select(Notification).where(
+            Notification.issue_id == locked.id,
+            Notification.type == "issue_raised",
+            col(Notification.is_read).is_(False),
+        )
+    ).all()
+    for stale in stale_notifications:
+        stale.is_read = True
+        session.add(stale)
+
     return locked
 
 

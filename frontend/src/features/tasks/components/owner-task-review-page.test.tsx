@@ -59,13 +59,16 @@ describe("OwnerTaskReviewPage", () => {
     expect(await screen.findByText("OWNER-HOME")).toBeInTheDocument();
   });
 
-  it("shows a 409 message for a task that isn't submitted", async () => {
+  // Regression guard for the code-review finding (whole-Phase-4 sweep, 2026-09-13): every entry
+  // point to this screen (deadline notifications, the All Tasks table) links here regardless of
+  // task status, but review only succeeds for "submitted" — this screen must refuse to render the
+  // form at all for a task in any other status (t1 is fixture-seeded as "assigned"), not merely
+  // surface the backend's 409 only after the Owner fills out and submits the whole form.
+  it("refuses to render the review form for a task that isn't awaiting review", async () => {
     renderAt("t1");
-    await screen.findByText("File GST return");
 
-    fireEvent.click(screen.getByRole("button", { name: /submit review/i }));
-
-    expect(await screen.findByText(/can't be reviewed from its current status/i)).toBeInTheDocument();
+    expect(await screen.findByText(/isn't awaiting review/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /submit review/i })).not.toBeInTheDocument();
   });
 
   // Exercises the Radix Select outcome-switcher for the first time in this codebase's test suite

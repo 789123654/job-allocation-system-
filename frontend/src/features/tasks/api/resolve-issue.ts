@@ -38,6 +38,11 @@ export function useResolveIssue() {
       // export — that cross-feature import would violate FRONTEND_ARCHITECTURE.md §2's
       // features-cannot-import-each-other rule.
       void queryClient.invalidateQueries({ queryKey: tenantQueryKeyPrefix("employees") });
+      // Issues Raised (Owner Dashboard) is driven by useNotifications() filtered on
+      // type==="issue_raised" — without this, a resolved issue stays visible there forever since
+      // resolving it never marks the originating notification read (code-review finding, whole-
+      // Phase-4 sweep, 2026-09-13).
+      void queryClient.invalidateQueries({ queryKey: tenantQueryKeyPrefix("notifications") });
     },
   });
 }

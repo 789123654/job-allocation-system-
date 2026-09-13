@@ -9,14 +9,34 @@ import { useSession } from "@/stores/session-store";
 // uses — this is the one screen meant for browsing past notifications, not just the current
 // unread count, so YAGNI doesn't apply the same way here.
 export function NotificationsPage() {
-  const { role } = useSession();
-  const { data: notifications } = useNotifications({ unreadOnly: false });
+  const { role, firmId, isLoading: isSessionLoading } = useSession();
+  const { data: notifications, isPending, isError } = useNotifications({ unreadOnly: false });
   const markRead = useMarkNotificationRead();
 
   function targetPath(n: Notification): string | null {
     if (n.type === "issue_raised" && n.issueId) return `/owner-issues/${n.issueId}/resolve`;
     if (!n.taskId) return null;
     return role === "owner" ? `/owner-tasks/${n.taskId}/review` : `/tasks/${n.taskId}`;
+  }
+
+  // Same firmId-null / isPending / isError guard as employee-list.tsx (code-review finding,
+  // whole-Phase-4 sweep, 2026-09-13): without it, a malformed/stale JWT missing
+  // app_metadata.firm_id keeps useNotifications()'s query disabled forever, rendering as a
+  // silent, indistinguishable "No notifications" instead of an actionable error.
+  if (!isSessionLoading && firmId === null) {
+    return (
+      <p className="text-sm text-(--color-ledger-danger)">
+        Could not determine your firm — try signing out and back in.
+      </p>
+    );
+  }
+  if (isPending) return <p className="text-sm text-(--color-ledger-text-muted)">Loading…</p>;
+  if (isError) {
+    return (
+      <p className="text-sm text-(--color-ledger-danger)">
+        Could not load notifications — try again.
+      </p>
+    );
   }
 
   return (

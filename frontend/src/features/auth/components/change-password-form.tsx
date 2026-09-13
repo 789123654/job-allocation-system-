@@ -20,12 +20,23 @@ export function ChangePasswordForm({ onSuccess }: { onSuccess?: () => void }) {
     const success = await changePassword(input);
     if (success) {
       setSucceeded(true);
-      onSuccess?.();
     }
   }
 
   if (succeeded) {
-    return <p className="text-sm text-(--color-ledger-text)">Password changed successfully.</p>;
+    // Same "keep the dialog open, let the one-time result actually paint, close on an explicit
+    // action" convention as reset-password-dialog.tsx. Previously called onSuccess?.() right here
+    // during onSubmit — account-menu.tsx's onSuccess closes (unmounts) the dialog, and under React
+    // 18 batching that committed in the same tick as this succeeded state, so this message never
+    // had a chance to render (code-review finding, whole-Phase-4 sweep, 2026-09-13).
+    return (
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-(--color-ledger-text)">Password changed successfully.</p>
+        <Button type="button" onClick={() => onSuccess?.()}>
+          Done
+        </Button>
+      </div>
+    );
   }
 
   return (

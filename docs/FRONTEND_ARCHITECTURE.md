@@ -62,6 +62,17 @@ src/
 
 Each feature folder holds only the subfolders it needs (`api`, `components`, `hooks`, `types`) — not all of them, per the same source.
 
+**Deviation, recorded (2026-09-13, code-review finding, whole-Phase-4 sweep):** `issues/` and
+`billing/` were never actually built as their own folders — raise/resolve-issue and mark-billed
+code lives under `features/tasks/` instead. Not an oversight left unflagged until now: issue-raise
+(`raise-issue-dialog.tsx`, `create-task-issue.ts`) and mark-billed (`mark-task-billed.ts`) are both
+invoked directly from `task-detail-page.tsx`/`create-task-dialog.tsx`, and issue-resolution shares
+`create-task-review.ts`'s single review endpoint (outcome=billing is the same call, not a second
+one) — splitting either into its own feature folder would make `features/tasks/` import from
+`features/issues/`/`features/billing/`, exactly what §2's own features-cannot-import-each-other
+ESLint rule forbids. Kept under `features/tasks/` deliberately; this plan's original folder list
+predates that rule actually being enforced.
+
 **Unidirectional flow, enforced by ESLint** (`import/no-restricted-paths`, the exact rule in `project-structure.md`): `shared → features → app`, and **features cannot import each other**. Concretely: `features/billing` cannot reach into `features/tasks` even though a billing task is a `tasks` row with `task_type='billing'` — the two features compose only at the route/app level. This is the rule that actually keeps Owner-side and Employee-side code from tangling into each other as the app grows, not just a style preference.
 
 ## 3. State Management
