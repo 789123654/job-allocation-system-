@@ -29,6 +29,14 @@ dev = [
 # app/api/routes and app/core/config are thin/declarative (routing, settings) — crud.py and the
 # workflow-state-transition logic it holds is where a surviving mutant would actually matter.
 source_paths = ["app/crud.py", "app/core/idempotency.py"]
+# also_copy: source_paths controls both what's mutated AND what mutmut's copy_src_dir() copies
+# into its mutants/ sandbox (confirmed by reading mutmut's own file_utils.py/__main__.py source,
+# 2026-09-14, after CI's own run 2 crashed here) — so without this, only crud.py/idempotency.py
+# existed inside mutants/app/, and any test importing another app module (e.g. crud.py's own
+# `from app.core.db import commit_or_recover`) failed with ModuleNotFoundError. also_copy runs
+# before mutation (__main__.py's _run: copy_src_dir -> copy_also_copy_files -> create_mutants), so
+# copying the whole app/ package here can't overwrite/undo the mutated files created afterward.
+also_copy = ["app"]
 # Must be a list, not a single string — mutmut's harness.py does `["--rootdir=.", "--tb=native"]
 # + params + self._pytest_add_cli_args` internally, and list + str raises TypeError (caught live in
 # CI, 2026-09-14: the "advisory" mutmut step was silently crashing on every mutant before this fix,
