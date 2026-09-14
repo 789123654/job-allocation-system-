@@ -275,11 +275,23 @@ jobs:
       # score; continue-on-error is the second layer, covering a genuine tool/runtime error too.
       # Re-added 2026-09-14 (was pulled out the same day over Actions-minutes cost) — the repo is
       # now public, so Actions minutes are unlimited/free and that cost reason no longer applies.
+      #
+      # Cache key bumped to v2-2026-09-15 (2026-09-15): the 2026-09-14 incremental report was
+      # confirmed stale — session-store.tsx's cache-clear mutant was reported "Survived" even
+      # though directly reproducing the mutation (removing queryClient.clear(), rerunning the real
+      # test) showed the existing test catches it immediately. Root cause per Stryker's own docs
+      # and a matching upstream report (stryker-mutator/stryker-js incremental docs;
+      # ddteeter/agentic-guardrails-scaffolding#67, "stryker analyzer reuses a cached Survived
+      # after the test that kills it is added"): incremental mode's cache invalidation checks
+      # production-file changes, not test-file changes, so a mutant already marked Survived can
+      # stay stale even after a new/stronger test is added. Changing the key (rather than passing
+      # --force permanently) makes this one run measure everything fresh and then start a new,
+      # correctly-invalidating cache under the new key going forward.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: frontend/reports/stryker-incremental.json
-          key: stryker-incremental-${{ github.ref_name }}
-          restore-keys: stryker-incremental-main
+          key: stryker-incremental-v2-2026-09-15-${{ github.ref_name }}
+          restore-keys: stryker-incremental-v2-2026-09-15-main
       - name: Mutation testing (Stryker) — advisory, does not fail the build
         continue-on-error: true
         run: npm run test:mutation
