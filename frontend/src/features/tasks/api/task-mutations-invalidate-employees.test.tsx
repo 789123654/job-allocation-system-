@@ -13,6 +13,7 @@ import { useSubmitTask } from "./submit-task";
 import { useMarkTaskBilled } from "./mark-task-billed";
 import { useCreateTaskReview } from "./create-task-review";
 import { useResolveIssue } from "./resolve-issue";
+import { useIssue } from "./get-issue";
 
 vi.mock("@/stores/session-store", () => ({ useSession: vi.fn() }));
 
@@ -166,5 +167,35 @@ describe("task mutations invalidate the employees cache", () => {
     await waitFor(() =>
       expect(result.current.employees.dataUpdatedAt).toBeGreaterThan(baselineUpdatedAt),
     );
+  });
+
+  it("useResolveIssue invalidates its own issue (code-review finding #18)", async () => {
+    // Ordinary regression test, not blind: the real security boundary already lives server-side
+    // (crud.resolve_issue's row-locked status check) — this only verifies the frontend cache
+    // doesn't keep serving stale "open" data after a successful resolve, which is what let the
+    // finding #16 status guard on issue-resolution-page.tsx be silently bypassed by cache alone.
+    const { wrapper } = setup();
+    const { result } = renderHook(
+      () => ({ issue: useIssue("i1"), mutation: useResolveIssue() }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.issue.isSuccess).toBe(true));
+    expect(result.current.issue.data?.status).toBe("open");
+
+    await act(async () => {
+      await result.current.mutation.mutateAsync({
+        issueId: "i1",
+        idempotencyKey: crypto.randomUUID(),
+        resolutionType: "clarified",
+        resolutionNotes: "clarified with the client directly",
+      });
+    });
+
+    // A real data-content assertion, not just a dataUpdatedAt bump — the whole point of the fix
+    // is that the cached issue actually reflects the new "resolved" status afterward, matching
+    // MSW's fake backend behavior (handlers.ts POST /issues/:id/resolve) which itself mirrors the
+    // real crud.resolve_issue's status transition.
+    await waitFor(() => expect(result.current.issue.data?.status).toBe("resolved"));
   });
 });

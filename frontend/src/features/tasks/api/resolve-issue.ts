@@ -36,6 +36,14 @@ export function useResolveIssue() {
       // resolving it never marks the originating notification read (code-review finding, whole-
       // Phase-4 sweep, 2026-09-13).
       void queryClient.invalidateQueries({ queryKey: tenantQueryKeyPrefix("notifications") });
+      // Code-review finding #18 (2026-09-15): the mutation's own resource (useIssue's ["issues",
+      // firmId, issueId] key, get-issue.ts) was never in this set — the earlier fix in this same
+      // file (finding #1) concentrated on the *employees* cache specifically, since that was the
+      // reported symptom, instead of auditing the complete invalidation set against every
+      // resource resolveIssue actually mutates. Without this, the issue-resolution-page.tsx status
+      // guard (finding #16's own fix) would keep reading the pre-resolve "open" status from cache
+      // and let a second submit through the UI even though the server already rejects it.
+      void queryClient.invalidateQueries({ queryKey: tenantQueryKeyPrefix("issues") });
     },
   });
 }

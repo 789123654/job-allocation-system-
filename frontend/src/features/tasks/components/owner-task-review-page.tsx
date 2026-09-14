@@ -186,10 +186,20 @@ export function OwnerTaskReviewPage({
             <div>
               <Label htmlFor="billingDeadline">Billing deadline</Label>
               <Input id="billingDeadline" type="date" {...register("billingDeadline")} />
+              {errors.billingDeadline && (
+                <p className="mt-1 text-sm text-(--color-ledger-danger)">
+                  {errors.billingDeadline.message}
+                </p>
+              )}
             </div>
             <div>
               <Label htmlFor="billingDescription">Billing description</Label>
               <Input id="billingDescription" {...register("billingDescription")} />
+              {errors.billingDescription && (
+                <p className="mt-1 text-sm text-(--color-ledger-danger)">
+                  {errors.billingDescription.message}
+                </p>
+              )}
             </div>
             <div>
               <Label htmlFor="billingAmount">Billing amount</Label>
@@ -199,10 +209,20 @@ export function OwnerTaskReviewPage({
                 step="0.01"
                 {...register("billingAmount", { valueAsNumber: true })}
               />
+              {errors.billingAmount && (
+                <p className="mt-1 text-sm text-(--color-ledger-danger)">
+                  {errors.billingAmount.message}
+                </p>
+              )}
             </div>
             <div>
               <Label htmlFor="billingRecipient">Billing recipient</Label>
               <Input id="billingRecipient" {...register("billingRecipient")} />
+              {errors.billingRecipient && (
+                <p className="mt-1 text-sm text-(--color-ledger-danger)">
+                  {errors.billingRecipient.message}
+                </p>
+              )}
             </div>
           </>
         )}

@@ -222,6 +222,17 @@ Kebab-case file naming, enforced via the same `check-file` ESLint plugin the sou
 - ~~**Component library / styling**~~ — **Decided 2026-09-03: Tailwind + Radix UI, shadcn/ui pattern** (see §8).
 - ~~**Playwright vs. `tauri-driver` for E2E**~~ — **Decided 2026-09-03: WebdriverIO + `@wdio/tauri-service`** (see §9, `tauri-official/chapters/testing.md`). Neither original option was actually Tauri's recommendation.
 - ~~**Employee performance metric**~~ — **corrected 2026-09-03, this line was stale**: `ARCHITECTURE.md` §13 already decided this (out of scope for Phase 1, revisit in Phase 2) before this section was last touched, and the two docs had drifted out of sync. No frontend screen here was ever blocked by it regardless — whichever definition eventually lands, it's a data column and a dashboard tile, not a structural decision.
+- **Form error messages aren't linked to their inputs for assistive tech — deferred to Phase 2.**
+  Found 2026-09-15 while fixing code-review finding #17 (billing fields validate but never render
+  their error): every `errors.X && <p>...</p>` error render across every form in this codebase
+  (`owner-task-review-page.tsx`, `issue-resolution-page.tsx`, and by the same shape presumably every
+  other form) is a plain, unlinked `<p>` — no `aria-invalid` on the input, no `aria-describedby`
+  pointing at the error's `id`, no `role="alert"` on the error itself. `frontend-a11y` skill (its own
+  Before-Submitting checklist) requires all three. Impact: a sighted user sees the error fine; a
+  screen-reader user gets no signal an error appeared at all. Not fixed as part of #17 — retrofitting
+  only the 4 billing fields would leave the same file inconsistent (some inputs wired, most not), and
+  no code-review finding named the gap itself, only its two symptoms. Revisit in Phase 2 as one pass
+  across every form component, not per-field patches.
 
 ---
 
