@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
+import { dateOnlyToEndOfDayIso } from "@/lib/date-only-to-instant";
 import { tenantQueryKeyPrefix } from "@/lib/tenant-query-key";
 import { invalidateAfterTaskMutation } from "@/features/tasks/api/invalidate-after-task-mutation";
 import { toIssue, type IssueOutDto } from "@/features/tasks/api/mappers";
@@ -17,7 +18,7 @@ function resolveIssue(
     body: {
       resolution_type: input.resolutionType,
       resolution_notes: input.resolutionNotes,
-      new_deadline: input.newDeadline ?? null,
+      new_deadline: input.newDeadline ? dateOnlyToEndOfDayIso(input.newDeadline) : null,
       assigned_to: input.assignedTo ?? null,
       remaining_work_description: input.remainingWorkDescription ?? null,
     },

@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
+import { dateOnlyToEndOfDayIso } from "@/lib/date-only-to-instant";
 import { invalidateAfterTaskMutation } from "@/features/tasks/api/invalidate-after-task-mutation";
 import { toTask, type TaskOutDto } from "@/features/tasks/api/mappers";
 import type { Task, TaskCreateInput } from "@/features/tasks/types";
@@ -19,7 +20,7 @@ function createTask(input: TaskCreateInput & { idempotencyKey: string }): Promis
       description: input.description ?? null,
       job_type_id: input.jobTypeId ?? null,
       assigned_to: input.assignedTo ?? null,
-      deadline: input.deadline ?? null,
+      deadline: input.deadline ? dateOnlyToEndOfDayIso(input.deadline) : null,
     },
   }).then(toTask);
 }

@@ -155,7 +155,8 @@ describe("task mutations invalidate the employees cache", () => {
         issueId: "i1",
         idempotencyKey: crypto.randomUUID(),
         resolutionType: "deadline_adjusted",
-        newDeadline: "2026-12-01T00:00:00Z",
+        resolutionNotes: "deadline pushed back",
+        newDeadline: "2026-12-01",
       });
     });
 
