@@ -377,15 +377,19 @@ just doesn't work" is the only symptom without an explicit check.
 ## 13. Connecting the Real Supabase Project — Runbook
 
 Written 2026-09-10, before actually doing this — a plan to execute next session, not a record of
-something already done. §11's "doesn't exist yet" framing is now stale: a real project ref
-(`xyhzpzxcfvefrramidwz`) was found embedded in a misconfigured local MCP server entry the same session
-this runbook was written — confirm this is actually the intended pilot-firm project (not a stale/test
-one) as this runbook's first step, rather than assuming.
+something already done. §11's "doesn't exist yet" framing is now stale: a project ref was found
+embedded in a misconfigured local MCP server entry the same session this runbook was written —
+confirm this is actually the intended pilot-firm project (not a stale/test one) as this runbook's
+first step, rather than assuming. **Scrubbed from this doc 2026-09-14** (repo went public that day):
+the ref that was here was checked and is dead (`DNS_PROBE_FINISHED_NXDOMAIN`), so it was never the
+real project — but a real ref shouldn't be committed to a public repo regardless, hence a placeholder
+below instead of the actual value.
 
 **Ordered steps:**
 
-1. **Confirm the project.** Verify `xyhzpzxcfvefrramidwz` (or whichever project ref is current) is the
-   real, intended one before touching it with a migration.
+1. **Confirm the project.** Verify `<project-ref>` (whichever project ref is actually current — get it
+   from the Supabase dashboard, don't assume one found lying around elsewhere) is the real, intended
+   one before touching it with a migration.
 2. **Get `MIGRATIONS_DATABASE_URL`** from that project's dashboard — Project Settings → Database →
    Connection string, the `postgres` superuser role (same shape CI's disposable container uses, §4).
    Handed over as an env var, never committed to the repo — same handling as every other secret here.
