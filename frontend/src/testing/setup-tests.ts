@@ -34,7 +34,10 @@ if (typeof Element !== "undefined") {
 // state) — an always-"not found" get() would silently clobber a session signInWithPassword just
 // set, which is exactly what happened before this was made stateful (caught by
 // lib/api-client.test.ts failing with a null Authorization header despite a successful sign-in).
-const storeState = new Map<string, unknown>();
+// Exported (test-infra addition, not the module under test) so supabase-client.test.ts can assert
+// directly on what actually got IPC'd into the mock Tauri store — e.g. that sign-in populates it
+// and sign-out clears it — without re-mocking IPC itself.
+export const storeState = new Map<string, unknown>();
 
 mockIPC((cmd, args) => {
   // Return shapes matched against @tauri-apps/plugin-store's own JS wrapper source
