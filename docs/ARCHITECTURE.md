@@ -131,13 +131,19 @@ or redirected anywhere.
    `firm_id`/`role` go in `app_metadata`, not `user_metadata` (code review finding #11, 2026-09-14):
    `app_metadata` can only ever be set via this Admin API, never by an end user, so a self-registered
    signup (even if `enable_signup` were ever misconfigured back on) can't assign itself a firm/role.
-3. A Postgres trigger on `auth.users` insert (`on_auth_user_created`, the pattern Supabase's own docs
+3. A Postgres trigger on `auth.users` (`on_auth_user_created`, the pattern Supabase's own docs
    recommend in `managing-user-data.md`, adapted here to copy `firm_id`/`role` out of `raw_app_meta_data`
    — not `raw_user_meta_data`, which is client-editable — and set `must_change_password = true`) inserts
-   the matching `profiles` row **in the same transaction** as
-   step 2 — not a second manual insert from application code. This matters for step 4: the Custom Access
-   Token Hook (§4 above) reads `profiles` by `user_id` at token-issue time, so the row must already exist
-   before the Owner's first real login, not created asynchronously after.
+   the matching `profiles` row — not a second manual insert from application code. **Fires on `UPDATE`
+   as well as `INSERT`** (migration `8d533906f6cd`, fixing a real bug in the finding-#11 migration the
+   same day it landed): GoTrue applies `app_metadata` via a follow-up `UPDATE` *after* the initial insert,
+   not as part of it — confirmed empirically when this broke every real admin-provisioned user in CI, and
+   by Supabase's own community troubleshooting material ("App metadata is updated after creating a user
+   row in the database, so you can't listen to the user insert call to update app metadata"). The trigger
+   guards on `raw_app_meta_data->>'firm_id' IS NOT NULL` and only fires the actual insert once that's
+   true, `ON CONFLICT DO NOTHING` making it safe to run again on later unrelated updates. Still happens
+   within the single `createUser()` call from the caller's perspective — by the time step 2's call
+   returns, the row already exists, which is what step 4 below actually depends on.
 4. The temporary password is handed to the Owner **outside the app**, by whoever runs onboarding for that
    pilot firm (a call, a message — a manual step, acceptable at the current one-firm-at-a-time scale). The
    Owner logs in through the normal flow in §4 above with that password; the hook's `profiles` lookup
