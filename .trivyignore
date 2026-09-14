@@ -13,3 +13,17 @@
 # Tracked continuously as Dependabot alert #1. Delete this line once Tauri
 # ships with glib 0.20+ and `cargo update` clears it.
 GHSA-wrw7-89jp-8q8g
+
+# GHSA-q8mj-m7cp-5q26 / GHSA-x5fp-wj9c-mxmx / GHSA-4mjr-xmp4-gh2g — MODERATE
+# qs 2.2.5-6.15.3: remotely-triggerable DoS in qs.stringify/array-limit parsing.
+# Transitive dependency: pulled in by @stryker-mutator/core@10.0.0 (frontend's new mutation-
+# testing dev dependency, 2026-09-14) via typed-rest-client@2.3.1, not a direct choice —
+# `npm audit fix --dry-run` confirms no resolvable upgrade path exists yet (typed-rest-client
+# hasn't bumped its own qs range). Not reachable in this project's context either way: Stryker
+# only runs as a local/CI dev-tool against this repo's own source, never processes untrusted
+# request data the way qs.stringify's advisory scenario requires. Delete these lines once
+# @stryker-mutator/core bumps typed-rest-client (or typed-rest-client itself bumps qs) and
+# `npm audit` clears it.
+GHSA-q8mj-m7cp-5q26
+GHSA-x5fp-wj9c-mxmx
+GHSA-4mjr-xmp4-gh2g

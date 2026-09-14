@@ -13,4 +13,7 @@ export const env = {
   SUPABASE_URL: requireEnv("VITE_SUPABASE_URL"),
   SUPABASE_ANON_KEY: requireEnv("VITE_SUPABASE_ANON_KEY"),
   API_BASE_URL: requireEnv("VITE_API_BASE_URL"),
+  // Optional, same as backend/app/core/config.py's SENTRY_DSN — unset (dev/test/CI) means Sentry
+  // is never initialized, not a missing-config error.
+  SENTRY_DSN: import.meta.env.VITE_SENTRY_DSN as string | undefined,
 };

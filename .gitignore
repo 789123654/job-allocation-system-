@@ -10,6 +10,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# mutmut mutation-testing cache (generated; use_git_change_detection means it's safe to delete
+# anytime and just triggers a slower next run, not committed to the repo).
+mutants/
+
 # Coverage artifacts (pytest-cov / coverage.py, and Vitest's v8 provider)
 .coverage
 coverage.xml

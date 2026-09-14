@@ -230,6 +230,16 @@ this; revisit once the firm itself needs its own visibility. This is also where 
 satisfied end to end: the client-facing error stays generic (`problem+json`, `API_SPEC.md` §1), but the real
 stack trace still has to land somewhere for debugging — Sentry is that somewhere, not "discarded."
 
+**Implemented both sides (2026-09-13):** backend (`app/main.py`'s `sentry_sdk.init`, guarded on
+`SENTRY_DSN`) was wired first; frontend (`@sentry/react`, guarded on `VITE_SENTRY_DSN`, wired into
+the scoped `ErrorBoundary`'s `componentDidCatch` via `Sentry.captureReactException`, per ASVS
+16.5.4's "last resort handler... preserves error details for logs") closed the remaining gap. Both
+deliberately leave PII collection at its default-off setting (`send_default_pii` unset on the
+backend, `sendDefaultPii`/`dataCollection` unset on the frontend) — a new third-party destination
+gets its own check, not inherited trust from the mechanism's docs-example defaults
+(skill-verification-discipline.md failure mode 7). CSP's `connect-src` (`tauri.conf.json`) allows
+`https://*.ingest.sentry.io` accordingly.
+
 **Uptime alerting — a real gap Railway itself admits to.** Its own docs state plainly: no built-in alerting;
 forward to a third-party tool for that. **UptimeRobot's free tier** (verified: generous free monitor count,
 5-minute check interval) pings the API's health-check endpoint and emails on downtime — the free, minimal

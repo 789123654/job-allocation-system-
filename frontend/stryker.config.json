@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "vitest": {
+    "configFile": "vite.config.ts"
+  },
+  "checkers": ["typescript"],
+  "typescriptChecker": {
+    "prioritizePerformanceOverAccuracy": true
+  },
+  "tsconfigFile": "tsconfig.app.json",
+  "mutate": [
+    "src/**/*.{ts,tsx}",
+    "!src/**/*.test.{ts,tsx}",
+    "!src/**/types/**",
+    "!src/testing/**",
+    "!src/main.tsx"
+  ],
+  "incremental": true,
+  "incrementalFile": "reports/stryker-incremental.json",
+  "reporters": ["progress", "clear-text", "html"],
+  "thresholds": {
+    "high": 80,
+    "low": 60,
+    "break": null
+  }
+}
