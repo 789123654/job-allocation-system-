@@ -218,9 +218,15 @@ jobs:
           # throwaway per-run local stack, but explicit, not relied on any unconfirmed automatic
           # runner behavior).
           print('::add-mask::' + token)
+          # Same masking for the raw password — the Phase 6 E2E login-flow spec logs in through the
+          # real UI with this same seeded account (not a second insert), so it needs the actual
+          # credential, not just the bearer token the contract test uses.
+          print('::add-mask::' + password)
 
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write('CONTRACT_TEST_TOKEN=' + token + '\n')
+              f.write('E2E_OWNER_EMAIL=' + email + '\n')
+              f.write('E2E_OWNER_PASSWORD=' + password + '\n')
           "
       - name: Start the FastAPI backend against the local Supabase stack
         run: |
@@ -243,6 +249,32 @@ jobs:
         env:
           CONTRACT_API_BASE_URL: http://127.0.0.1:8000
         run: npx vitest run --config vitest.contract.config.ts
+      # Phase 6 Step 1 (docs/CODING_STRUCTURE.md §4) — WebdriverIO + @wdio/tauri-service E2E
+      # harness, extending this job rather than adding a new one: it already has the real local
+      # Supabase + FastAPI stack this needs, and staying on ubuntu-latest sidesteps an unverified
+      # question a new windows-latest job would raise (GitHub-hosted Windows runners' Docker
+      # support for the Linux containers `supabase start` needs).
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      # Exact package list per v2.tauri.app/start/prerequisites/ (fetched live this session, not
+      # guessed) — webkit2gtk-driver deliberately omitted: that's only needed for the 'external'
+      # driverProvider; the embedded provider (tauri-plugin-wdio-webdriver) needs no driver binary.
+      - name: Install Linux Tauri build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Build the Tauri app with the E2E-only WebDriver feature
+        working-directory: frontend
+        # --features e2e-testing (Cargo.toml) links in tauri-plugin-wdio-webdriver; --config
+        # merges tauri.e2e.conf.json, which is the only thing that re-enables the matching
+        # e2e-testing capability file on top of tauri.conf.json's own ["default"]-only allowlist.
+        # Neither is ever passed by the real release build command — see both files' own comments.
+        run: npx tauri build --debug --features e2e-testing --config src-tauri/tauri.e2e.conf.json
+      - name: E2E tests (WebdriverIO, embedded WebDriver provider)
+        working-directory: frontend
+        run: npm run test:e2e
 
   frontend:
     runs-on: ubuntu-latest

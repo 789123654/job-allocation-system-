@@ -1,0 +1,16 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "app": {
+    "security": {
+      "capabilities": [
+        "default",
+        {
+          "identifier": "e2e-testing",
+          "description": "WebDriver automation surface for the Phase 6 E2E harness only. Inlined here, not a standalone file under capabilities/ — Tauri validates every file in that directory against the currently-compiled plugin set at build time regardless of this allowlist (confirmed empirically: a standalone e2e-testing.json broke the plain `cargo check` with 'Permission wdio-webdriver:default not found' even though tauri.conf.json restricts capabilities to [\"default\"]). Inlining it here means it only exists at all when this overlay is explicitly merged via --config, which only the CI E2E build step does. owasp-tcasvs V2.1.3: production builds must exclude test utilities.",
+          "windows": ["main"],
+          "permissions": ["wdio-webdriver:default"]
+        }
+      ]
+    }
+  }
+}

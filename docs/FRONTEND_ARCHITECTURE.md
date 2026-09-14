@@ -199,15 +199,23 @@ at up front.
   Verification section of the Phase 4 Step 1 plan already named (log in, restart the app, confirm
   the session survives via real Windows DPAPI) — a JS mock test would add coverage without
   touching the actual risk.
-- **The E2E tier itself was never installed** — confirmed directly (`package.json` has no
-  `webdriverio`/`@wdio/tauri-service` dependency, no `wdio.conf.*` anywhere in `frontend/`), despite
-  being "decided" above. Only the Unit/Integration tier (Vitest + Testing Library + MSW) exists so
-  far. Deliberately deferred, same reasoning as the Phase 4 Step 1 plan's own choice to skip a
-  Tauri build/lint CI job: E2E needs an OS-matched runner and a real packaged app to drive, real
-  infra cost for a slice that was about wiring, not packaging — revisit in Phase 6 (Distribution),
-  or sooner if a real login/session-persistence regression ships that only an end-to-end run would
-  have caught (the Verification section's manual walkthrough is the only thing covering that path
-  today).
+- **The E2E tier — installed 2026-09-15 (Phase 6 Step 1), CI verification in progress.**
+  `@wdio/tauri-service` + `@wdio/cli`/`@wdio/local-runner`/`@wdio/mocha-framework`/`@wdio/globals`
+  (frontend devDependencies) and `tauri-plugin-wdio-webdriver` (Rust, embedded WebDriver provider,
+  cross-platform) now exist, plus `frontend/wdio.conf.ts` and one harness-proving spec,
+  `frontend/e2e/specs/login-flow.spec.ts` — driving the real packaged app through a real login
+  against `.github/workflows/ci.yml`'s existing real local Supabase + FastAPI `e2e` job stack, not
+  MSW. Deliberately scoped to proving the harness only (see `docs/CODE_REVIEW_FINDINGS_2026-09-14.md`
+  finding #12, the on-record motivating case for this tier, and the plan's own "explicit checkpoint" —
+  further business-logic E2E coverage is a separate next slice, not bundled into this one).
+  **Security note**: `tauri-plugin-wdio-webdriver` stands up a live, remotely-drivable WebDriver
+  server — per its own README ("never include it in production builds") and owasp-tcasvs V2.1.3
+  ("production builds exclude... test utilities"), it's an optional Cargo dependency behind a new
+  `e2e-testing` feature (`src-tauri/Cargo.toml`), never enabled by the real release build command,
+  with its capability/permission (`wdio-webdriver:default`) inlined only in `tauri.e2e.conf.json` —
+  confirmed empirically that a standalone file under `capabilities/` would have broken the default
+  build's own permission validation regardless of `tauri.conf.json`'s capabilities allowlist, so it
+  is deliberately not a separate file there.
 
 ## 10. Tooling & Linting
 
