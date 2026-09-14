@@ -152,3 +152,69 @@ def test_record_idempotency_key_different_actor_same_key_does_not_collide(
     session.commit()
 
     reject_if_idempotency_key_used(session, actor_b, "key-1", endpoint)  # no exception — fresh
+
+
+def test_expired_idempotency_key_treats_request_as_new(session: Session) -> None:
+    """Code-review finding #13 (2026-09-14) — adapted from WSTG-BUSL-04 (Process Timing: "whether
+    transactions can be completed after an intended timeout window"), the closest WSTG procedure
+    found via a whole-directory keyword sweep (idempotent/replay/race/duplicate/TOCTOU) — no exact
+    match exists for idempotency-key TTL reuse specifically.
+
+    A key reused after the 24h TTL must be treated as genuinely new: the handler must actually run,
+    the real fresh result must be returned, and the stored row must reflect it — never the stale
+    row's data, which is exactly what the pre-fix code silently returned instead.
+    """
+    from sqlmodel import select
+
+    from app.core.db import as_aware_utc
+
+    actor = _actor()
+
+    # Seed an already-expired row directly — this key's PK slot is occupied by a >24h-old result,
+    # simulating "reused after TTL" without needing to mock time (with_idempotency itself computes
+    # `cutoff` from the real current time, so patching `datetime.now` would have to fake the exact
+    # same module-global object — a stale row via direct insert avoids that entirely).
+    stale_created_at = datetime(2020, 1, 1, tzinfo=UTC)  # far past any real 24h cutoff
+    session.add(
+        IdempotencyKey(
+            firm_id=actor.firm_id,
+            actor_id=actor.id,
+            idempotency_key="key-1",
+            endpoint="POST /tasks",
+            request_hash="stale-hash",
+            response_status=201,
+            response_body={"id": "stale-response"},
+            created_at=stale_created_at,
+        )
+    )
+    session.commit()
+
+    calls = 0
+
+    def handler() -> tuple[int, dict[str, str]]:
+        nonlocal calls
+        calls += 1
+        return 201, {"id": "fresh-response"}
+
+    status_code, body = with_idempotency(
+        session, actor, "key-1", "POST /tasks", {"title": "x"}, handler
+    )
+
+    # (a) the handler actually ran — TTL expiry means this is a new request, not a replay
+    assert calls == 1, "handler must be called for a key reused after its TTL expired"
+    # (b) the fresh result is what's returned, never the stale seeded one
+    assert status_code == 201
+    assert body == {"id": "fresh-response"}
+
+    # (c) the stored row now reflects the new result, not the stale one
+    updated_row = session.exec(
+        select(IdempotencyKey).where(
+            (IdempotencyKey.firm_id == actor.firm_id)
+            & (IdempotencyKey.actor_id == actor.id)
+            & (IdempotencyKey.idempotency_key == "key-1")
+            & (IdempotencyKey.endpoint == "POST /tasks")
+        )
+    ).first()
+    assert updated_row is not None
+    assert updated_row.response_body == {"id": "fresh-response"}
+    assert as_aware_utc(updated_row.created_at) > stale_created_at

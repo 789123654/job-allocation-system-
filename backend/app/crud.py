@@ -36,7 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.selectable import Select
 from sqlmodel import Session, col, select
 
-from app.core.db import commit_or_recover
+from app.core.db import as_aware_utc, commit_or_recover
 from app.core.supabase_admin import admin_auth
 from app.models import (
     AccessDenial,
@@ -779,15 +779,6 @@ _DEADLINE_NOTIF_TYPES = (
 )
 
 
-def _as_aware_utc(value: datetime) -> datetime:
-    """Postgres' `timestamptz` round-trips as tz-aware via psycopg, but don't trust that blindly —
-    SQLite (this project's own test backend) drops tzinfo on round-trip, and a naive-vs-aware
-    comparison raises a raw `TypeError`, not a clean 500. Caught by tests/crud/test_notifications.py
-    actually running this comparison against a real fetched row, not a mock.
-    """
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
 def _due_deadline_notifications(
     task: Task, now: datetime, owner_ids: list[UUID]
 ) -> list[tuple[UUID, str, UUID]]:
@@ -797,7 +788,7 @@ def _due_deadline_notifications(
     """
     if task.deadline is None:  # caller's query already filters this; narrows the type here
         return []
-    deadline = _as_aware_utc(task.deadline)
+    deadline = as_aware_utc(task.deadline)
     overdue = deadline < now
     due: list[tuple[UUID, str, UUID]] = []
     for owner_id in owner_ids:
