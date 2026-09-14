@@ -178,7 +178,9 @@ def create_employee(
         # delete the now-orphaned auth user rather than leave a Supabase account with no local
         # profile, permanently consuming that email with no way to ever sign in. Best-effort —
         # if the delete itself fails, the orphan is a known, logged trade-off, not a silent one.
-        session.rollback()
+        # Exempt from commit_or_recover like create_job_type's rollback below: raises immediately
+        # after, no further session read, so no expired-attribute/lost-tenant-context risk.
+        session.rollback()  # nosemgrep: hand-rolled-rollback-outside-commit-or-recover
         try:
             admin_auth.delete_user(str(new_id))
         except Exception:
