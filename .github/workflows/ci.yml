@@ -191,7 +191,14 @@ jobs:
               'email': email,
               'password': password,
               'email_confirm': True,
-              'user_metadata': {'firm_id': firm_id, 'role': 'owner', 'full_name': 'Contract Owner'},
+              # app_metadata, not user_metadata — matches crud.create_employee's real payload
+              # shape since the trigger fix (c0f23284b2fd, code review finding #11). Missing here
+              # originally: a 4th call site the initial fix's sweep missed, caught only when this
+              # exact step started 500ing in CI (no profile ever got created, so the later login
+              # step's JWT hook found no row and failed) — found via a repo-wide re-grep for
+              # 'user_metadata.*firm_id' after the first three call sites were already fixed.
+              'app_metadata': {'firm_id': firm_id, 'role': 'owner'},
+              'user_metadata': {'full_name': 'Contract Owner'},
           })
           user_id = str(created.user.id)
           conn.execute('UPDATE profiles SET must_change_password = false WHERE id = %s', (user_id,))
