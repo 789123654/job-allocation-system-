@@ -19,7 +19,17 @@ logger = logging.getLogger("app.auth")
 SessionDep = Annotated[Session, Depends(get_session)]
 # Shared across every Idempotency-Key route (tasks/issues/employees) — was the literal header
 # alias repeated 7 times across three files (SonarQube: define a constant instead of duplicating).
-IdempotencyKeyHeader = Annotated[str, Header(alias="Idempotency-Key")]
+# max_length added (code-review finding #14, 2026-09-14): every Pydantic Field()-declared string
+# elsewhere in this codebase has one (Input_Validation_Cheat_Sheet.md — "minimum and maximum length
+# check for strings"), but Header() is a different declaration idiom and this one was missed. No
+# source specifies a required number: neither Rule 230 (rest-api-guidelines) nor the Idempotency-Key
+# header's own schema it points to (Zalando's headers-1.0.0.yaml, fetched directly — `type: string,
+# format: uuid`, no length constraint) sets one; it just recommends "a UUID v4 or any other random
+# string with enough entropy." 255 is a judgment call, not a cited figure — generous for any
+# legitimate UUID (36 chars) or reasonable random token, while still capping an oversized value
+# (Header() accepts the same validation kwargs as Query()/Path(), confirmed against
+# fastapi/guide/tutorial/header-params.md, not assumed from Query's own docs alone).
+IdempotencyKeyHeader = Annotated[str, Header(alias="Idempotency-Key", max_length=255)]
 _bearer_scheme = HTTPBearer()
 
 
@@ -81,7 +91,22 @@ def get_current_profile(
     if settings.SENTRY_DSN:
         sentry_sdk.set_tag("tenant_id", str(firm_id))
 
-    profile = session.exec(select(Profile).where(Profile.id == UUID(user_id))).first()
+    try:
+        # Code-review finding #15 (2026-09-14): every other malformed-token shape in this function
+        # is caught and turned into a clean 401 — this line was the one place that pattern wasn't
+        # applied, most likely because a `sub` claim from an already-signature-verified JWT
+        # "shouldn't" be malformed. It still isn't trusted input at the type level: nothing stops a
+        # legitimately-signed token from carrying a non-UUID `sub` (a misissued token, a JWT signed
+        # by a differently-configured Supabase project sharing the same JWKS during a migration,
+        # etc.), and Input_Validation_Cheat_Sheet.md's baseline — validate structure, don't assume
+        # it from where the data came from — applies to every claim, not just the ones already
+        # covered above.
+        user_uuid = UUID(user_id)
+    except ValueError:
+        logger.warning("Authentication failed: token 'sub' claim is not a valid UUID")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token missing required claims") from None
+
+    profile = session.exec(select(Profile).where(Profile.id == user_uuid)).first()
     if profile is None or not profile.is_active:
         logger.warning(
             "Authentication failed: profile %s inactive or not found (firm %s)", user_id, firm_id
