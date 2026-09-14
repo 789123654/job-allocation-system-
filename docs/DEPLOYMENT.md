@@ -404,7 +404,15 @@ one) as this runbook's first step, rather than assuming.
    `app_metadata.role`/`firm_id`/`must_change_password` never reach the JWT and every
    `get_current_profile`/`require_owner`/`require_password_set` gate in `backend/app/api/deps.py`
    silently breaks — this is the single most load-bearing dashboard setting in this whole runbook, more
-   so than any item already listed in §11.
+   so than any item already listed in §11. A 5th, added 2026-09-14 after code review finding #11:
+   **confirm Authentication → Sign In / Providers → "Allow new users to sign up" stays disabled** —
+   `supabase/config.toml`'s `enable_signup = false` comment already claimed this runbook required it,
+   but nothing here ever actually did until now. This is now defense-in-depth rather than the only
+   thing standing in the way: `handle_new_user()` (migration `c0f23284b2fd`) reads `firm_id`/`role`
+   from `app_metadata`, which self-signup can never set regardless of this toggle — but leaving public
+   signup enabled with no invite/approval flow in front of it is still its own problem (unvetted
+   accounts, one firm per deployment assumption broken), so verify it explicitly, don't rely on the
+   structural fix alone to make the toggle's state not matter.
 5. **Decide the breached-password-protection gap explicitly**, don't silently skip it — `ARCHITECTURE.md`
    §14 already named this: accept the ASVS 6.2.4/6.2.12 gap for the free-tier pilot, revisit by flipping
    Supabase's native leaked-password toggle once/if the project moves to the Pro plan.
