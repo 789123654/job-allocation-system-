@@ -1,8 +1,7 @@
 import logging
-from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlmodel import select
 from supabase_auth.errors import AuthApiError
@@ -11,7 +10,7 @@ from app import crud
 from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.core.db import commit_or_recover
 from app.core.idempotency import record_idempotency_key, reject_if_idempotency_key_used
-from app.core.validation import NoNulStr
+from app.core.validation import LimitQuery, NoNulStr, OffsetQuery
 from app.models import IdempotencyKey
 
 logger = logging.getLogger(__name__)
@@ -77,24 +76,20 @@ def create_employee(
 def list_employees(
     actor: RequireOwnerDep,
     session: SessionDep,
-    # le bound: same reasoning as tasks.py's list_tasks — Postgres bigint OFFSET overflow
-    # otherwise crashes with a raw 500 instead of a clean 422 (found by Schemathesis, 2026-09-08).
-    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: OffsetQuery = 0,
+    limit: LimitQuery = 20,
 ) -> list[EmployeeOut]:
     # Pending-job workload count (PRD §2.4) — deferred when this route was first written (Phase 1,
     # before `tasks` existed); added now that Phase 4's Dashboard slice actually needs it.
     employees = crud.list_employees(session, actor, offset, limit)
-    return [
-        EmployeeOut(
-            id=e.id,
-            full_name=e.full_name,
-            email=e.email,
-            is_active=e.is_active,
-            pending_job_count=count,
-        )
-        for e, count in employees
-    ]
+    out: list[EmployeeOut] = []
+    for e, count in employees:
+        # Only pending_job_count needs the manual override — it comes from crud.list_employees'
+        # separate workload subquery, not from a Profile attribute (code-review finding #7).
+        employee_out = EmployeeOut.model_validate(e, from_attributes=True)
+        employee_out.pending_job_count = count
+        out.append(employee_out)
+    return out
 
 
 @router.patch("/{employee_id}")
@@ -107,12 +102,7 @@ def update_employee(
         # access-control principle already applied elsewhere in API_SPEC.md §3).
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found")
     employee = crud.set_employee_active(session, actor, employee, body.is_active)
-    return EmployeeOut(
-        id=employee.id,
-        full_name=employee.full_name,
-        email=employee.email,
-        is_active=employee.is_active,
-    )
+    return EmployeeOut.model_validate(employee, from_attributes=True)
 
 
 @router.post("/{employee_id}/reset-password")

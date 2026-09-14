@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
-import { tasksQueryKeyPrefix } from "@/features/tasks/api/get-tasks";
+import { invalidateAfterTaskMutation } from "@/features/tasks/api/invalidate-after-task-mutation";
 import { toTask, type TaskOutDto } from "@/features/tasks/api/mappers";
 import type { Task } from "@/features/tasks/types";
 
@@ -18,8 +18,6 @@ export function useMarkTaskBilled() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: markTaskBilled,
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: tasksQueryKeyPrefix });
-    },
+    onSuccess: () => invalidateAfterTaskMutation(queryClient),
   });
 }

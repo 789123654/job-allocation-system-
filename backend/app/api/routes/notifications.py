@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app import crud
 from app.api.deps import ActiveProfileDep, SessionDep
+from app.core.validation import LimitQuery, OffsetQuery
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
@@ -24,24 +25,12 @@ class NotificationOut(BaseModel):
 def list_notifications(
     actor: ActiveProfileDep,
     session: SessionDep,
-    # le bound: same reasoning as tasks.py's list_tasks — Postgres bigint OFFSET overflow
-    # otherwise crashes with a raw 500 instead of a clean 422 (found by Schemathesis, 2026-09-08).
-    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: OffsetQuery = 0,
+    limit: LimitQuery = 20,
     unread_only: Annotated[bool, Query()] = True,
 ) -> list[NotificationOut]:
     notifications = crud.list_notifications(session, actor, offset, limit, unread_only)
-    return [
-        NotificationOut(
-            id=n.id,
-            type=n.type,
-            task_id=n.task_id,
-            issue_id=n.issue_id,
-            is_read=n.is_read,
-            created_at=n.created_at,
-        )
-        for n in notifications
-    ]
+    return [NotificationOut.model_validate(n, from_attributes=True) for n in notifications]
 
 
 @router.patch("/{notification_id}/read")
@@ -53,11 +42,4 @@ def mark_notification_read(
         # 404, not 403 — recipient-only, same IDOR reasoning as every other resource here.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Notification not found")
     notification = crud.mark_notification_read(session, notification)
-    return NotificationOut(
-        id=notification.id,
-        type=notification.type,
-        task_id=notification.task_id,
-        issue_id=notification.issue_id,
-        is_read=notification.is_read,
-        created_at=notification.created_at,
-    )
+    return NotificationOut.model_validate(notification, from_attributes=True)

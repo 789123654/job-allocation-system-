@@ -28,10 +28,12 @@ again — see its own docstring.
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.selectable import Select
 from sqlmodel import Session, col, select
 
 from app.core.db import commit_or_recover
@@ -90,6 +92,16 @@ class UnknownJobTypeError(Exception):
     main.py's catch-all handler) instead of a clean 4xx — found by Schemathesis, 2026-09-08,
     docs/SECURITY_AUDIT_CHECKLIST.md.
     """
+
+
+def _paginate[StmtT: Select[Any]](stmt: StmtT, *order_by: Any, offset: int, limit: int) -> StmtT:
+    """Deterministic-order pagination tail, shared by every `list_*` below (code-review finding
+    #8, 2026-09-14) — the exact duplicated shape that let `list_notifications` drift without its
+    `.id` tiebreaker (finding #3) until an independent pass caught it. `order_by` is always
+    `(col(Model.created_at).desc(), col(Model.id))` at the call site — the tiebreaker is what
+    makes which rows land in a `limit`-bounded page deterministic across requests.
+    """
+    return stmt.order_by(*order_by).offset(offset).limit(limit)
 
 
 def _generate_password() -> str:
@@ -151,9 +163,18 @@ def create_employee(
             "email": email,
             "password": password,
             "email_confirm": True,
-            "user_metadata": {
+            # firm_id/role in app_metadata, not user_metadata (code review finding #11,
+            # 2026-09-14) — app_metadata can only ever be set via this Admin API, never by an
+            # end user (confirmed against the installed supabase_auth SDK and Supabase's own
+            # docs: the client-side auth.updateUser() has no app_metadata parameter at all).
+            # handle_new_user() (migration c0f23284b2fd) reads firm_id/role from here for exactly
+            # that reason — full_name stays in user_metadata since it's display-only, not a
+            # privilege/tenant field.
+            "app_metadata": {
                 "firm_id": str(actor.firm_id),
                 "role": "employee",
+            },
+            "user_metadata": {
                 "full_name": full_name,
             },
         }
@@ -217,9 +238,9 @@ def list_employees(
         select(Profile, func.coalesce(workload.c.pending_count, 0))
         .where(Profile.role == "employee", Profile.firm_id == actor.firm_id)
         .outerjoin(workload, workload.c.employee_id == col(Profile.id))
-        .order_by(col(Profile.created_at).desc(), col(Profile.id))
-        .offset(offset)
-        .limit(limit)
+    )
+    stmt = _paginate(
+        stmt, col(Profile.created_at).desc(), col(Profile.id), offset=offset, limit=limit
     )
     return [(row[0], row[1]) for row in session.exec(stmt).all()]
 
@@ -377,14 +398,9 @@ def create_job_type(session: Session, actor: Profile, name: str) -> JobType:
 
 
 def list_job_types(session: Session, actor: Profile, offset: int, limit: int) -> list[JobType]:
-    # Deterministic pagination — same non-deterministic-offset/limit bug already fixed on
-    # list_tasks, backported here (code-review finding, whole-Phase-4 sweep, 2026-09-13).
-    stmt = (
-        select(JobType)
-        .where(JobType.firm_id == actor.firm_id)
-        .order_by(col(JobType.created_at).desc(), col(JobType.id))
-        .offset(offset)
-        .limit(limit)
+    stmt = select(JobType).where(JobType.firm_id == actor.firm_id)
+    stmt = _paginate(
+        stmt, col(JobType.created_at).desc(), col(JobType.id), offset=offset, limit=limit
     )
     return list(session.exec(stmt).all())
 
@@ -470,15 +486,7 @@ def list_tasks(
             stmt = stmt.where(Task.task_type == task_type_filter)
     else:
         stmt = stmt.where(Task.assigned_to == actor.id)
-    # Deterministic order, same pattern as list_notifications' own .order_by (crud.py:827) — found
-    # by an independent code-review pass (2026-09-13): without this, Postgres has no ordering
-    # guarantee at all, so which rows land in a `limit`-bounded page (and in what order) could
-    # silently vary between requests. `.id` is the tiebreaker for rows sharing a `created_at`.
-    # Deterministic order, same pattern as list_notifications' own .order_by (crud.py:827) — found
-    # by an independent code-review pass (2026-09-13): without this, Postgres has no ordering
-    # guarantee at all, so which rows land in a `limit`-bounded page (and in what order) could
-    # silently vary between requests. `.id` is the tiebreaker for rows sharing a `created_at`.
-    stmt = stmt.order_by(col(Task.created_at).desc(), col(Task.id)).offset(offset).limit(limit)
+    stmt = _paginate(stmt, col(Task.created_at).desc(), col(Task.id), offset=offset, limit=limit)
     return list(session.exec(stmt).all())
 
 
@@ -901,14 +909,8 @@ def list_notifications(
     stmt = select(Notification).where(Notification.recipient_id == actor.id)
     if unread_only:
         stmt = stmt.where(col(Notification.is_read).is_(False))
-    # `.id` tiebreaker — same reasoning as list_tasks/list_job_types/list_employees: `created_at`
-    # gives no ordering guarantee among rows sharing the same timestamp, so without it a row can be
-    # silently skipped or duplicated across pages (found missing here in code review, 2026-09-14 —
-    # the siblings' own comments claimed to copy this function's pattern; this one never had it).
-    stmt = (
-        stmt.order_by(col(Notification.created_at).desc(), col(Notification.id))
-        .offset(offset)
-        .limit(limit)
+    stmt = _paginate(
+        stmt, col(Notification.created_at).desc(), col(Notification.id), offset=offset, limit=limit
     )
     return list(session.exec(stmt).all())
 
