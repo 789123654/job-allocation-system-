@@ -45,7 +45,7 @@ def list_job_types(
     offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> list[JobTypeOut]:
-    job_types = crud.list_job_types(session, offset, limit)
+    job_types = crud.list_job_types(session, actor, offset, limit)
     return [JobTypeOut(id=jt.id, name=jt.name, is_active=jt.is_active) for jt in job_types]
 
 
@@ -53,7 +53,7 @@ def list_job_types(
 def update_job_type(
     job_type_id: UUID, body: JobTypeUpdate, actor: RequireOwnerDep, session: SessionDep
 ) -> JobTypeOut:
-    job_type = crud.get_job_type(session, job_type_id)
+    job_type = crud.get_job_type(session, actor, job_type_id)
     if job_type is None:
         # 404, not 403 — same reasoning as Employees' update route (ASVS access-control principle,
         # API_SPEC.md §3): an Owner probing another firm's job type id learns nothing.

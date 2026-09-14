@@ -1,7 +1,15 @@
 """DB read/write logic — routes stay thin (fastapi/project-structure.md). Every function here
 trusts `session` to already have `app.current_tenant` set (get_current_profile, api/deps.py) — RLS
-does the tenant-scoping; nothing here filters by `firm_id` itself, per ARCHITECTURE.md §5's
-division of responsibility (RLS = isolation, crud/routes = role-based authorization).
+is the primary tenant-isolation guarantee. Every plain getter/lister *also* filters by
+`actor.firm_id` explicitly, belt-and-suspenders (same reasoning `_validate_assignee`/
+`_validate_job_type` already used) — not because RLS is distrusted, but because
+`Multi_Tenant_Security_Cheat_Sheet.md` ("implement authorization checks at the data access layer,
+not just API layer") and `postgres-multitenant/schema-design.md` ("RLS is not a substitute for
+application-level checks"; pooled-connection session-variable leakage on a forgotten/skipped `SET`
+is "the single most common way RLS setups fail in production") both treat single-layer isolation as
+a documented anti-pattern, not a valid trade-off. Policy changed 2026-09-14 (code review finding
+#6) — the prior version of this docstring deliberately called RLS "the single source of truth";
+that trade-off is no longer the project's stance.
 
 That trust holds only within the one transaction get_current_profile's `set_config(..., true)` set
 it in — `true` (is_local) means it's transaction-scoped, deliberately, so a pooled connection can
@@ -17,6 +25,7 @@ consolidated there 2026-09-10 after this exact recovery shape was independently 
 again — see its own docstring.
 """
 
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -37,6 +46,8 @@ from app.models import (
     Task,
     TaskReview,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DuplicateJobTypeNameError(Exception):
@@ -157,11 +168,32 @@ def create_employee(
     new_id = UUID(result.user.id)
 
     _write_audit_log(session, actor, action="employee_created", target_id=new_id)
-    session.commit()
+    try:
+        session.commit()
+    except Exception:
+        # The Supabase Auth user above already exists — this local commit isn't in the same
+        # transaction as that external call, so its failure can't roll the auth user back.
+        # Compensating action (found missing in code review, 2026-09-14 — see
+        # Business_Logic_Security_Cheat_Sheet.md's "external non-idempotent call" guidance):
+        # delete the now-orphaned auth user rather than leave a Supabase account with no local
+        # profile, permanently consuming that email with no way to ever sign in. Best-effort —
+        # if the delete itself fails, the orphan is a known, logged trade-off, not a silent one.
+        session.rollback()
+        try:
+            admin_auth.delete_user(str(new_id))
+        except Exception:
+            logger.exception(
+                "Failed to compensate for a failed employee-creation commit — "
+                "Supabase Auth user %s is now orphaned (no local profile)",
+                new_id,
+            )
+        raise
     return new_id, password
 
 
-def list_employees(session: Session, offset: int, limit: int) -> list[tuple[Profile, int]]:
+def list_employees(
+    session: Session, actor: Profile, offset: int, limit: int
+) -> list[tuple[Profile, int]]:
     """Returns (employee, pending_job_count) pairs — PRD §2.4's workload count, deliberately
     omitted when this function was first written (Phase 1, before `tasks` existed — see the
     route's own prior comment, now removed). One query, not N+1: `tests/crud/test_query_counts.py`
@@ -181,7 +213,7 @@ def list_employees(session: Session, offset: int, limit: int) -> list[tuple[Prof
     )
     stmt = (
         select(Profile, func.coalesce(workload.c.pending_count, 0))
-        .where(Profile.role == "employee")
+        .where(Profile.role == "employee", Profile.firm_id == actor.firm_id)
         .outerjoin(workload, workload.c.employee_id == col(Profile.id))
         .order_by(col(Profile.created_at).desc(), col(Profile.id))
         .offset(offset)
@@ -190,9 +222,13 @@ def list_employees(session: Session, offset: int, limit: int) -> list[tuple[Prof
     return [(row[0], row[1]) for row in session.exec(stmt).all()]
 
 
-def get_employee(session: Session, employee_id: UUID) -> Profile | None:
+def get_employee(session: Session, actor: Profile, employee_id: UUID) -> Profile | None:
     return session.exec(
-        select(Profile).where(Profile.id == employee_id, Profile.role == "employee")
+        select(Profile).where(
+            Profile.id == employee_id,
+            Profile.role == "employee",
+            Profile.firm_id == actor.firm_id,
+        )
     ).first()
 
 
@@ -338,11 +374,12 @@ def create_job_type(session: Session, actor: Profile, name: str) -> JobType:
     return job_type
 
 
-def list_job_types(session: Session, offset: int, limit: int) -> list[JobType]:
+def list_job_types(session: Session, actor: Profile, offset: int, limit: int) -> list[JobType]:
     # Deterministic pagination — same non-deterministic-offset/limit bug already fixed on
     # list_tasks, backported here (code-review finding, whole-Phase-4 sweep, 2026-09-13).
     stmt = (
         select(JobType)
+        .where(JobType.firm_id == actor.firm_id)
         .order_by(col(JobType.created_at).desc(), col(JobType.id))
         .offset(offset)
         .limit(limit)
@@ -350,8 +387,10 @@ def list_job_types(session: Session, offset: int, limit: int) -> list[JobType]:
     return list(session.exec(stmt).all())
 
 
-def get_job_type(session: Session, job_type_id: UUID) -> JobType | None:
-    return session.exec(select(JobType).where(JobType.id == job_type_id)).first()
+def get_job_type(session: Session, actor: Profile, job_type_id: UUID) -> JobType | None:
+    return session.exec(
+        select(JobType).where(JobType.id == job_type_id, JobType.firm_id == actor.firm_id)
+    ).first()
 
 
 def set_job_type_active(session: Session, job_type: JobType, is_active: bool) -> JobType:
@@ -417,7 +456,7 @@ def list_tasks(
     regardless of what they pass — the query filters below only apply for an Owner, since an
     Employee's results are already scoped to themselves (the same filters would be redundant).
     """
-    stmt = select(Task)
+    stmt = select(Task).where(Task.firm_id == actor.firm_id)
     if actor.role == "owner":
         if status_filter is not None:
             stmt = stmt.where(Task.status == status_filter)
@@ -446,7 +485,9 @@ def get_task(session: Session, actor: Profile, task_id: UUID) -> Task | None:
     someone else's task is what makes the route's existing 404-not-403 pattern work unchanged
     (API_SPEC.md: an Employee requesting another's task by ID must 404, not 403).
     """
-    task = session.exec(select(Task).where(Task.id == task_id)).first()
+    task = session.exec(
+        select(Task).where(Task.id == task_id, Task.firm_id == actor.firm_id)
+    ).first()
     if task is None:
         return None
     if actor.role != "owner" and task.assigned_to != actor.id:
@@ -633,8 +674,10 @@ def create_issue(session: Session, actor: Profile, task: Task, description: str)
     return issue
 
 
-def get_issue(session: Session, issue_id: UUID) -> Issue | None:
-    return session.exec(select(Issue).where(Issue.id == issue_id)).first()
+def get_issue(session: Session, actor: Profile, issue_id: UUID) -> Issue | None:
+    return session.exec(
+        select(Issue).where(Issue.id == issue_id, Issue.firm_id == actor.firm_id)
+    ).first()
 
 
 def _lock_issue(session: Session, firm_id: UUID, issue_id: UUID) -> Issue:
@@ -856,7 +899,15 @@ def list_notifications(
     stmt = select(Notification).where(Notification.recipient_id == actor.id)
     if unread_only:
         stmt = stmt.where(col(Notification.is_read).is_(False))
-    stmt = stmt.order_by(col(Notification.created_at).desc()).offset(offset).limit(limit)
+    # `.id` tiebreaker — same reasoning as list_tasks/list_job_types/list_employees: `created_at`
+    # gives no ordering guarantee among rows sharing the same timestamp, so without it a row can be
+    # silently skipped or duplicated across pages (found missing here in code review, 2026-09-14 —
+    # the siblings' own comments claimed to copy this function's pattern; this one never had it).
+    stmt = (
+        stmt.order_by(col(Notification.created_at).desc(), col(Notification.id))
+        .offset(offset)
+        .limit(limit)
+    )
     return list(session.exec(stmt).all())
 
 

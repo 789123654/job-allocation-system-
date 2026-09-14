@@ -53,7 +53,7 @@ def get_issue(issue_id: UUID, actor: RequireOwnerDep, session: SessionDep) -> Is
     # below, re-verified fresh this pass (migration a3f5c9e21d07: issues has ENABLE+FORCE ROW
     # LEVEL SECURITY + a tenant_isolation policy, same as job_types) — not a new authorization
     # mechanism, just a read-only sibling of an already-vetted one.
-    issue = crud.get_issue(session, issue_id)
+    issue = crud.get_issue(session, actor, issue_id)
     if issue is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Issue not found")
     return IssueOut.from_issue(issue)
@@ -70,7 +70,7 @@ def resolve_issue(
     # RLS already scopes this select to the caller's own firm (app.current_tenant); role is
     # Owner-only via RequireOwnerDep, so no separate "visible to" check is needed the way tasks'
     # employee-scoped get_task needs one — every issue in the firm is an Owner's to resolve.
-    issue = crud.get_issue(session, issue_id)
+    issue = crud.get_issue(session, actor, issue_id)
     if issue is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Issue not found")
 

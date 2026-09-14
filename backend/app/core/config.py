@@ -59,14 +59,17 @@ class Settings(BaseSettings):
         # stance as `_require_psycopg_driver` above. `verify-full` specifically — `require`/`prefer`
         # encrypt but skip cert validation, so they satisfy §12.3.1 but not §12.3.2.
         # Loopback is the one exemption (see `_LOOPBACK_HOSTS`) — "regardless of network location"
-        # still holds for anything that actually crosses a network.
+        # still holds for anything that actually crosses a network. Checked against every host in
+        # the DSN, not just the first: a multi-host failover URL (host list) can connect to any of
+        # them, so a loopback-first/remote-second DSN must still be caught (found in code review,
+        # 2026-09-14 — the original version only inspected hosts()[0]).
         hosts = v.hosts()
-        host = hosts[0]["host"] if hosts else None
-        if host in _LOOPBACK_HOSTS:
+        remote_hosts = [h["host"] for h in hosts if h["host"] not in _LOOPBACK_HOSTS]
+        if not remote_hosts:
             return v
         if parse_qs(v.query or "").get("sslmode") != ["verify-full"]:
             raise ValueError(
-                f"remote DB host {host!r} must use sslmode=verify-full "
+                f"remote DB host(s) {remote_hosts!r} must use sslmode=verify-full "
                 "(ASVS 12.3, DEPLOYMENT.md §2) — encrypt and validate the certificate"
             )
         return v
