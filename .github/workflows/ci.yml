@@ -95,9 +95,22 @@ jobs:
       # 92 -> 93: the authz regression suite (test_authz_regression.py + test_deps.py additions)
       # took the measured number to 94.4%.
       - run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=93
-      # Mutation testing (mutmut) moved out of CI (2026-09-14) — the ~2hr run was burning enough
-      # Actions minutes to trip the account's $0 spending budget. Run manually/locally instead:
-      # `uv run mutmut run && uv run mutmut results` (docs/SECURITY_AUDIT_CHECKLIST.md).
+      # Mutation testing (mutmut, docs/SECURITY_AUDIT_CHECKLIST.md 2026-09-14 — a mechanized
+      # supplement to this project's manual rule-10.1 negative control, not a replacement).
+      # Non-blocking on purpose: mutmut has no documented CI exit-code/threshold gate (checked
+      # directly against its own current docs, not assumed), and this is this project's first run
+      # of it — observe real numbers before ever gating merges on them, same ratchet approach
+      # already used for the coverage threshold above. Scoped to crud.py/idempotency.py (the
+      # business-logic-dense modules every real bug this project has shipped has lived in), not the
+      # whole app — thin routing/settings modules aren't where a surviving mutant would matter.
+      # `use_git_change_detection` (pyproject.toml) keeps repeat runs fast without a persisted cache.
+      # Re-added 2026-09-14 (was pulled out the same day over Actions-minutes cost) — the repo is
+      # now public, so Actions minutes are unlimited/free and that cost reason no longer applies.
+      - name: Mutation testing (mutmut) — advisory, does not fail the build
+        continue-on-error: true
+        run: |
+          uv run mutmut run || true
+          uv run mutmut results
 
   # End-to-end auth against a real local Supabase stack (GoTrue + Postgres), not the bare
   # postgres:17 + hand-stubbed auth.users the `backend` job uses. This is where the provisioning
@@ -246,9 +259,23 @@ jobs:
       # vite.config.ts once the auth screens and their tests land.
       - run: npm run test:coverage
       - run: npm run build
-      # Mutation testing (Stryker) moved out of CI (2026-09-14) — same Actions-minutes/budget
-      # reason as the backend's mutmut step above. Run manually/locally instead: `npm run
-      # test:mutation` (docs/SECURITY_AUDIT_CHECKLIST.md).
+      # Mutation testing (Stryker, docs/SECURITY_AUDIT_CHECKLIST.md 2026-09-14) — frontend
+      # counterpart of the backend's mutmut step above; same "advisory first, gate later once real
+      # numbers exist" reasoning. `incremental: true` (stryker.config.json) only re-mutates
+      # changed code on top of a prior run — the cache below persists that report across CI runs so
+      # every PR isn't a full run from scratch; restore-keys falls back to main's last report for a
+      # fresh branch. `thresholds.break: null` already tells Stryker itself never to exit non-zero on
+      # score; continue-on-error is the second layer, covering a genuine tool/runtime error too.
+      # Re-added 2026-09-14 (was pulled out the same day over Actions-minutes cost) — the repo is
+      # now public, so Actions minutes are unlimited/free and that cost reason no longer applies.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: frontend/reports/stryker-incremental.json
+          key: stryker-incremental-${{ github.ref_name }}
+          restore-keys: stryker-incremental-main
+      - name: Mutation testing (Stryker) — advisory, does not fail the build
+        continue-on-error: true
+        run: npm run test:mutation
 
   security:
     runs-on: ubuntu-latest
