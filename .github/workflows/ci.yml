@@ -319,14 +319,6 @@ jobs:
           WEBKIT_DISABLE_DMABUF_RENDERER: "1"
           NO_AT_BRIDGE: "1"
         run: xvfb-run -a npm run test:e2e
-      # Temporary diagnostic (2026-09-15) — the startup crash is fixed, but a second, different
-      # failure appeared (core.invoke never becomes ready, #email never renders). captureBackendLogs
-      # (wdio.conf.ts) writes the app's own stdout/stderr here; surface it inline so it isn't lost.
-      # Remove once this second issue is root-caused.
-      - name: Diagnostic — print captured app logs from the failed E2E run
-        if: always()
-        working-directory: frontend
-        run: cat logs/*.log 2>/dev/null || echo "no captured log files found under frontend/logs"
 
   frontend:
     runs-on: ubuntu-latest

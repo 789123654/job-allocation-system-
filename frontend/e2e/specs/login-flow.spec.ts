@@ -21,20 +21,7 @@ describe("Login flow", () => {
     }
 
     const emailInput = await browser.$("#email");
-    try {
-      await emailInput.waitForDisplayed({ timeout: 15000 });
-    } catch (e) {
-      // Temporary — added 2026-09-15 to diagnose a boot failure (#root stays empty). Captured here,
-      // inside the test itself, because the outer mocha-level timeout (60s) tears down the
-      // WebDriver session before wdio.conf.ts's afterTest hook can query anything — every one of
-      // its diagnostic calls failed with "session not found" once that happened. A 15s explicit
-      // wait here fails fast, well under the mocha timeout, so the session is still alive to
-      // inspect. Remove once the boot failure is root-caused.
-      console.log("--- DIAGNOSTIC: page source at #email failure ---");
-      console.log(await browser.getPageSource());
-      console.log("--- DIAGNOSTIC: document.title (index.html's error listener) ---", await browser.getTitle());
-      throw e;
-    }
+    await emailInput.waitForDisplayed({ timeout: 15000 });
     await emailInput.setValue(email);
 
     const passwordInput = await browser.$("#password");
@@ -47,18 +34,7 @@ describe("Login flow", () => {
     // set must reach the authenticated shell directly, never the forced-reset gate
     // (router.tsx's mustChangePassword check, ARCHITECTURE.md §4 / FRONTEND_ARCHITECTURE.md §6).
     const heading = await browser.$("h1=Dashboard");
-    try {
-      await heading.waitForDisplayed({ timeout: 15000 });
-    } catch (e) {
-      // Temporary — added 2026-09-15, same reasoning as the #email guard above: capture inline,
-      // before mocha's outer timeout can tear down the session. This is now the active failure
-      // point (the earlier #root-empty/withGlobalTauri issue is fixed — login form itself works).
-      console.log("--- DIAGNOSTIC: page source at Dashboard-heading failure ---");
-      console.log(await browser.getPageSource());
-      console.log("--- DIAGNOSTIC: current URL ---", await browser.getUrl());
-      console.log("--- DIAGNOSTIC: document.title ---", await browser.getTitle());
-      throw e;
-    }
+    await heading.waitForDisplayed({ timeout: 15000 });
     await expect(heading).toHaveText("Dashboard");
     await expect(browser).not.toHaveUrl(/set-new-password/);
 

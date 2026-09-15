@@ -14,22 +14,6 @@
   </head>
   <body>
     <div id="root"></div>
-    <!-- Temporary — added 2026-09-15 to diagnose an E2E-only failure (#root stays empty, real cause
-         invisible because the embedded WebKit driver used in CI doesn't support getLogs('browser')).
-         A plain inline script runs before the deferred module script below, so this genuinely
-         captures an error even if it happens during main.tsx's own module evaluation (an ES import
-         error there would otherwise never reach any listener registered inside main.tsx itself,
-         since imports are hoisted and evaluated before that file's own top-level code runs). Writes
-         to document.title only — read back via the already-supported getTitle() command. Remove
-         once the current E2E boot failure is root-caused. -->
-    <script>
-      window.addEventListener("error", function (e) {
-        document.title = "E2E_ERROR: " + e.message;
-      });
-      window.addEventListener("unhandledrejection", function (e) {
-        document.title = "E2E_UNHANDLED_REJECTION: " + String(e.reason);
-      });
-    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
