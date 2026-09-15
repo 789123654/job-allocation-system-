@@ -30,10 +30,6 @@ export const config: WebdriverIO.Config = {
       {
         appBinaryPath: "./src-tauri/target/debug/app",
         driverProvider: "embedded",
-        // Temporary — added 2026-09-15 to diagnose a CI-only startup crash (app exits code 101
-        // before the embedded WebDriver server comes up; @wdio/tauri-service's own error message
-        // names this option as the way to see the app's real stderr). Remove once root-caused.
-        captureBackendLogs: true,
       },
     ],
   ],
