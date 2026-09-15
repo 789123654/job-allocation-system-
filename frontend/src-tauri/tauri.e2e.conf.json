@@ -3,6 +3,16 @@
   "app": {
     "withGlobalTauri": true,
     "security": {
+      "csp": {
+        "default-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:8000 http://127.0.0.1:54321 https://*.supabase.co https://*.ingest.sentry.io",
+        "font-src": "https://fonts.gstatic.com",
+        "style-src": "'self' https://fonts.googleapis.com",
+        "img-src": "'self' asset: http://asset.localhost data:",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "frame-ancestors": "'none'"
+      },
       "capabilities": [
         "default",
         {
