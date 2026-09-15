@@ -276,6 +276,26 @@ jobs:
         # tauri.conf.json would otherwise also build .deb/.rpm/.AppImage bundles nobody uses here,
         # costing ~13 minutes of this job's runtime for no benefit.
         run: npx tauri build --debug --no-bundle --features e2e-testing --config src-tauri/tauri.e2e.conf.json
+      # Temporary diagnostic (2026-09-15) — @wdio/tauri-service's own captureBackendLogs writes to
+      # a log directory that's never uploaded as a CI artifact, and the app crashes too fast
+      # (~350ms) for that capture to show inline anyway. Run the raw binary directly first, under
+      # the same xvfb-run wrapper the service uses internally, so its real stderr lands straight in
+      # this job's own log instead of being lost. Remove once the crash is root-caused.
+      - name: Diagnostic — run the built binary directly to capture its real stderr
+        working-directory: frontend
+        run: |
+          sudo apt-get install -y xvfb
+          xvfb-run -a ./src-tauri/target/debug/app > /tmp/app-stdout.log 2>/tmp/app-stderr.log &
+          APP_PID=$!
+          sleep 3
+          if kill -0 $APP_PID 2>/dev/null; then
+            echo "App still running after 3s (PID $APP_PID) — killing for this diagnostic step."
+            kill $APP_PID
+          else
+            echo "App already exited within 3s — this is the crash."
+          fi
+          echo "--- stdout ---"; cat /tmp/app-stdout.log || true
+          echo "--- stderr ---"; cat /tmp/app-stderr.log || true
       - name: E2E tests (WebdriverIO, embedded WebDriver provider)
         working-directory: frontend
         run: npm run test:e2e
