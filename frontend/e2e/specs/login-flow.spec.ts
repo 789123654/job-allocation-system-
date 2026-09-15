@@ -21,7 +21,20 @@ describe("Login flow", () => {
     }
 
     const emailInput = await browser.$("#email");
-    await emailInput.waitForDisplayed();
+    try {
+      await emailInput.waitForDisplayed({ timeout: 15000 });
+    } catch (e) {
+      // Temporary — added 2026-09-15 to diagnose a boot failure (#root stays empty). Captured here,
+      // inside the test itself, because the outer mocha-level timeout (60s) tears down the
+      // WebDriver session before wdio.conf.ts's afterTest hook can query anything — every one of
+      // its diagnostic calls failed with "session not found" once that happened. A 15s explicit
+      // wait here fails fast, well under the mocha timeout, so the session is still alive to
+      // inspect. Remove once the boot failure is root-caused.
+      console.log("--- DIAGNOSTIC: page source at #email failure ---");
+      console.log(await browser.getPageSource());
+      console.log("--- DIAGNOSTIC: document.title (index.html's error listener) ---", await browser.getTitle());
+      throw e;
+    }
     await emailInput.setValue(email);
 
     const passwordInput = await browser.$("#password");
