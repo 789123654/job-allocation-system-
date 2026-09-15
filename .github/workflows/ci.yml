@@ -262,9 +262,14 @@ jobs:
       # guessed) — webkit2gtk-driver deliberately omitted: that's only needed for the 'external'
       # driverProvider; the embedded provider (tauri-plugin-wdio-webdriver) needs no driver binary.
       - name: Install Linux Tauri build prerequisites
+        # libgl1-mesa-dri: Xvfb has no real GPU, so WebKitGTK's default hardware-accelerated (EGL/
+        # DRI3) rendering fails outright ("libEGL warning: DRI3 error: Could not get DRI3 device"),
+        # leaving the webview's JS bridge never ready. This is Mesa's software rasterizer (llvmpipe),
+        # paired with the LIBGL_ALWAYS_SOFTWARE/GALLIUM_DRIVER env vars on the E2E step below —
+        # verified against a matching real-world case (identical DRI3 error), not guessed.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xvfb
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xvfb libgl1-mesa-dri
       - name: Build the Tauri app with the E2E-only WebDriver feature
         working-directory: frontend
         # --features e2e-testing (Cargo.toml) links in tauri-plugin-wdio-webdriver; --config
@@ -283,6 +288,12 @@ jobs:
       # WDIO process under xvfb-run instead (diagnostic step removed, its job is done).
       - name: E2E tests (WebdriverIO, embedded WebDriver provider)
         working-directory: frontend
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+          WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          NO_AT_BRIDGE: "1"
         run: xvfb-run -a npm run test:e2e
       # Temporary diagnostic (2026-09-15) — the startup crash is fixed, but a second, different
       # failure appeared (core.invoke never becomes ready, #email never renders). captureBackendLogs
