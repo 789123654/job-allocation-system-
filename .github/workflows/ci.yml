@@ -280,6 +280,21 @@ jobs:
         # the raw binary at target/debug/app (wdio.conf.ts); the default "targets": "all" in
         # tauri.conf.json would otherwise also build .deb/.rpm/.AppImage bundles nobody uses here,
         # costing ~13 minutes of this job's runtime for no benefit.
+        #
+        # Root-caused 2026-09-15 (third failure layer, after the startup crash and the WebKitGTK/
+        # DRI3 rendering fix): src/config/env.ts's requireEnv() throws at module-import time if
+        # VITE_SUPABASE_URL/VITE_SUPABASE_ANON_KEY/VITE_API_BASE_URL are unset — which they were,
+        # since `vite build`'s default "production" mode doesn't load frontend/.env.test, and this
+        # job never set them either. That crashed main.tsx before createRoot().render() ever ran,
+        # leaving #root permanently empty (confirmed via wdio.conf.ts's own diagnostic: readyState
+        # complete, __TAURI_INTERNALS__ present, but zero rendered content). Fixed by pointing the
+        # build at the same real local Supabase + FastAPI stack the rest of this job already uses
+        # (SUPABASE_URL/E2E_ANON_KEY are already real values exported earlier in this job), not the
+        # placeholder project in .env.test — this build needs to actually log in for real.
+        env:
+          VITE_SUPABASE_URL: ${{ env.SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ env.E2E_ANON_KEY }}
+          VITE_API_BASE_URL: http://localhost:8000
         run: npx tauri build --debug --no-bundle --features e2e-testing --config src-tauri/tauri.e2e.conf.json
       # Root-caused 2026-09-15: the app is a WebKitGTK GUI process and needs a real X display.
       # A prior diagnostic step ran the raw binary directly under xvfb-run and it stayed up fine —
