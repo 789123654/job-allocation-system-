@@ -53,7 +53,13 @@ export const config: WebdriverIO.Config = {
   reporters: ["spec"],
   mochaOpts: {
     ui: "bdd",
-    timeout: 60000,
+    // Temporary bump — added 2026-09-15 after diagnosing that each WebDriver command in this
+    // environment carries ~5-10s of overhead (tauri-service's per-command health check, still
+    // present even with withGlobalTauri enabled), which was exhausting the old 60s budget across a
+    // handful of routine commands before any in-spec diagnostic try/catch could finish printing —
+    // not because any single step was actually stuck. Revisit once the per-command overhead itself
+    // is root-caused (separate from this test's real pass/fail signal).
+    timeout: 180000,
   },
 
   // Temporary — added 2026-09-15 to diagnose why the webview's Tauri JS bridge (core.invoke) never
