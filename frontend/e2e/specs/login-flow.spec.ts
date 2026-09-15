@@ -25,7 +25,9 @@ describe("Login flow", () => {
     await emailInput.setValue(email);
 
     const passwordInput = await browser.$("#password");
-    await passwordInput.setValue(password);
+    // NEGATIVE CONTROL (rule 10.1) — deliberately wrong password, temporary, revert immediately
+    // after confirming this makes the E2E job fail red in CI.
+    await passwordInput.setValue(password + "-wrong");
 
     const submitButton = await browser.$('button[type="submit"]');
     await submitButton.click();
