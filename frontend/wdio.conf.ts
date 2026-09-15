@@ -82,5 +82,10 @@ export const config: WebdriverIO.Config = {
     } catch (e) {
       console.log("--- DIAGNOSTIC: getLogs('browser') not supported by this driver ---", e);
     }
+    try {
+      console.log("--- DIAGNOSTIC: document.title (index.html's error listener writes here) ---", await browser.getTitle());
+    } catch (e) {
+      console.log("--- DIAGNOSTIC: failed to read title ---", e);
+    }
   },
 };
