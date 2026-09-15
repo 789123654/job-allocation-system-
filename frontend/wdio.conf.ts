@@ -8,6 +8,8 @@
 // `cargo tauri build --debug --features e2e-testing --config src-tauri/tauri.e2e.conf.json` step
 // — never a release build, so the wdio-webdriver capability this depends on is only ever present
 // here, not in anything actually distributed (Cargo.toml's own comment explains why).
+import { browser } from "@wdio/globals";
+
 export const config: WebdriverIO.Config = {
   runner: "local",
   specs: ["./e2e/specs/**/*.spec.ts"],
@@ -52,5 +54,27 @@ export const config: WebdriverIO.Config = {
   mochaOpts: {
     ui: "bdd",
     timeout: 60000,
+  },
+
+  // Temporary — added 2026-09-15 to diagnose why the webview's Tauri JS bridge (core.invoke) never
+  // becomes ready (#email never renders) even after fixing the earlier startup crash and the
+  // WebKitGTK/DRI3 software-rendering issue. Prints straight to this job's own stdout (unlike
+  // captureBackendLogs, which only flushes to a file on process exit and stayed empty once the
+  // app stopped crashing). Remove once this is root-caused.
+  afterTest: async (_test, _context, { passed }) => {
+    if (passed) return;
+    try {
+      console.log("--- DIAGNOSTIC: page source at failure ---");
+      console.log(await browser.getPageSource());
+      const bridge = await browser.execute(() => ({
+        hasTauriInternals: typeof (window as any).__TAURI_INTERNALS__ !== "undefined",
+        hasTauri: typeof (window as any).__TAURI__ !== "undefined",
+        readyState: document.readyState,
+        bodyChildCount: document.body?.children.length ?? -1,
+      }));
+      console.log("--- DIAGNOSTIC: bridge/document state ---", JSON.stringify(bridge));
+    } catch (e) {
+      console.log("--- DIAGNOSTIC: failed to capture page state ---", e);
+    }
   },
 };
