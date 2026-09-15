@@ -149,13 +149,13 @@ def test_list_tasks_is_one_query_regardless_of_row_count(session: Session) -> No
 
 
 def test_list_employees_is_one_query_regardless_of_row_count(session: Session) -> None:
-    _owner(session)
+    owner = _owner(session)
     _seed_employees(session, _FIRM_ID, 3)
     with count_queries(session) as few:
-        crud.list_employees(session, 0, 50)
+        crud.list_employees(session, owner, 0, 50)
     _seed_employees(session, _FIRM_ID, 20)
     with count_queries(session) as many:
-        crud.list_employees(session, 0, 50)
+        crud.list_employees(session, owner, 0, 50)
     assert len(few) == 1
     assert len(many) == 1
 
@@ -164,10 +164,10 @@ def test_list_job_types_is_one_query_regardless_of_row_count(session: Session) -
     owner = _owner(session)
     _seed_job_types(session, owner, 3)
     with count_queries(session) as few:
-        crud.list_job_types(session, 0, 50)
+        crud.list_job_types(session, owner, 0, 50)
     _seed_job_types(session, owner, 20)
     with count_queries(session) as many:
-        crud.list_job_types(session, 0, 50)
+        crud.list_job_types(session, owner, 0, 50)
     assert len(few) == 1
     assert len(many) == 1
 

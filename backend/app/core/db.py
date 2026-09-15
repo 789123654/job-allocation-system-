@@ -1,4 +1,5 @@
 from collections.abc import Callable, Generator
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -10,6 +11,16 @@ from app.models import Profile
 
 # Migrations (Alembic) own schema creation, not create_all() (fastapi/sql-databases.md).
 engine = create_engine(str(settings.DATABASE_URL))
+
+
+def as_aware_utc(value: datetime) -> datetime:
+    """Postgres' `timestamptz` round-trips as tz-aware via psycopg, but don't trust that blindly —
+    SQLite (this project's own test backend) drops tzinfo on round-trip, and a naive-vs-aware
+    comparison raises a raw `TypeError`, not a clean 500. Shared here (moved from crud.py's
+    formerly-private `_as_aware_utc`, code-review finding #13's own fix) since idempotency.py needs
+    the identical guard for the same reason — both modules already import from this one.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def get_session() -> Generator[Session]:

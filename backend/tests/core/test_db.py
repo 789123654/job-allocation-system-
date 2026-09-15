@@ -18,11 +18,13 @@ _APP_DIR = Path(__file__).resolve().parents[2] / "app"
 _EXPECTED_ROLLBACK_SITES = {
     # The one place this pattern is allowed to be written from scratch.
     "core/db.py": 1,
-    # Both below: raise/return immediately after rollback, no further session read or query — so
-    # neither one is exposed to the expired-attribute bug commit_or_recover exists to prevent, and
-    # neither gains anything from routing through it.
-    "crud.py": 1,  # create_job_type — rolls back, then raises DuplicateJobTypeNameError from exc
-    "api/routes/employees.py": 1,  # reset-password — rolls back, returns an already-captured str
+    # Both below: raise immediately after rollback, no further session read or query — so neither
+    # is exposed to the expired-attribute bug commit_or_recover exists to prevent, and neither
+    # gains anything from routing through it. (reset-password's former hand-rolled rollback here
+    # is gone — that site now goes through commit_or_recover, 2026-09-14 code review fix.)
+    "crud.py": 2,  # create_job_type (raises DuplicateJobTypeNameError) +
+    # create_employee's compensating-delete path (rolls back, best-effort deletes the now-orphaned
+    # Supabase Auth user, then re-raises — 2026-09-14 code review fix)
 }
 
 

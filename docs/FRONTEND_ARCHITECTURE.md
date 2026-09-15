@@ -199,15 +199,30 @@ at up front.
   Verification section of the Phase 4 Step 1 plan already named (log in, restart the app, confirm
   the session survives via real Windows DPAPI) — a JS mock test would add coverage without
   touching the actual risk.
-- **The E2E tier itself was never installed** — confirmed directly (`package.json` has no
-  `webdriverio`/`@wdio/tauri-service` dependency, no `wdio.conf.*` anywhere in `frontend/`), despite
-  being "decided" above. Only the Unit/Integration tier (Vitest + Testing Library + MSW) exists so
-  far. Deliberately deferred, same reasoning as the Phase 4 Step 1 plan's own choice to skip a
-  Tauri build/lint CI job: E2E needs an OS-matched runner and a real packaged app to drive, real
-  infra cost for a slice that was about wiring, not packaging — revisit in Phase 6 (Distribution),
-  or sooner if a real login/session-persistence regression ships that only an end-to-end run would
-  have caught (the Verification section's manual walkthrough is the only thing covering that path
-  today).
+- **The E2E tier — installed 2026-09-15 (Phase 6 Step 1), CI-green and confirmed.**
+  `@wdio/tauri-service` + `@wdio/cli`/`@wdio/local-runner`/`@wdio/mocha-framework`/`@wdio/globals`
+  (frontend devDependencies) and `tauri-plugin-wdio-webdriver` (Rust, embedded WebDriver provider,
+  cross-platform) now exist, plus `frontend/wdio.conf.ts` and one harness-proving spec,
+  `frontend/e2e/specs/login-flow.spec.ts` — driving the real packaged app through a real login
+  against `.github/workflows/ci.yml`'s existing real local Supabase + FastAPI `e2e` job stack, not
+  MSW. Deliberately scoped to proving the harness only (see `docs/CODE_REVIEW_FINDINGS_2026-09-14.md`
+  finding #12, the on-record motivating case for this tier, and the plan's own "explicit checkpoint" —
+  further business-logic E2E coverage is a separate next slice, not bundled into this one).
+  Getting the boot sequence green under headless Linux CI (WebKitGTK + Xvfb + Tauri's WebDriver
+  bridge) took six distinct fixes, most notably a CSP `connect-src` that didn't allowlist the CI
+  job's local Supabase origin — masked by `use-login.ts`'s deliberate generic "Invalid email or
+  password" message (§ below on that hook), which made a network-layer block look identical to a
+  credentials error until the actual page source was inspected. A negative control (2026-09-15) —
+  deliberately wrong credentials pushed to this same CI job — confirmed the harness fails red for a
+  real regression (`h1=Dashboard` timeout, not a hang or infra flake) before this was trusted.
+  **Security note**: `tauri-plugin-wdio-webdriver` stands up a live, remotely-drivable WebDriver
+  server — per its own README ("never include it in production builds") and owasp-tcasvs V2.1.3
+  ("production builds exclude... test utilities"), it's an optional Cargo dependency behind a new
+  `e2e-testing` feature (`src-tauri/Cargo.toml`), never enabled by the real release build command,
+  with its capability/permission (`wdio-webdriver:default`) inlined only in `tauri.e2e.conf.json` —
+  confirmed empirically that a standalone file under `capabilities/` would have broken the default
+  build's own permission validation regardless of `tauri.conf.json`'s capabilities allowlist, so it
+  is deliberately not a separate file there.
 
 ## 10. Tooling & Linting
 
@@ -222,6 +237,17 @@ Kebab-case file naming, enforced via the same `check-file` ESLint plugin the sou
 - ~~**Component library / styling**~~ — **Decided 2026-09-03: Tailwind + Radix UI, shadcn/ui pattern** (see §8).
 - ~~**Playwright vs. `tauri-driver` for E2E**~~ — **Decided 2026-09-03: WebdriverIO + `@wdio/tauri-service`** (see §9, `tauri-official/chapters/testing.md`). Neither original option was actually Tauri's recommendation.
 - ~~**Employee performance metric**~~ — **corrected 2026-09-03, this line was stale**: `ARCHITECTURE.md` §13 already decided this (out of scope for Phase 1, revisit in Phase 2) before this section was last touched, and the two docs had drifted out of sync. No frontend screen here was ever blocked by it regardless — whichever definition eventually lands, it's a data column and a dashboard tile, not a structural decision.
+- **Form error messages aren't linked to their inputs for assistive tech — deferred to Phase 2.**
+  Found 2026-09-15 while fixing code-review finding #17 (billing fields validate but never render
+  their error): every `errors.X && <p>...</p>` error render across every form in this codebase
+  (`owner-task-review-page.tsx`, `issue-resolution-page.tsx`, and by the same shape presumably every
+  other form) is a plain, unlinked `<p>` — no `aria-invalid` on the input, no `aria-describedby`
+  pointing at the error's `id`, no `role="alert"` on the error itself. `frontend-a11y` skill (its own
+  Before-Submitting checklist) requires all three. Impact: a sighted user sees the error fine; a
+  screen-reader user gets no signal an error appeared at all. Not fixed as part of #17 — retrofitting
+  only the 4 billing fields would leave the same file inconsistent (some inputs wired, most not), and
+  no code-review finding named the gap itself, only its two symptoms. Revisit in Phase 2 as one pass
+  across every form component, not per-field patches.
 
 ---
 

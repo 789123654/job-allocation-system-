@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useCreateEmployee } from "@/features/employees/api/create-employee";
+import { SecretRevealPanel } from "@/features/employees/components/secret-reveal-panel";
 import { employeeCreateSchema, type EmployeeCreateInput } from "@/features/employees/types";
 import { ApiError } from "@/lib/api-client";
 
@@ -56,21 +57,11 @@ export function CreateEmployeeDialog() {
       <DialogContent>
         <DialogTitle>{generatedPassword ? "Employee added" : "Add employee"}</DialogTitle>
         {generatedPassword ? (
-          <div className="flex flex-col gap-4">
-            <p className="text-sm text-(--color-ledger-text-muted)">
-              Share this temporary password with the employee directly — it is shown only this
-              once and cannot be retrieved again.
-            </p>
-            <Input
-              readOnly
-              value={generatedPassword}
-              onFocus={(e) => e.currentTarget.select()}
-              className="font-(family-name:--font-mono)"
-            />
-            <Button type="button" onClick={() => onOpenChange(false)}>
-              Done
-            </Button>
-          </div>
+          <SecretRevealPanel
+            recipientLabel="the employee"
+            value={generatedPassword}
+            onDone={() => onOpenChange(false)}
+          />
         ) : (
           <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
             <div>

@@ -20,6 +20,7 @@
       }
     ],
     "security": {
+      "capabilities": ["default"],
       "csp": {
         "default-src": "'self'",
         "connect-src": "'self' ipc: http://ipc.localhost http://localhost:8000 https://*.supabase.co https://*.ingest.sentry.io",

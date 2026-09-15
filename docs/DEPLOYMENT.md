@@ -377,15 +377,19 @@ just doesn't work" is the only symptom without an explicit check.
 ## 13. Connecting the Real Supabase Project — Runbook
 
 Written 2026-09-10, before actually doing this — a plan to execute next session, not a record of
-something already done. §11's "doesn't exist yet" framing is now stale: a real project ref
-(`xyhzpzxcfvefrramidwz`) was found embedded in a misconfigured local MCP server entry the same session
-this runbook was written — confirm this is actually the intended pilot-firm project (not a stale/test
-one) as this runbook's first step, rather than assuming.
+something already done. §11's "doesn't exist yet" framing is now stale: a project ref was found
+embedded in a misconfigured local MCP server entry the same session this runbook was written —
+confirm this is actually the intended pilot-firm project (not a stale/test one) as this runbook's
+first step, rather than assuming. **Scrubbed from this doc 2026-09-14** (repo went public that day):
+the ref that was here was checked and is dead (`DNS_PROBE_FINISHED_NXDOMAIN`), so it was never the
+real project — but a real ref shouldn't be committed to a public repo regardless, hence a placeholder
+below instead of the actual value.
 
 **Ordered steps:**
 
-1. **Confirm the project.** Verify `xyhzpzxcfvefrramidwz` (or whichever project ref is current) is the
-   real, intended one before touching it with a migration.
+1. **Confirm the project.** Verify `<project-ref>` (whichever project ref is actually current — get it
+   from the Supabase dashboard, don't assume one found lying around elsewhere) is the real, intended
+   one before touching it with a migration.
 2. **Get `MIGRATIONS_DATABASE_URL`** from that project's dashboard — Project Settings → Database →
    Connection string, the `postgres` superuser role (same shape CI's disposable container uses, §4).
    Handed over as an env var, never committed to the repo — same handling as every other secret here.
@@ -404,7 +408,15 @@ one) as this runbook's first step, rather than assuming.
    `app_metadata.role`/`firm_id`/`must_change_password` never reach the JWT and every
    `get_current_profile`/`require_owner`/`require_password_set` gate in `backend/app/api/deps.py`
    silently breaks — this is the single most load-bearing dashboard setting in this whole runbook, more
-   so than any item already listed in §11.
+   so than any item already listed in §11. A 5th, added 2026-09-14 after code review finding #11:
+   **confirm Authentication → Sign In / Providers → "Allow new users to sign up" stays disabled** —
+   `supabase/config.toml`'s `enable_signup = false` comment already claimed this runbook required it,
+   but nothing here ever actually did until now. This is now defense-in-depth rather than the only
+   thing standing in the way: `handle_new_user()` (migration `c0f23284b2fd`) reads `firm_id`/`role`
+   from `app_metadata`, which self-signup can never set regardless of this toggle — but leaving public
+   signup enabled with no invite/approval flow in front of it is still its own problem (unvetted
+   accounts, one firm per deployment assumption broken), so verify it explicitly, don't rely on the
+   structural fix alone to make the toggle's state not matter.
 5. **Decide the breached-password-protection gap explicitly**, don't silently skip it — `ARCHITECTURE.md`
    §14 already named this: accept the ASVS 6.2.4/6.2.12 gap for the free-tier pilot, revisit by flipping
    Supabase's native leaked-password toggle once/if the project moves to the Pro plan.

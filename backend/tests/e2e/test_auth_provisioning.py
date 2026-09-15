@@ -128,7 +128,11 @@ def test_admin_provisioned_user_gets_a_working_real_token(
             "email": email,
             "password": _PASSWORD,
             "email_confirm": True,
-            "user_metadata": {"firm_id": str(firm), "role": "owner", "full_name": "Owner"},
+            # app_metadata, not user_metadata — matches crud.create_employee's real payload shape
+            # since the trigger fix (c0f23284b2fd, code review finding #11) reads firm_id/role
+            # from app_metadata; this test's own point is proving that real chain end to end.
+            "app_metadata": {"firm_id": str(firm), "role": "owner"},
+            "user_metadata": {"full_name": "Owner"},
         }
     )
     user_id = uuid.UUID(created.user.id)

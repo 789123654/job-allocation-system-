@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# Found 2026-09-15 during a rapid string of debugging pushes: without this, every push spawns a
+# brand-new, fully independent run instead of superseding the previous one for the same branch/PR —
+# 6 pushes in quick succession piled up 5+ concurrent runs (6 jobs each) competing for the account's
+# limited concurrent-job slots, so later runs' jobs sat queued behind earlier, now-irrelevant ones.
+# Standard GitHub Actions practice, not just today's fix.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Read-only by default (DEPLOYMENT.md §10 / GitHub_Actions_Security_Cheat_Sheet.md) — no job here
 # needs to write to the repo, so nothing grants more.
 permissions:
@@ -104,6 +113,8 @@ jobs:
       # business-logic-dense modules every real bug this project has shipped has lived in), not the
       # whole app — thin routing/settings modules aren't where a surviving mutant would matter.
       # `use_git_change_detection` (pyproject.toml) keeps repeat runs fast without a persisted cache.
+      # Re-added 2026-09-14 (was pulled out the same day over Actions-minutes cost) — the repo is
+      # now public, so Actions minutes are unlimited/free and that cost reason no longer applies.
       - name: Mutation testing (mutmut) — advisory, does not fail the build
         continue-on-error: true
         run: |
@@ -189,7 +200,14 @@ jobs:
               'email': email,
               'password': password,
               'email_confirm': True,
-              'user_metadata': {'firm_id': firm_id, 'role': 'owner', 'full_name': 'Contract Owner'},
+              # app_metadata, not user_metadata — matches crud.create_employee's real payload
+              # shape since the trigger fix (c0f23284b2fd, code review finding #11). Missing here
+              # originally: a 4th call site the initial fix's sweep missed, caught only when this
+              # exact step started 500ing in CI (no profile ever got created, so the later login
+              # step's JWT hook found no row and failed) — found via a repo-wide re-grep for
+              # 'user_metadata.*firm_id' after the first three call sites were already fixed.
+              'app_metadata': {'firm_id': firm_id, 'role': 'owner'},
+              'user_metadata': {'full_name': 'Contract Owner'},
           })
           user_id = str(created.user.id)
           conn.execute('UPDATE profiles SET must_change_password = false WHERE id = %s', (user_id,))
@@ -209,9 +227,15 @@ jobs:
           # throwaway per-run local stack, but explicit, not relied on any unconfirmed automatic
           # runner behavior).
           print('::add-mask::' + token)
+          # Same masking for the raw password — the Phase 6 E2E login-flow spec logs in through the
+          # real UI with this same seeded account (not a second insert), so it needs the actual
+          # credential, not just the bearer token the contract test uses.
+          print('::add-mask::' + password)
 
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write('CONTRACT_TEST_TOKEN=' + token + '\n')
+              f.write('E2E_OWNER_EMAIL=' + email + '\n')
+              f.write('E2E_OWNER_PASSWORD=' + password + '\n')
           "
       - name: Start the FastAPI backend against the local Supabase stack
         run: |
@@ -234,6 +258,67 @@ jobs:
         env:
           CONTRACT_API_BASE_URL: http://127.0.0.1:8000
         run: npx vitest run --config vitest.contract.config.ts
+      # Phase 6 Step 1 (docs/CODING_STRUCTURE.md §4) — WebdriverIO + @wdio/tauri-service E2E
+      # harness, extending this job rather than adding a new one: it already has the real local
+      # Supabase + FastAPI stack this needs, and staying on ubuntu-latest sidesteps an unverified
+      # question a new windows-latest job would raise (GitHub-hosted Windows runners' Docker
+      # support for the Linux containers `supabase start` needs).
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      # Exact package list per v2.tauri.app/start/prerequisites/ (fetched live this session, not
+      # guessed) — webkit2gtk-driver deliberately omitted: that's only needed for the 'external'
+      # driverProvider; the embedded provider (tauri-plugin-wdio-webdriver) needs no driver binary.
+      - name: Install Linux Tauri build prerequisites
+        # libgl1-mesa-dri: Xvfb has no real GPU, so WebKitGTK's default hardware-accelerated (EGL/
+        # DRI3) rendering fails outright ("libEGL warning: DRI3 error: Could not get DRI3 device"),
+        # leaving the webview's JS bridge never ready. This is Mesa's software rasterizer (llvmpipe),
+        # paired with the LIBGL_ALWAYS_SOFTWARE/GALLIUM_DRIVER env vars on the E2E step below —
+        # verified against a matching real-world case (identical DRI3 error), not guessed.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xvfb libgl1-mesa-dri
+      - name: Build the Tauri app with the E2E-only WebDriver feature
+        working-directory: frontend
+        # --features e2e-testing (Cargo.toml) links in tauri-plugin-wdio-webdriver; --config
+        # merges tauri.e2e.conf.json, which supplies the matching e2e-testing capability entry on
+        # top of tauri.conf.json's own ["default"]-only allowlist (build-manifest bookkeeping only
+        # — Cargo.toml's own comment on this dependency is the real production-exclusion control).
+        # Neither is ever passed by the real release build command. --no-bundle: WDIO only needs
+        # the raw binary at target/debug/app (wdio.conf.ts); the default "targets": "all" in
+        # tauri.conf.json would otherwise also build .deb/.rpm/.AppImage bundles nobody uses here,
+        # costing ~13 minutes of this job's runtime for no benefit.
+        #
+        # Root-caused 2026-09-15 (third failure layer, after the startup crash and the WebKitGTK/
+        # DRI3 rendering fix): src/config/env.ts's requireEnv() throws at module-import time if
+        # VITE_SUPABASE_URL/VITE_SUPABASE_ANON_KEY/VITE_API_BASE_URL are unset — which they were,
+        # since `vite build`'s default "production" mode doesn't load frontend/.env.test, and this
+        # job never set them either. That crashed main.tsx before createRoot().render() ever ran,
+        # leaving #root permanently empty (confirmed via wdio.conf.ts's own diagnostic: readyState
+        # complete, __TAURI_INTERNALS__ present, but zero rendered content). Fixed by pointing the
+        # build at the same real local Supabase + FastAPI stack the rest of this job already uses
+        # (SUPABASE_URL/E2E_ANON_KEY are already real values exported earlier in this job), not the
+        # placeholder project in .env.test — this build needs to actually log in for real.
+        env:
+          VITE_SUPABASE_URL: ${{ env.SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ env.E2E_ANON_KEY }}
+          VITE_API_BASE_URL: http://localhost:8000
+        run: npx tauri build --debug --no-bundle --features e2e-testing --config src-tauri/tauri.e2e.conf.json
+      # Root-caused 2026-09-15: the app is a WebKitGTK GUI process and needs a real X display.
+      # A prior diagnostic step ran the raw binary directly under xvfb-run and it stayed up fine —
+      # but this step, which lets @wdio/tauri-service spawn the app itself, had no xvfb-run wrapper
+      # at all, so the app died in ~120ms (code 101) with no DISPLAY. Fixed by running the whole
+      # WDIO process under xvfb-run instead (diagnostic step removed, its job is done).
+      - name: E2E tests (WebdriverIO, embedded WebDriver provider)
+        working-directory: frontend
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+          WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          NO_AT_BRIDGE: "1"
+        run: xvfb-run -a npm run test:e2e
 
   frontend:
     runs-on: ubuntu-latest
@@ -264,11 +349,25 @@ jobs:
       # every PR isn't a full run from scratch; restore-keys falls back to main's last report for a
       # fresh branch. `thresholds.break: null` already tells Stryker itself never to exit non-zero on
       # score; continue-on-error is the second layer, covering a genuine tool/runtime error too.
+      # Re-added 2026-09-14 (was pulled out the same day over Actions-minutes cost) — the repo is
+      # now public, so Actions minutes are unlimited/free and that cost reason no longer applies.
+      #
+      # Cache key bumped to v2-2026-09-15 (2026-09-15): the 2026-09-14 incremental report was
+      # confirmed stale — session-store.tsx's cache-clear mutant was reported "Survived" even
+      # though directly reproducing the mutation (removing queryClient.clear(), rerunning the real
+      # test) showed the existing test catches it immediately. Root cause per Stryker's own docs
+      # and a matching upstream report (stryker-mutator/stryker-js incremental docs;
+      # ddteeter/agentic-guardrails-scaffolding#67, "stryker analyzer reuses a cached Survived
+      # after the test that kills it is added"): incremental mode's cache invalidation checks
+      # production-file changes, not test-file changes, so a mutant already marked Survived can
+      # stay stale even after a new/stronger test is added. Changing the key (rather than passing
+      # --force permanently) makes this one run measure everything fresh and then start a new,
+      # correctly-invalidating cache under the new key going forward.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: frontend/reports/stryker-incremental.json
-          key: stryker-incremental-${{ github.ref_name }}
-          restore-keys: stryker-incremental-main
+          key: stryker-incremental-v2-2026-09-15-${{ github.ref_name }}
+          restore-keys: stryker-incremental-v2-2026-09-15-main
       - name: Mutation testing (Stryker) — advisory, does not fail the build
         continue-on-error: true
         run: npm run test:mutation

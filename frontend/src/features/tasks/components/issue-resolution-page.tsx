@@ -55,6 +55,19 @@ export function IssueResolutionPage({
   if (issueError || !issue) {
     return <p className="text-sm text-(--color-ledger-danger)">Could not load this issue.</p>;
   }
+  // Code-review finding #16 (2026-09-15): every entry point (Issues Raised panel) links here
+  // regardless of status, but resolve_issue only succeeds for "open" (crud.py, row-locked). Same
+  // gap as owner-task-review-page.tsx's own pre-check, never propagated to this sibling page when
+  // that one was added. Backend already rejects a stale resolve with 409 either way (defense in
+  // depth intact, Business_Logic_Security_Cheat_Sheet.md's "model state on the server" — verified
+  // resolve_issue already does this); this is a UX pre-check, not a new security boundary.
+  if (issue.status !== "open") {
+    return (
+      <p className="text-sm text-(--color-ledger-danger)">
+        This issue isn't awaiting resolution right now.
+      </p>
+    );
+  }
 
   async function onSubmit(input: IssueResolveInput) {
     if (!issueId) return;

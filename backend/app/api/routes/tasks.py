@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 from app import crud
 from app.api.deps import ActiveProfileDep, IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.core.idempotency import with_idempotency
-from app.core.validation import NoNulStr
+from app.core.validation import LimitQuery, NoNulStr, OffsetQuery
 from app.models import Issue, Profile, Task
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -66,26 +66,10 @@ class TaskOut(BaseModel):
 
     @classmethod
     def from_task(cls, task: Task) -> "TaskOut":
-        return cls(
-            id=task.id,
-            job_type_id=task.job_type_id,
-            task_type=task.task_type,
-            parent_task_id=task.parent_task_id,
-            title=task.title,
-            description=task.description,
-            assigned_to=task.assigned_to,
-            deadline=task.deadline,
-            status=task.status,
-            created_by=task.created_by,
-            created_at=task.created_at,
-            updated_at=task.updated_at,
-            last_reassignment_notes=task.last_reassignment_notes,
-            last_reassignment_remaining_work=task.last_reassignment_remaining_work,
-            last_reassignment_source=task.last_reassignment_source,
-            last_reassignment_at=task.last_reassignment_at,
-            billing_amount=task.billing_amount,
-            billing_recipient=task.billing_recipient,
-        )
+        # Field names match Task 1:1 — code-review finding #7 (2026-09-14): hand-listing every
+        # field here is exactly the duplication-of-truth the finding warns about (a field added to
+        # Task later and missed here wouldn't be caught by any test written before that omission).
+        return cls.model_validate(task, from_attributes=True)
 
 
 class TaskDeadlineUpdate(BaseModel):
@@ -163,19 +147,8 @@ class IssueOut(BaseModel):
 
     @classmethod
     def from_issue(cls, issue: Issue) -> "IssueOut":
-        return cls(
-            id=issue.id,
-            task_id=issue.task_id,
-            raised_by=issue.raised_by,
-            description=issue.description,
-            status=issue.status,
-            resolution_type=issue.resolution_type,
-            resolution_notes=issue.resolution_notes,
-            remaining_work_description=issue.remaining_work_description,
-            resolved_by=issue.resolved_by,
-            resolved_at=issue.resolved_at,
-            created_at=issue.created_at,
-        )
+        # Field names match Issue 1:1 — same reasoning as TaskOut.from_task above.
+        return cls.model_validate(issue, from_attributes=True)
 
 
 # response_model isn't declared on the two Idempotency-Key routes below — they return a
@@ -225,13 +198,8 @@ def create_task(
 def list_tasks(
     actor: ActiveProfileDep,
     session: SessionDep,
-    # le bound: Input_Validation_Cheat_Sheet.md's "minimum and maximum value range check for
-    # numerical parameters" — without it, Postgres's own bigint OFFSET clause overflows on a
-    # large-enough value (max 9223372036854775807) and crashes with a raw 500 instead of a clean
-    # 422. 1,000,000 is a generous ceiling for this project's actual scale (found by Schemathesis,
-    # 2026-09-08, docs/SECURITY_AUDIT_CHECKLIST.md — same fix applied to every list endpoint).
-    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: OffsetQuery = 0,
+    limit: LimitQuery = 20,
     status_filter: Annotated[NoNulStr | None, Query(alias="status")] = None,
     assigned_to: Annotated[UUID | None, Query()] = None,
     job_type_id: Annotated[UUID | None, Query()] = None,

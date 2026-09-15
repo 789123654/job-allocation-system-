@@ -57,6 +57,21 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 
   if (!response.ok) {
     const problem = (await response.json().catch(() => null)) as ProblemDetails | null;
+    if (response.status === 401) {
+      // Code-review finding #19 (2026-09-15): a cryptographically valid token FastAPI still
+      // rejects (deactivated profile, deleted firm, malformed sub — api/deps.py's
+      // get_current_profile) looks identical to an expired one from here, but Supabase's own
+      // autoRefreshToken only handles the latter. Session_Management_Cheat_Sheet.md: "the web
+      // application must take active actions to invalidate the session on both sides, client and
+      // server" — the server side already happened; signOut() closes the client side through the
+      // same pathway a real logout uses, so it's covered by machinery that already exists and is
+      // already tested rather than a second, parallel one: session-store.tsx's
+      // onAuthStateChange clears the query cache (ASVS 5 §14.3.1) and router.tsx's `!session`
+      // guard redirects to /login (ASVS 5 §7.4.2 — sessions terminate when an account is
+      // disabled) — no new redirect/toast mechanism needed. Fire-and-forget: the ApiError below
+      // still surfaces to whichever call site triggered this, signOut() need not block it.
+      void supabase.auth.signOut();
+    }
     throw new ApiError(response.status, problem);
   }
   if (response.status === 204) {
