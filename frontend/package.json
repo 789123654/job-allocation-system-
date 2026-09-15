@@ -26,6 +26,9 @@
       "prettier --write"
     ]
   },
+  "overrides": {
+    "qs": "6.16.0"
+  },
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",
     "@radix-ui/react-dialog": "^1.1.23",
