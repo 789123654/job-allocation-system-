@@ -1,0 +1,18 @@
+# Extends (not replaces) gitleaks' built-in default ruleset — verified directly against
+# gitleaks' own README (extend.useDefault), not assumed. Without this file, gitleaks-action falls
+# back to its bundled default config with no allowlist at all, per the CI security job's own log
+# ("no gitleaks config found in path .gitleaks.toml, using default gitleaks config").
+[extend]
+useDefault = true
+
+# Real false positive, confirmed 2026-09-15: gitleaks' generic-api-key rule matched
+# ".github/workflows/ci.yml"'s Stryker actions/cache `restore-keys:` value
+# (stryker-incremental-v2-2026-09-15-main) — a cache key string, not a secret. Scoped narrowly to
+# that exact literal and that one file, not a blanket disable of generic-api-key repo-wide, so a
+# genuine future leak in the same file (or a different generic-api-key match elsewhere) still gets
+# caught.
+[[allowlists]]
+description = "ci.yml Stryker cache restore-keys literal — not a secret, false-positive generic-api-key match"
+paths = ['''\.github/workflows/ci\.yml''']
+regexTarget = "match"
+regexes = ['''stryker-incremental-v2-2026-09-15-main''']
