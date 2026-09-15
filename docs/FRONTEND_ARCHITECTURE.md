@@ -199,7 +199,7 @@ at up front.
   Verification section of the Phase 4 Step 1 plan already named (log in, restart the app, confirm
   the session survives via real Windows DPAPI) — a JS mock test would add coverage without
   touching the actual risk.
-- **The E2E tier — installed 2026-09-15 (Phase 6 Step 1), CI verification in progress.**
+- **The E2E tier — installed 2026-09-15 (Phase 6 Step 1), CI-green and confirmed.**
   `@wdio/tauri-service` + `@wdio/cli`/`@wdio/local-runner`/`@wdio/mocha-framework`/`@wdio/globals`
   (frontend devDependencies) and `tauri-plugin-wdio-webdriver` (Rust, embedded WebDriver provider,
   cross-platform) now exist, plus `frontend/wdio.conf.ts` and one harness-proving spec,
@@ -208,6 +208,13 @@ at up front.
   MSW. Deliberately scoped to proving the harness only (see `docs/CODE_REVIEW_FINDINGS_2026-09-14.md`
   finding #12, the on-record motivating case for this tier, and the plan's own "explicit checkpoint" —
   further business-logic E2E coverage is a separate next slice, not bundled into this one).
+  Getting the boot sequence green under headless Linux CI (WebKitGTK + Xvfb + Tauri's WebDriver
+  bridge) took six distinct fixes, most notably a CSP `connect-src` that didn't allowlist the CI
+  job's local Supabase origin — masked by `use-login.ts`'s deliberate generic "Invalid email or
+  password" message (§ below on that hook), which made a network-layer block look identical to a
+  credentials error until the actual page source was inspected. A negative control (2026-09-15) —
+  deliberately wrong credentials pushed to this same CI job — confirmed the harness fails red for a
+  real regression (`h1=Dashboard` timeout, not a hang or infra flake) before this was trusted.
   **Security note**: `tauri-plugin-wdio-webdriver` stands up a live, remotely-drivable WebDriver
   server — per its own README ("never include it in production builds") and owasp-tcasvs V2.1.3
   ("production builds exclude... test utilities"), it's an optional Cargo dependency behind a new
