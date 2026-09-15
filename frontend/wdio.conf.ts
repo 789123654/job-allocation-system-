@@ -30,6 +30,12 @@ export const config: WebdriverIO.Config = {
       {
         appBinaryPath: "./src-tauri/target/debug/app",
         driverProvider: "embedded",
+        // Temporary — re-added 2026-09-15 to diagnose a second, different failure once the
+        // startup-crash bug (xvfb-run fix) was resolved: the webview's Tauri JS bridge never
+        // becomes ready (`core.invoke` times out) and #email never renders. Need the app's own
+        // stdout/stderr (tauri_plugin_log output) to see what the frontend is actually doing.
+        // Remove once this second issue is root-caused.
+        captureBackendLogs: true,
       },
     ],
   ],
