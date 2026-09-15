@@ -76,5 +76,11 @@ export const config: WebdriverIO.Config = {
     } catch (e) {
       console.log("--- DIAGNOSTIC: failed to capture page state ---", e);
     }
+    try {
+      const logs = await browser.getLogs("browser");
+      console.log("--- DIAGNOSTIC: browser console logs ---", JSON.stringify(logs, null, 2));
+    } catch (e) {
+      console.log("--- DIAGNOSTIC: getLogs('browser') not supported by this driver ---", e);
+    }
   },
 };
