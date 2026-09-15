@@ -47,7 +47,18 @@ describe("Login flow", () => {
     // set must reach the authenticated shell directly, never the forced-reset gate
     // (router.tsx's mustChangePassword check, ARCHITECTURE.md §4 / FRONTEND_ARCHITECTURE.md §6).
     const heading = await browser.$("h1=Dashboard");
-    await heading.waitForDisplayed({ timeout: 15000 });
+    try {
+      await heading.waitForDisplayed({ timeout: 15000 });
+    } catch (e) {
+      // Temporary — added 2026-09-15, same reasoning as the #email guard above: capture inline,
+      // before mocha's outer timeout can tear down the session. This is now the active failure
+      // point (the earlier #root-empty/withGlobalTauri issue is fixed — login form itself works).
+      console.log("--- DIAGNOSTIC: page source at Dashboard-heading failure ---");
+      console.log(await browser.getPageSource());
+      console.log("--- DIAGNOSTIC: current URL ---", await browser.getUrl());
+      console.log("--- DIAGNOSTIC: document.title ---", await browser.getTitle());
+      throw e;
+    }
     await expect(heading).toHaveText("Dashboard");
     await expect(browser).not.toHaveUrl(/set-new-password/);
 
