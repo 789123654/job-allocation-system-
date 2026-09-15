@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# Found 2026-09-15 during a rapid string of debugging pushes: without this, every push spawns a
+# brand-new, fully independent run instead of superseding the previous one for the same branch/PR —
+# 6 pushes in quick succession piled up 5+ concurrent runs (6 jobs each) competing for the account's
+# limited concurrent-job slots, so later runs' jobs sat queued behind earlier, now-irrelevant ones.
+# Standard GitHub Actions practice, not just today's fix.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Read-only by default (DEPLOYMENT.md §10 / GitHub_Actions_Security_Cheat_Sheet.md) — no job here
 # needs to write to the repo, so nothing grants more.
 permissions:
