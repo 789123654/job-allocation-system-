@@ -268,10 +268,14 @@ jobs:
       - name: Build the Tauri app with the E2E-only WebDriver feature
         working-directory: frontend
         # --features e2e-testing (Cargo.toml) links in tauri-plugin-wdio-webdriver; --config
-        # merges tauri.e2e.conf.json, which is the only thing that re-enables the matching
-        # e2e-testing capability file on top of tauri.conf.json's own ["default"]-only allowlist.
-        # Neither is ever passed by the real release build command — see both files' own comments.
-        run: npx tauri build --debug --features e2e-testing --config src-tauri/tauri.e2e.conf.json
+        # merges tauri.e2e.conf.json, which supplies the matching e2e-testing capability entry on
+        # top of tauri.conf.json's own ["default"]-only allowlist (build-manifest bookkeeping only
+        # — Cargo.toml's own comment on this dependency is the real production-exclusion control).
+        # Neither is ever passed by the real release build command. --no-bundle: WDIO only needs
+        # the raw binary at target/debug/app (wdio.conf.ts); the default "targets": "all" in
+        # tauri.conf.json would otherwise also build .deb/.rpm/.AppImage bundles nobody uses here,
+        # costing ~13 minutes of this job's runtime for no benefit.
+        run: npx tauri build --debug --no-bundle --features e2e-testing --config src-tauri/tauri.e2e.conf.json
       - name: E2E tests (WebdriverIO, embedded WebDriver provider)
         working-directory: frontend
         run: npm run test:e2e

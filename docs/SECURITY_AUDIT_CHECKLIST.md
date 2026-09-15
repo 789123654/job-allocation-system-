@@ -23,7 +23,177 @@ commit:
 
 ## Completed Audits
 
-### Phase 5 (Hardening) follow-up — Mutation Testing in CI (2026-09-14)
+### Phase 6 Step 1 — E2E Test Harness Security Audit (2026-09-15)
+
+```
+status: complete
+phase: Phase 6 Step 1 — E2E test harness (WebdriverIO + @wdio/tauri-service). Security audit run
+  per the user's explicit request, applying skill-verification-discipline.md failure modes 6, 8,
+  9, 10.1, 10.2, 11 specifically (the six the user named), owasp-asvs-5, owasp-tcasvs (thick
+  client — the correct primary ASVS-family source for a desktop app, not ASVS 5 alone), and a
+  whole-directory owasp-cheatsheets grep. An independent general-purpose subagent (not the session
+  that built the slice) ran the fresh OWASP/ASVS/TCASVS sweep and read every changed file itself,
+  per rule 11's "same pass wrote the code, structural bias" reasoning — its full report is quoted
+  in C/D below, not summarized secondhand.
+scope_files: .github/workflows/ci.yml, frontend/package.json, frontend/wdio.conf.ts,
+  frontend/e2e/specs/login-flow.spec.ts, frontend/src-tauri/Cargo.toml,
+  frontend/src-tauri/src/lib.rs, frontend/src-tauri/tauri.conf.json,
+  frontend/src-tauri/tauri.e2e.conf.json, .gitleaks.toml
+date: 2026-09-15
+commit: f8079ec (audit pass), fixes below land in the next commit
+```
+
+**A. Fixed enumeration — ASVS/cheat-sheet sources actually opened, by name:**
+- `asvs_chapters_opened`: **owasp-tcasvs** (primary — thick client) — all six chapters read/swept
+  (v1-architecture-threat-modeling, v2-build-deployment-hardening, v3-data-storage-protection,
+  v4-code-quality-exploit-mitigation, v5-cryptography, v6-network-communication). Two directly
+  relevant: **V2.1.3** ("Production builds exclude unnecessary features, sample code, docs, test
+  utilities, dev configs" — the requirement driving the whole Cargo-feature-gate design) and
+  **V6.4.1** ("IPC channels... local TCP implement authentication, preventing unauthorized local
+  processes from connecting" — the embedded WebDriver server's real, accepted residual gap, see
+  B/D below). owasp-asvs-5 — all 17 chapters swept for CI/CD, test-credential, debug-mode keywords;
+  `v13-configuration.md` read in full for secrets handling (no new finding beyond what
+  Secrets_Management_Cheat_Sheet.md already covers, per C.6 below).
+- `cheatsheet_grep_keywords`: `WebDriver`, `automation`, `debug`, `test credential`, `CI/CD`,
+  `third-party dependency`, `supply chain`, `capability`, `feature flag`, `attack surface` — run
+  across the whole `owasp-cheatsheets/cheatsheets/` directory (120 files), not just titles that
+  sound relevant. Surfaced and read in full: `GitHub_Actions_Security_Cheat_Sheet.md`,
+  `CI_CD_Security_Cheat_Sheet.md`, `NPM_Security_Cheat_Sheet.md`,
+  `Software_Supply_Chain_Security_Cheat_Sheet.md`, `Attack_Surface_Analysis_Cheat_Sheet.md`,
+  `Secrets_Management_Cheat_Sheet.md`.
+- `cheatsheet_grep_output`: `GitHub_Actions_Security_Cheat_Sheet.md` — "Mask all sensitive
+  information... `::add-mask::`" already applied to both `CONTRACT_TEST_TOKEN` and the newly-added
+  `E2E_OWNER_PASSWORD`; "pin third-party actions by commit SHA" already the project's own
+  convention, no new unpinned action added this slice (the new steps are `cargo`/`npm`/`apt`
+  commands, not marketplace Actions). `NPM_Security_Cheat_Sheet.md`/
+  `Software_Supply_Chain_Security_Cheat_Sheet.md` — no direct guidance found beyond what the
+  existing third-party-tool-vetting-standard memory discipline already covers (checked separately,
+  see C.6). `Attack_Surface_Analysis_Cheat_Sheet.md` — confirms the right question to ask about a
+  new local automation server is "what's listening, on what interface, with what auth" (answered
+  in B/D: `127.0.0.1`-bound, unauthenticated by the plugin's own design, feature-gated out of any
+  real build).
+
+**B. Fixed-domain sweep, this slice:**
+- `auth`: N/A — no new authentication mechanism; the E2E spec logs in through the *existing* login
+  form/flow, exercising it, not changing it.
+- `session_token_lifecycle`: N/A — unchanged; the spec's `browser.refresh()` check exercises the
+  existing session-restore path, doesn't add a new one.
+- `tenant_isolation` / `object_level_authz`: N/A — no new backend surface, no new query.
+- `input_validation`: N/A — no new user-facing input path.
+- `cors`: N/A, unchanged.
+- `secrets`: **Real, addressed** — `E2E_OWNER_PASSWORD` is a new CI-minted credential; masked via
+  `::add-mask::` per A above, scoped to one ephemeral per-run local Supabase stack, never a real
+  secret shared beyond that job.
+- `supply_chain`: **Real, addressed** — 6 new npm devDependencies, 1 new Cargo dependency.
+  `tauri-plugin-wdio-webdriver` and `@wdio/tauri-service` both resolve (confirmed in `Cargo.lock`/
+  `package-lock.json`) to version `1.4.0` from the same `webdriverio/desktop-mobile` GitHub repo —
+  matching, coordinated versions across the Rust/JS split of one project, not two unrelated forks;
+  maintainer `christian-bromann` is WebdriverIO's own project founder (checked live against the npm
+  registry API and Tauri's own official docs, which name this exact package as *the* recommended
+  E2E stack — see the approved plan's own research). Per `third-party-tool-vetting-standard`
+  memory's standard, this clears the bar.
+- **New domain this slice actually introduces, not on the standard checklist list**: a local
+  automation/WebDriver attack surface. Covered in D below (TCASVS V6.4.1 finding, accepted).
+
+**C. Self-check gate — exactly the six failure modes the user named:**
+
+1. **Failure mode 6** (grep the whole cheat-sheet directory by mechanism, not familiar filenames):
+   done twice, independently — once during planning (surfaced `GitHub_Actions_Security_Cheat_Sheet.md`/
+   `Secrets_Management_Cheat_Sheet.md`), once again by the independent review subagent this pass
+   (surfaced `NPM_Security_Cheat_Sheet.md`/`Software_Supply_Chain_Security_Cheat_Sheet.md`/
+   `Attack_Surface_Analysis_Cheat_Sheet.md` — three files the planning pass's narrower CI/secrets-
+   focused grep hadn't opened). The second pass finding new files the first pass missed is itself
+   the evidence this mode's discipline ("checking some files ≠ checking the directory") was applied
+   for real, not just asserted.
+
+2. **Failure mode 8** (don't claim "comprehensive" without touching the actual checklist mechanism):
+   this entry *is* that engagement — `status: in-progress` was set before any of this section was
+   written (see the Current Audit block's edit history in git), not backfilled after the fact.
+
+3. **Failure mode 9** (pre-write gate — check the relevant source, name the ASVS chapter, state the
+   call-site diff, *before* writing code): done during the plan-mode research phase, before any file
+   in this slice was written — TCASVS V2.1.3 named and quoted before `Cargo.toml` was edited; the
+   call-site diff stated explicitly ("no prior use in this project — first time a testing-only
+   capability needed compile-time exclusion, distinct from `tauri_plugin_log`'s `debug_assertions`
+   gate"). This audit is the retroactive verification that the pre-write gate's conclusion actually
+   held up under a fresh, independent read — it did, with one correction (finding #1 below).
+
+4. **Failure mode 10.1** (negative control — prove a test claiming to verify a fix actually fails
+   without the fix): **honestly incomplete, not silently skipped.** `login-flow.spec.ts` was never
+   run against a deliberately-broken version of the login flow to confirm it would fail — doing so
+   requires a full local reproduction of the CI stack (real Supabase + FastAPI + a Tauri debug
+   build + WebdriverIO), which was judged too expensive to reproduce locally purely to satisfy this
+   check (the same class of cost that made the earlier `npx tauri build` verification attempt get
+   interrupted this session). What stands in its place, weaker than a real negative control: (a) the
+   spec's assertions are simple and objective (an `h1` reading "Dashboard", a URL substring) against
+   *existing, already-reviewed* login/router code the author of this slice didn't write or change,
+   so the "self-authored test matches the author's own bug" risk this rule exists for is low; (b)
+   CI's own run of this exact spec (commit `f8079ec`, run in progress at audit time) is real
+   evidence of the pass side at minimum. Recorded as a real gap, not upgraded to "verified" — the
+   fail side of the control has not been empirically demonstrated.
+
+5. **Failure mode 10.2** (blind test authoring for higher-stakes slices): **assessed as not
+   applicable, with the reasoning stated up front, not silently skipped.** The rule targets
+   self-authored-test bias where the same pass wrote new business logic and its own test from the
+   same mental model. This slice added no new business logic — the one spec asserts against
+   pre-existing, already-reviewed login/router/session-store code through a new harness. Blind
+   authorship would add cost without addressing the bias it exists to catch, since there's no new
+   implementation here whose author could unconsciously write matching-but-wrong assertions.
+
+6. **Failure mode 11** (independent-review decision asked, not assumed): the user was asked, in the
+   turn immediately before this one ("blind test or the security check"), and explicitly authorized
+   the security-audit pass — this whole entry, including the independent subagent pass, is that
+   authorization being carried out, not a self-graded pass presented as one.
+
+**D. Verification-of-verification — real command output, findings, and fixes:**
+
+- **Independent subagent's full findings** (ranked, quoted verbatim from its report, not
+  paraphrased away): "**1. [Design-clarity, not a live bug]** The capability grant is not a second
+  independent safety layer — the Cargo feature flag is the only thing keeping the automation server
+  out of a build... if a future command ever compiles with `--features e2e-testing` but without
+  `tauri.e2e.conf.json`'s `--config`, the live automation server still starts." **Fixed**: both
+  `Cargo.toml`'s and `tauri.e2e.conf.json`'s comments rewritten to state plainly that the Cargo
+  feature is the sole boundary, the capability entry is build-manifest bookkeeping only (this
+  commit). "**2. [Low, accepted residual — no fix needed]** The embedded WebDriver server is
+  unauthenticated by design during the CI job itself... TCASVS V6.4.1... any other process on that
+  same ephemeral GitHub-hosted runner... could connect to `127.0.0.1:4445`." **Accepted, not
+  fixed**: inherent to WebDriver/Selenium-style E2E testing generally, blast radius is one
+  single-use random credential against a throwaway local stack destroyed at job end, no production
+  data or persistence involved — recorded here as a deliberate, named trade-off (root-cause
+  category D, this project's own existing taxonomy), not an overlooked gap. **Findings 3–7,
+  confirmed correct, no fix needed**: the `e2e-testing` feature is genuinely opt-in (no
+  `default = [...]` list includes it); `tauri.conf.json`'s `["default"]` restriction correctly
+  excludes the (now-removed) standalone capability file; `tauri.e2e.conf.json`'s
+  `["default", {...}]` correctly re-lists `"default"` explicitly (Tauri's config-merge replaces
+  arrays wholesale, not appends — omitting `"default"` would have silently dropped core/store
+  permissions during e2e runs; verified against Tauri's own config-merge docs); `tauri.e2e.conf.json`
+  cannot be picked up by a real build via Tauri's fixed auto-merge naming convention
+  (`tauri.<platform>.conf.json` only); the new dependencies' publish provenance checks out; CI
+  masking/permissions match the established pattern; a `--debug` CI build with no upload step is
+  not a supply-chain concern.
+- **Local empirical verification, done before this audit, re-confirmed here**: `cargo check`
+  (default, no `--features`) → clean, `tauri-plugin-wdio-webdriver` does not appear in the
+  dependency graph. `cargo check --features e2e-testing` → clean, the plugin compiles in
+  successfully. `gitleaks.exe detect --no-git` (the exact v8.24.3 binary CI uses, downloaded and
+  run locally) against the real `.gitleaks.toml` → `"no leaks found"` (this is the unrelated
+  false-positive fix bundled into this slice, see the two commits before this one).
+- **Not yet re-run after this audit's Cargo.toml/tauri.e2e.conf.json comment edits**: those are
+  comment-only changes (no functional TOML/JSON value changed), so `cargo check --features
+  e2e-testing` is not expected to newly fail — will be confirmed green by the next CI run
+  regardless, not asserted here without that confirmation.
+
+**E. Bounded claim:** `owasp-tcasvs` (all 6 chapters), `owasp-asvs-5` (all 17 chapters),
+`owasp-cheatsheets` (whole-directory keyword sweep, 6 files read in full) — scoped to the 9 files in
+`scope_files` above. One design-clarity finding fixed (misleading comment framing); one residual
+risk (unauthenticated local WebDriver server during CI) explicitly accepted, not fixed, with a
+named reason. No blocking or high-severity finding.
+
+**F. Independent pass:** Run this pass, per rule 11 (C.6 above) — a fresh general-purpose subagent,
+not the session that designed the slice, read every changed file itself and ran its own
+whole-directory OWASP/TCASVS/cheat-sheet sweep rather than accepting the design's own stated
+reasoning at face value.
+
+
 
 ```
 status: complete

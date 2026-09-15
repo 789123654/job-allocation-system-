@@ -32,9 +32,17 @@ tauri-plugin-store = "2"
 # unnecessary features... test utilities"), since Tauri's own docs don't state this requirement
 # anywhere else a reader would find it. `cargo tauri build` (the real release command) never
 # passes `--features e2e-testing`, so distributed installers never link this in — only the CI E2E
-# job's own build step does. See src/lib.rs's registration and tauri.e2e.conf.json for the
-# matching capability-file gate (the wdio-webdriver:default permission must not exist in the
-# capability set the default build resolves either).
+# job's own build step does.
+#
+# THIS FEATURE FLAG IS THE ONLY REAL BOUNDARY — corrected 2026-09-15 after an independent review
+# caught the earlier comment overstating this. tauri.e2e.conf.json's inline `wdio-webdriver:default`
+# capability grants no IPC permissions and authorizes nothing at runtime (the plugin is an
+# in-process HTTP server, not a command the capability system gates) — it exists purely to satisfy
+# Tauri's build-time capability-manifest validation once the plugin is compiled in. It is NOT a
+# second independent gate: if any future command ever compiles with `--features e2e-testing` but
+# without tauri.e2e.conf.json's `--config`, the live automation server still starts. Never add
+# e2e-testing to a release build command, a default feature list, or a CI job that produces a
+# distributed artifact.
 tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 
 [features]
