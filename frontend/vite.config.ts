@@ -7,6 +7,12 @@ import { defineConfig } from "vite";
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  server: {
+    // Cargo writes to src-tauri/target concurrently while `tauri dev` builds the Rust binary —
+    // Vite's own fs watcher racing that write causes an EBUSY crash on Windows. Tauri's official
+    // Vite quickstart excludes this path for the same reason.
+    watch: { ignored: ["**/src-tauri/**"] },
+  },
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),

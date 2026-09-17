@@ -46,7 +46,16 @@ export function CreateTaskDialog({
   function onOpenChange(next: boolean) {
     setOpen(next);
     if (!next) {
-      reset();
+      // reset({}) — NOT bare reset(). Found via react-hook-form's own source (node_modules/
+      // react-hook-form/dist/index.esm.mjs, _reset()): reset() with no arguments takes a native-
+      // DOM shortcut — it finds any registered field with a real HTML ref (the plain <input> for
+      // deadline, registered via register()), walks up to its <form>, and calls the browser's
+      // native form.reset(). Radix Select (components/ui/select.tsx) independently listens for
+      // that native `reset` event and clears itself — confirmed via a live stack trace, 2026-09-16
+      // (reported bug: Assign To/Job Type silently cleared). reset({}) still resets every field to
+      // blank, but through react-hook-form's normal React-state path, which never touches the
+      // native form element and so never triggers Radix's listener.
+      reset({});
       createTask.reset();
       setIdempotencyKey(crypto.randomUUID());
     }
@@ -92,52 +101,62 @@ export function CreateTaskDialog({
               </p>
             )}
           </div>
-          {jobTypeOptions.length > 0 && (
-            <div>
-              <Label htmlFor="jobTypeId">Job type</Label>
-              <Controller
-                control={control}
-                name="jobTypeId"
-                render={({ field }) => (
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <SelectTrigger id="jobTypeId">
-                      <SelectValue placeholder="No job type" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {jobTypeOptions.map((option) => (
-                        <SelectItem key={option.id} value={option.id}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-              />
-            </div>
-          )}
-          {employeeOptions.length > 0 && (
-            <div>
-              <Label htmlFor="assignedTo">Assign to</Label>
-              <Controller
-                control={control}
-                name="assignedTo"
-                render={({ field }) => (
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <SelectTrigger id="assignedTo">
-                      <SelectValue placeholder="Unassigned" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {employeeOptions.map((option) => (
-                        <SelectItem key={option.id} value={option.id}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-              />
-            </div>
-          )}
+          {/* Always mounted, never gated behind jobTypeOptions.length — a field that unmounts
+              whenever its options list is momentarily empty (a firm with none yet, or a stale
+              array during a query refetch) silently drops react-hook-form's registration and
+              loses whatever the user already picked. An empty options array just renders an
+              empty, harmless dropdown instead. */}
+          <div>
+            <Label htmlFor="jobTypeId">Job type</Label>
+            <Controller
+              control={control}
+              name="jobTypeId"
+              render={({ field }) => (
+                // value must never be undefined — an undefined value renders Radix's Select
+                // uncontrolled on first paint, then it flips to controlled the instant a value
+                // is picked (React logs "changing from uncontrolled to controlled"), which is
+                // exactly the kind of state churn that produces intermittent cross-field reset
+                // symptoms (reported bug, 2026-09-16). field.value itself stays undefined in
+                // react-hook-form's own state until touched, so taskCreateSchema's .optional()
+                // still validates correctly — only the prop handed to Select is coerced.
+                <Select value={field.value ?? ""} onValueChange={field.onChange}>
+                  <SelectTrigger id="jobTypeId">
+                    <SelectValue placeholder="No job type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {jobTypeOptions.map((option) => (
+                      <SelectItem key={option.id} value={option.id}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            />
+          </div>
+          {/* Same always-mounted reasoning as jobTypeId above. */}
+          <div>
+            <Label htmlFor="assignedTo">Assign to</Label>
+            <Controller
+              control={control}
+              name="assignedTo"
+              render={({ field }) => (
+                // Same uncontrolled -> controlled fix as jobTypeId's Select above.
+                <Select value={field.value ?? ""} onValueChange={field.onChange}>
+                  <SelectTrigger id="assignedTo">
+                    <SelectValue placeholder="Unassigned" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {employeeOptions.map((option) => (
+                      <SelectItem key={option.id} value={option.id}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            />
+          </div>
           <div>
             <Label htmlFor="deadline">Deadline</Label>
             <Input id="deadline" type="date" {...register("deadline")} />

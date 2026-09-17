@@ -1,5 +1,6 @@
 import { Link, Navigate, Outlet, createBrowserRouter, useLocation, useParams } from "react-router-dom";
 import { AccountMenu } from "@/components/app-shell/account-menu";
+import { BackLink } from "@/components/ui/back-link";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { LoginForm } from "@/features/auth/components/login-form";
 import { SetNewPasswordForm } from "@/features/auth/components/set-new-password-form";
@@ -7,6 +8,7 @@ import { EmployeeManagementPage } from "@/features/employees/components/employee
 import { useEmployees } from "@/features/employees/api/get-employees";
 import { OwnerDashboardPage } from "@/app/owner-dashboard-page";
 import { JobTypeManagementPage } from "@/features/job-types/components/job-type-management-page";
+import { useNotifications } from "@/features/notifications/api/get-notifications";
 import { IssueResolutionPage } from "@/features/tasks/components/issue-resolution-page";
 import { MyTasksPage } from "@/features/tasks/components/my-tasks-page";
 import { NotificationsPage } from "@/features/notifications/components/notifications-page";
@@ -41,6 +43,34 @@ export function SetNewPasswordPage() {
   );
 }
 
+// Reported gap, 2026-09-17: nothing surfaced *that* a new notification existed unless the Owner
+// remembered to click into the Notifications screen on their own — a badge on the nav link is the
+// actual fix (not a bigger polling interval or a toast, which the PRD/ARCHITECTURE docs never
+// asked for) since useNotifications already polls every 45s (get-notifications.ts). `limit: 100`
+// (the server's own max, core/validation.py) so the count is real up to a realistic ceiling for
+// this app's pilot scale (2-4 firms, ~30 users — ca-tool-project-scope) instead of silently
+// capping at the route's default limit of 20 and under-reporting.
+function NotificationsNavLink() {
+  const { data: notifications } = useNotifications({ unreadOnly: true, limit: 100 });
+  const unreadCount = notifications?.length ?? 0;
+  return (
+    <Link
+      to="/notifications"
+      className="relative flex items-center gap-1.5 text-(--color-ledger-text-muted) hover:underline"
+    >
+      Notifications
+      {unreadCount > 0 && (
+        <span
+          className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-(--color-ledger-danger) px-1 text-[10px] leading-none font-semibold text-(--color-ledger-accent-fg)"
+          aria-label={`${unreadCount} unread notification${unreadCount === 1 ? "" : "s"}`}
+        >
+          {unreadCount >= 100 ? "99+" : unreadCount}
+        </span>
+      )}
+    </Link>
+  );
+}
+
 // Route-level gating (FRONTEND_ARCHITECTURE.md §6) — not per-component checks scattered through
 // the tree. UX only: backend/app/api/deps.py's require_password_set/get_current_profile
 // independently enforce both gates server-side on every request regardless of what this shows.
@@ -53,9 +83,19 @@ export function AuthenticatedLayout() {
   return (
     <div className="min-h-screen">
       <header className="flex items-center justify-between border-b border-(--color-ledger-border) p-4">
-        <nav className="flex gap-4 text-sm">
+        <div className="flex items-center gap-4">
+          {/* Reported gap, 2026-09-17: BackLink previously only lived on the 3 drill-down screens
+              (Task Detail/Owner Task Review/Issue Resolution) that added it individually — so it
+              only ever appeared when reached one particular way, not consistently everywhere.
+              Hoisted here instead: one instance, in the shared layout every route renders inside,
+              so it's on every screen in the system, not screen-by-screen. */}
+          <BackLink />
+          <nav className="flex gap-4 text-sm">
           {role === "owner" && (
             <>
+              <Link to="/" className="text-(--color-ledger-text-muted) hover:underline">
+                Dashboard
+              </Link>
               <Link to="/employees" className="text-(--color-ledger-text-muted) hover:underline">
                 Employees
               </Link>
@@ -69,10 +109,9 @@ export function AuthenticatedLayout() {
               My tasks
             </Link>
           )}
-          <Link to="/notifications" className="text-(--color-ledger-text-muted) hover:underline">
-            Notifications
-          </Link>
-        </nav>
+          <NotificationsNavLink />
+          </nav>
+        </div>
         <AccountMenu />
       </header>
       <main className="p-6">
@@ -150,7 +189,12 @@ function TaskDetailRoute() {
 function OwnerTaskReviewRoute() {
   const { taskId } = useParams<{ taskId: string }>();
   const { data: employees } = useEmployees();
-  const employeeOptions = (employees ?? []).map((e) => ({ id: e.id, label: e.fullName }));
+  // Same PRD workload-visibility requirement as owner-dashboard-page.tsx's CreateTaskDialog —
+  // reassigning during review is an assignment decision too.
+  const employeeOptions = (employees ?? []).map((e) => ({
+    id: e.id,
+    label: `${e.fullName} (${e.pendingTaskCount} pending)`,
+  }));
   return <OwnerTaskReviewPage key={taskId} employeeOptions={employeeOptions} />;
 }
 
@@ -159,7 +203,11 @@ function OwnerTaskReviewRoute() {
 function OwnerIssueResolutionRoute() {
   const { issueId } = useParams<{ issueId: string }>();
   const { data: employees } = useEmployees();
-  const employeeOptions = (employees ?? []).map((e) => ({ id: e.id, label: e.fullName }));
+  // Same PRD workload-visibility requirement as above.
+  const employeeOptions = (employees ?? []).map((e) => ({
+    id: e.id,
+    label: `${e.fullName} (${e.pendingTaskCount} pending)`,
+  }));
   return <IssueResolutionPage key={issueId} employeeOptions={employeeOptions} />;
 }
 

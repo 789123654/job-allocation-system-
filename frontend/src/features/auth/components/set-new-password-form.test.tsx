@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { SetNewPasswordForm } from "@/features/auth/components/set-new-password-form";
 import { supabase } from "@/lib/supabase-client";
 import { SessionProvider, useSession } from "@/stores/session-store";
-import { server } from "@/testing/mocks/handlers";
+import { makeFakeAccessToken, server } from "@/testing/mocks/handlers";
 
 // Same fake project URL as testing/mocks/handlers.ts (.env.test's VITE_SUPABASE_URL) — not
 // exported from there, so re-declared here, same convention as change-password-form.test.tsx.
@@ -31,9 +31,15 @@ function mockForcedPasswordSession(): { setMustChangePassword: (v: boolean) => v
   let mustChangePassword = true;
 
   server.use(
+    // Minted fresh per call so a later refreshSession()/token grant reflects whatever
+    // setMustChangePassword() last set — getClaims() decodes this token's own payload, not the
+    // response's separate `user` field, so that's what must carry the current flag value.
     http.post(`${SUPABASE_URL}/auth/v1/token`, () =>
       HttpResponse.json({
-        access_token: "fake-access-token",
+        access_token: makeFakeAccessToken({
+          ...forcedChangeUser.app_metadata,
+          must_change_password: mustChangePassword,
+        }),
         refresh_token: "fake-refresh-token",
         expires_in: 3600,
         token_type: "bearer",

@@ -11,8 +11,32 @@ const fakeUser = {
   app_metadata: { firm_id: "22222222-2222-2222-2222-222222222222", role: "owner" },
 };
 
-const fakeSession = {
-  access_token: "fake-access-token",
+// session-store.tsx reads role/firm_id/must_change_password via supabase.auth.getClaims(), which
+// decodes the session's own access_token — never the session's separate `user` field (that field
+// reflects auth.users' stored row, not the Custom Access Token Hook's claims; the SDK's own
+// getSession() JSDoc says the user object "must not be trusted" for exactly this reason). A plain
+// string access_token can't be decoded as a JWT at all, so every test exercising the real
+// SessionProvider needs one shaped like this — unsigned (`alg: "none"`, no `kid`), which routes
+// getClaims() through its documented no-verification fallback (a GET /auth/v1/user call, mocked
+// below) rather than attempting real signature verification.
+function base64UrlEncode(value: object): string {
+  const json = JSON.stringify(value);
+  const base64 = btoa(unescape(encodeURIComponent(json)));
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export function makeFakeAccessToken(appMetadata: Record<string, unknown>): string {
+  const header = base64UrlEncode({ alg: "none", typ: "JWT" });
+  const payload = base64UrlEncode({
+    sub: "11111111-1111-1111-1111-111111111111",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    app_metadata: appMetadata,
+  });
+  return `${header}.${payload}.sig`;
+}
+
+export const fakeSession = {
+  access_token: makeFakeAccessToken(fakeUser.app_metadata),
   refresh_token: "fake-refresh-token",
   expires_in: 3600,
   token_type: "bearer",
@@ -160,6 +184,7 @@ interface NotificationRecord {
   type: string;
   task_id: string | null;
   issue_id: string | null;
+  task_title: string | null;
   is_read: boolean;
   created_at: string;
 }
@@ -168,7 +193,15 @@ let notifications: NotificationRecord[] = [];
 
 export function resetNotificationsFixture(): void {
   notifications = [
-    { id: "n1", type: "issue_raised", task_id: "t1", issue_id: "i1", is_read: false, created_at: NOW },
+    {
+      id: "n1",
+      type: "issue_raised",
+      task_id: "t1",
+      issue_id: "i1",
+      task_title: "File returns",
+      is_read: false,
+      created_at: NOW,
+    },
   ];
 }
 resetNotificationsFixture();
@@ -176,6 +209,15 @@ resetNotificationsFixture();
 export const handlers = [
   http.post(`${SUPABASE_URL}/auth/v1/token`, () => HttpResponse.json(fakeSession)),
   http.put(`${SUPABASE_URL}/auth/v1/user`, () => HttpResponse.json(fakeUser)),
+  // getClaims()'s unsigned-token fallback path calls getUser(), which hits this endpoint — only
+  // needs to succeed (200); the actual claims it trusts come from the token's own decoded payload,
+  // not this response body.
+  http.get(`${SUPABASE_URL}/auth/v1/user`, () => HttpResponse.json(fakeUser)),
+
+  // API_SPEC.md §3's flagged-open question, resolved: backend/app/api/routes/auth.py's
+  // confirm-password-changed — use-set-new-password.ts calls this between updateUser() and
+  // refreshSession() so the refreshed token's must_change_password claim reads false.
+  http.post(`${API_BASE_URL}/auth/confirm-password-changed`, () => new HttpResponse(null, { status: 204 })),
 
   // API_SPEC.md §3 Employees — mirrors backend/app/api/routes/employees.py's actual shapes.
   http.get(`${API_BASE_URL}/employees`, () =>

@@ -27,6 +27,7 @@ again — see its own docstring.
 
 import logging
 import secrets
+import string
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -104,10 +105,29 @@ def _paginate[StmtT: Select[Any]](stmt: StmtT, *order_by: Any, offset: int, limi
     return stmt.order_by(*order_by).offset(offset).limit(limit)
 
 
+_PASSWORD_SYMBOLS = "!@#$%^&*()-_=+"
+
+
 def _generate_password() -> str:
-    # secrets.token_urlsafe: CSPRNG, not `random` (ASVS 6.4.1's "securely random"). 16 bytes = 128
-    # bits, well past the length policy in ARCHITECTURE.md §4.
-    return secrets.token_urlsafe(16)
+    # secrets: CSPRNG throughout, not `random` (ASVS 6.4.1's "securely random"). Supabase's
+    # dashboard-configured password policy (enabled this session) requires at least one lowercase,
+    # uppercase, digit, and symbol character. A plain secrets.token_urlsafe() only draws from
+    # [A-Za-z0-9_-] — roughly 60% of generated tokens randomly contained zero symbol characters and
+    # were rejected outright by the Admin API with AuthWeakPasswordError (found via manual testing,
+    # 2026-09-16: employee creation failed with "something went wrong" for no visible reason).
+    # Guarantee one char from each required class, fill the rest from the full alphabet, then
+    # shuffle with a CSPRNG (not `random.shuffle`) so the guaranteed chars aren't always at the
+    # front — 20 chars total, well past the length policy in ARCHITECTURE.md §4.
+    required = [
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.digits),
+        secrets.choice(_PASSWORD_SYMBOLS),
+    ]
+    alphabet = string.ascii_letters + string.digits + _PASSWORD_SYMBOLS
+    chars = required + [secrets.choice(alphabet) for _ in range(16)]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
 
 
 def _write_audit_log(session: Session, actor: Profile, action: str, target_id: UUID | None) -> None:
@@ -292,6 +312,19 @@ def set_employee_active(
     return employee
 
 
+def confirm_password_changed(session: Session, actor: Profile) -> None:
+    """API_SPEC.md §3's flagged-open question, resolved: the frontend calls Supabase's self-service
+    `updateUser({password})` directly (never through FastAPI — same doc, same section), so nothing
+    ever told `profiles.must_change_password` the password actually changed. This is the "trivial
+    FastAPI call" that doc already named as still-needed. Uses `CurrentProfileDep`, not
+    `ActiveProfileDep` — this is the one write allowed to run while the flag is still true (it's the
+    thing that clears it).
+    """
+    actor.must_change_password = False
+    session.add(actor)
+    session.commit()
+
+
 def reset_employee_password(session: Session, actor: Profile, employee: Profile) -> str:
     """Generates a new password via the Admin API and marks it one-time-use, same as
     create_employee — `must_change_password` lives only in `profiles`, so it's a plain update
@@ -453,6 +486,13 @@ def create_task(
     )
     session.add(task)
     if assigned_to is not None:
+        # notifications.task_id's composite FK (firm_id, task_id) -> tasks(firm_id, id) is only
+        # declared in the raw migration SQL (c72e9a1f4b83), not mirrored on either SQLModel class
+        # — SQLAlchemy's flush ordering can't see it, so without this flush it may insert the
+        # Notification before the Task in the same transaction and hit a FK violation. Same
+        # pattern already used correctly for billing_task below (line ~691) — found live,
+        # 2026-09-16: every task creation with an assignee failed with exactly this error.
+        session.flush()
         # PRD §3.4 / DATA_MODEL.md §5 `task_assigned` — only fires when assignment happens at
         # creation time; a task created unassigned and assigned later has no PATCH endpoint yet
         # (API_SPEC.md doesn't define one), so that path doesn't exist to notify from.
@@ -680,6 +720,10 @@ def create_issue(session: Session, actor: Profile, task: Task, description: str)
         created_at=datetime.now(UTC),
     )
     session.add(issue)
+    # Same unflushed-composite-FK bug as create_task above (notifications.issue_id -> issues
+    # (firm_id, id), c72e9a1f4b83 — not mirrored on either SQLModel class) — the Notification
+    # below references issue.id before the Issue row itself has been inserted.
+    session.flush()
     _notify_owners(session, actor.firm_id, "issue_raised", task.id, issue.id)
     return issue
 
@@ -904,6 +948,21 @@ def list_notifications(
         stmt, col(Notification.created_at).desc(), col(Notification.id), offset=offset, limit=limit
     )
     return list(session.exec(stmt).all())
+
+
+def get_task_titles(session: Session, actor: Profile, task_ids: list[UUID]) -> dict[UUID, str]:
+    """Batch title lookup for the Notifications list (reported gap, 2026-09-17: notifications gave
+    no reference to which task they were about). Belt-and-suspenders `actor.firm_id` filter, same
+    as every other lister in this module — a notification's own `task_id` already only ever points
+    at a task in the same firm (set server-side in `_notify`/`_notify_owners`, never client input),
+    so this can't leak another firm's title, but the filter costs nothing and keeps the convention
+    uniform rather than one lister quietly being the exception."""
+    if not task_ids:
+        return {}
+    stmt = select(Task.id, Task.title).where(
+        col(Task.id).in_(task_ids), Task.firm_id == actor.firm_id
+    )
+    return dict(session.exec(stmt).all())
 
 
 def get_notification(

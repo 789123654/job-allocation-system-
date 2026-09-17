@@ -2,7 +2,7 @@ import { HttpResponse, http } from "msw";
 import { afterEach, describe, expect, it } from "vitest";
 import { env } from "@/config/env";
 import { supabase } from "@/lib/supabase-client";
-import { server } from "@/testing/mocks/handlers";
+import { fakeSession, server } from "@/testing/mocks/handlers";
 import { storeState } from "@/testing/setup-tests";
 
 // Blind adversarial test for the security decision documented in docs/FRONTEND_ARCHITECTURE.md §6:
@@ -47,7 +47,7 @@ describe("supabase auth storage wiring", () => {
     if (result.error) throw result.error;
 
     expect(storeState.size).toBeGreaterThan(0);
-    expect(storedValuesContain("fake-access-token")).toBe(true);
+    expect(storedValuesContain(fakeSession.access_token)).toBe(true);
 
     // The regression this whole file exists to catch: silently falling back to (or additionally
     // leaking into) the webview's default storage instead of the custom IPC adapter.
@@ -67,11 +67,11 @@ describe("supabase auth storage wiring", () => {
       password: "x",
     });
     if (signInResult.error) throw signInResult.error;
-    expect(storedValuesContain("fake-access-token")).toBe(true); // precondition
+    expect(storedValuesContain(fakeSession.access_token)).toBe(true); // precondition
 
     const { error } = await supabase.auth.signOut();
     expect(error).toBeNull();
 
-    expect(storedValuesContain("fake-access-token")).toBe(false);
+    expect(storedValuesContain(fakeSession.access_token)).toBe(false);
   });
 });

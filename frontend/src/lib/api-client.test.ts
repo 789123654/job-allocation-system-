@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "@/config/env";
 import { apiRequest, ApiError } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase-client";
-import { server } from "@/testing/mocks/handlers";
+import { fakeSession, server } from "@/testing/mocks/handlers";
 
 describe("apiRequest", () => {
   beforeEach(async () => {
@@ -27,7 +27,7 @@ describe("apiRequest", () => {
 
     await apiRequest("/ping");
 
-    expect(capturedAuth).toBe("Bearer fake-access-token");
+    expect(capturedAuth).toBe(`Bearer ${fakeSession.access_token}`);
   });
 
   it("attaches the Idempotency-Key exactly as given, only when one is passed", async () => {

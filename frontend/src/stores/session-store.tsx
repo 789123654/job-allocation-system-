@@ -16,10 +16,13 @@ interface SessionState {
 
 const SessionContext = createContext<SessionState | undefined>(undefined);
 
-function deriveState(session: Session | null, isLoading: boolean): SessionState {
-  const appMetadata = session?.user.app_metadata as
-    | { role?: "owner" | "employee"; firm_id?: string; must_change_password?: boolean }
-    | undefined;
+type JwtAppMetadata = { role?: "owner" | "employee"; firm_id?: string; must_change_password?: boolean };
+
+function deriveState(
+  session: Session | null,
+  appMetadata: JwtAppMetadata | undefined,
+  isLoading: boolean,
+): SessionState {
   return {
     session,
     role: appMetadata?.role ?? null,
@@ -51,29 +54,45 @@ function deriveState(session: Session | null, isLoading: boolean): SessionState 
 // one, even if some cache entry somehow survived); this clear() is the reactive one (nothing
 // survives a session boundary at all, regardless of whose key it was under). Both are cheap; only
 // relying on one and calling the other "redundant" would reopen exactly the gap this pass found.
-function applySessionUpdate(
+async function applySessionUpdate(
   setState: (state: SessionState) => void,
   session: Session | null,
   isLoading: boolean,
-): void {
-  setState(deriveState(session, isLoading));
+): Promise<void> {
   if (!session) {
+    setState(deriveState(null, undefined, isLoading));
     queryClient.clear();
+    return;
   }
+  // session.user.app_metadata reflects auth.users' own stored row only — the installed SDK's own
+  // docs (GoTrueClient.js getSession()) say outright this "must not be trusted" for authorization
+  // decisions; use getClaims() instead. The Custom Access Token Hook (a8e6def15927) only ever
+  // modifies the JWT's own claims, never the stored user row, so must_change_password — which the
+  // hook adds and nothing else ever sets — was silently always undefined via the old path. Found
+  // 2026-09-16 testing against the real Supabase project: every login skipped the forced
+  // Set New Password screen outright, confirmed against decoded JWT claims that the hook was
+  // working correctly all along — only this file was reading the wrong source.
+  const { data, error } = await supabase.auth.getClaims();
+  if (error || !data) {
+    setState(deriveState(session, undefined, isLoading));
+    return;
+  }
+  const appMetadata = data.claims.app_metadata as JwtAppMetadata | undefined;
+  setState(deriveState(session, appMetadata, isLoading));
 }
 
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<SessionState>(() => deriveState(null, true));
+  const [state, setState] = useState<SessionState>(() => deriveState(null, undefined, true));
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
-      applySessionUpdate(setState, data.session, false);
+      void applySessionUpdate(setState, data.session, false);
     });
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      applySessionUpdate(setState, session, false);
+      void applySessionUpdate(setState, session, false);
     });
 
     return () => subscription.unsubscribe();

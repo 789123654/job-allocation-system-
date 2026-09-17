@@ -56,11 +56,39 @@ export function OwnerTaskReviewPage({
   // notifications, the All Tasks table) links here regardless of status, but review_task only
   // succeeds for "submitted" — surfacing that as a 409 only at submit time let an Owner fill out
   // an entire form for a task that was never reviewable. Pre-check instead.
+  //
+  // Reported gap, 2026-09-17: the pre-check above was right to block the form, but bailing out to
+  // a bare one-line message left every non-"submitted" entry point (deadline notifications, the
+  // All Tasks table) as a dead end with no task context at all — an Owner clicking a "due in 1
+  // day" notification just hit "not awaiting review" and nothing else, since there's no separate
+  // general-purpose task detail view for Owners the way TaskDetailPage is for Employees. Showing
+  // the task's own info here instead (title/description/status/assignee/deadline, all already
+  // fetched via useTask above) turns this into a real destination instead of a dead end, while
+  // still refusing to render the review FORM for anything but "submitted" — same guarantee the
+  // 2026-09-13 regression test already covers via the "isn't awaiting review" text this keeps.
   if (task.status !== "submitted") {
+    const assigneeLabel = task.assignedTo
+      ? (employeeOptions.find((e) => e.id === task.assignedTo)?.label ?? "Unknown")
+      : "Unassigned";
     return (
-      <p className="text-sm text-(--color-ledger-danger)">
-        This task isn't awaiting review right now.
-      </p>
+      <div className="flex flex-col gap-4">
+        <h1 className="text-2xl">{task.title}</h1>
+        {task.description && (
+          <p className="text-sm text-(--color-ledger-text-muted)">{task.description}</p>
+        )}
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+          <dt className="text-(--color-ledger-text-muted)">Status</dt>
+          <dd className="capitalize">{task.status.replace("_", " ")}</dd>
+          <dt className="text-(--color-ledger-text-muted)">Assigned to</dt>
+          <dd>{assigneeLabel}</dd>
+          <dt className="text-(--color-ledger-text-muted)">Deadline</dt>
+          <dd>{task.deadline ? new Date(task.deadline).toLocaleDateString() : "—"}</dd>
+        </dl>
+        <p className="text-sm text-(--color-ledger-danger)">
+          This task isn't awaiting review yet — it becomes reviewable once the employee submits
+          it.
+        </p>
+      </div>
     );
   }
 

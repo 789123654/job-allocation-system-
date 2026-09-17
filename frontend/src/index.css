@@ -21,6 +21,12 @@
   --color-ledger-accent: oklch(35% 0.08 260);
   --color-ledger-accent-fg: oklch(98% 0 0);
   --color-ledger-danger: oklch(50% 0.18 25);
+  /* 32% 0.16 85, not a brighter yellow: verified via OKLCH->linear-sRGB conversion against this
+   * file's own --color-ledger-bg (2026-09-17, /code-review finding) — a brighter yellow text color
+   * fails WCAG AA's 4.5:1 minimum for normal-size text on this background; this value clears it at
+   * ~4.65:1. Background-tint use (bg-(--color-ledger-warning)/20) isn't contrast-bound the same
+   * way text is, so this stays a bit darker than an ideal *fill* color would need to be. */
+  --color-ledger-warning: oklch(32% 0.16 85);
 
   --radius-ledger: 2px;
 }

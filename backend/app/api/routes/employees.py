@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlmodel import select
-from supabase_auth.errors import AuthApiError
+from supabase_auth.errors import AuthApiError, AuthError
 
 from app import crud
 from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
@@ -67,6 +67,15 @@ def create_employee(
         # collision is the only realistic cause at this call site (global uniqueness on
         # auth.users.email, DATA_MODEL.md §1), so it's the only case named specifically.
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already in use") from exc
+    except AuthError as exc:
+        # Any other Supabase Auth failure (e.g. AuthWeakPasswordError — not a subclass of
+        # AuthApiError, so the narrower except above never caught it; this was the actual cause of
+        # an unhandled 500 found in manual testing, 2026-09-16, now fixed at the source in
+        # crud._generate_password — this is the belt-and-suspenders catch-all for anything else).
+        logger.error("Supabase admin.create_user failed: %s", exc)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not create employee account"
+        ) from exc
     return EmployeeCreated(
         id=new_id, full_name=body.full_name, email=body.email, generated_password=password
     )
@@ -130,7 +139,16 @@ def reset_password(
     endpoint = f"POST /employees/{employee_id}/reset-password"
     reject_if_idempotency_key_used(session, actor, idempotency_key, endpoint)
 
-    password = crud.reset_employee_password(session, actor, employee)
+    try:
+        password = crud.reset_employee_password(session, actor, employee)
+    except AuthError as exc:
+        # Same belt-and-suspenders catch as create_employee above — this call goes through the
+        # same crud._generate_password (already fixed at the source), but a raw Supabase Auth
+        # failure of any kind should never reach the client as an unhandled 500.
+        logger.error("Supabase admin.update_user_by_id failed: %s", exc)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not reset employee password"
+        ) from exc
     record_idempotency_key(
         session,
         actor,

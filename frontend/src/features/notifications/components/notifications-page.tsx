@@ -45,7 +45,7 @@ export function NotificationsPage() {
       <ul className="flex flex-col gap-2">
         {(notifications ?? []).map((n) => {
           const path = targetPath(n);
-          const message = notificationMessage(n.type);
+          const message = notificationMessage(n.type, n.taskTitle);
           // PRD §2.5: task_deadline_1_day is a distinct, visually highlighted warning, separate
           // from the general "approaching deadline" view — not just another list row.
           const isUrgent = n.type === "task_deadline_1_day";
