@@ -164,22 +164,47 @@ Read this section again before actually running the 2000-VU input set — don't 
 See `RESULTS.md` in this directory for the dated log of actual runs and what each one's findings
 do and don't support.
 
+## Tenant isolation / authz under load (2026-09-17 addition)
+
+The original version of this script only ever checked HTTP status codes — it measured latency but
+never verified *whose data* came back, and pinned one VU to one tenant for its whole run (`identity
+= identities[__VU % identities.length]`), so consecutive requests on a shared pooled DB connection
+were almost always the same tenant — exactly the scenario least likely to surface a
+pooled-connection tenant-context leak (`postgres-multitenant`'s own operations guidance: a
+session-level setting "set by one request can leak into the next" under transaction-mode pooling).
+
+`script.js` now:
+- Picks a random identity **per iteration**, not per VU, so adjacent requests on the same pooled
+  connection are much more likely to belong to different firms.
+- Asserts the `GET /tasks` list response never contains `identity.foreign_task_id` — a real task id
+  `seed.py` generated client-side and recorded as belonging to a *different* firm.
+- Directly probes `GET /tasks/{foreign_task_id}` and asserts a 404 — this project's own
+  "404 not 403" object-access convention, exercised under real concurrency, not just a single
+  pytest request.
+- Corrupts a valid token's signature and asserts 401 (auth under load), and has an Employee
+  identity attempt the Owner-only `POST /tasks` and asserts 403 (role-gating under load).
+- All of the above are tagged `isolation: "critical"` and pinned to `"checks{isolation:critical}":
+  ["rate==1"]` in `thresholds` — a single tenant-isolation or authz-bypass failure fails the whole
+  run, not just a quieter number in the summary.
+
+This doesn't replace `tests/crud/test_tenant_isolation_*.py` (those are the precise, single-request
+proof); it answers a different question those can't: does isolation still hold at real concurrency,
+under real connection-pool reuse, not just in a single test transaction.
+
 ## What's not built (deliberately, not an oversight)
 
-- **Writes** (create/submit/review) — this first pass is read-only, matching the emphasis on
-  `GET /notifications`' continuous-polling load. Add write scenarios once read-path latency has a
-  real baseline to compare against.
 - **A real-deployment run** — needs actual Supabase-issued tokens for real synthetic test users
   (not this JWKS-stub trick), and a staging environment to target — both explicitly out of scope
   until `DEPLOYMENT.md`'s own deferred trigger is hit.
-- **`script.js` only exercises 4 of the API's 17 real endpoints** (grepped every `@router.get/
-  post/patch` across `app/api/routes/`, 2026-09-09) — `GET /notifications`, `GET /tasks`,
-  `GET /tasks/{id}`, `GET /job-types`. Not touched at all: every `employees` endpoint (list *and*
-  every mutation), every `issues` endpoint, `PATCH /notifications/{id}/read`, and every `tasks`
-  mutation (create/deadline/submit/mark-billed/review/raise-issue). Deliberate for this first pass
-  — matches the "read-only, polling-weighted" scope above — but worth naming precisely rather than
-  leaving "this tests the API" as a vaguer claim than what's actually true. Add `employees`/`issues`
-  reads before writes, since they're the same low-risk shape as what's already here.
+- **`script.js` now exercises 6 of the API's 17 real endpoints** (grepped every `@router.get/post/
+  patch` across `app/api/routes/`, 2026-09-09, +2 since): `GET /notifications`, `GET /tasks`,
+  `GET /tasks/{id}`, `GET /job-types`, `POST /tasks` (owner-only write + the wrong-role probe).
+  Still not touched: every `employees` endpoint, every `issues` endpoint,
+  `PATCH /notifications/{id}/read`, and every other `tasks` mutation (deadline/submit/mark-billed/
+  review/raise-issue). Add `employees`/`issues` reads next, same low-risk shape as what's here.
+- **The owner-only write lane (`POST /tasks`, 5% of iterations) grows the seeded database on every
+  run** — expected and fine for this disposable Postgres instance (README's own framing above), but
+  worth knowing before reading row-count-sensitive results from a long-held run.
 - **`RAMP_UP`/`RAMP_DOWN` aren't exposed as `workflow_dispatch` inputs** — `script.js` reads them
   from env (defaults `1m`/`30s`), and the workflow only wires through `vus`/`hold_duration`, so
   ramp shape is fixed unless run locally with `k6 run -e RAMP_UP=... -e RAMP_DOWN=...` directly.

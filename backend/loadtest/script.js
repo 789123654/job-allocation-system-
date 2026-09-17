@@ -4,11 +4,24 @@
 // system — firing synthetic load at that would risk real users' latency, Supabase free-tier rate
 // limits, and polluting the one real tenant's data. See README.md for the full reasoning.
 //
-// Reads identities.json (seed.py's output) — one seeded (firm, profile, token) per virtual user.
-// Weighted toward GET /notifications: ARCHITECTURE.md §8 has the frontend polling it every 30-60s
-// from every logged-in user — the one truly continuous query pattern in the system, the same
-// reasoning that made ix_notifications_dedup the top-priority index two turns of this discussion
-// ago. A uniform round-robin across endpoints wouldn't resemble how the app is actually used.
+// Reads identities.json (seed.py's output) — one seeded (firm, profile, token, foreign_task_id)
+// per virtual user. Weighted toward GET /notifications: ARCHITECTURE.md §8 has the frontend
+// polling it every 30-60s from every logged-in user — the one truly continuous query pattern in
+// the system, the same reasoning that made ix_notifications_dedup the top-priority index two turns
+// of this discussion ago. A uniform round-robin across endpoints wouldn't resemble how the app is
+// actually used.
+//
+// 2026-09-17 — expanded beyond pure throughput measurement, per postgres-multitenant's own
+// operations guidance on pooled-connection tenant-context leaks ("a session-level setting set by
+// one request can leak into the next" under transaction-mode pooling): the original version only
+// ever checked HTTP status codes, never *whose data* came back, and pinned one VU to one tenant
+// for its whole run — meaning consecutive requests on the same pooled DB connection were almost
+// always the same tenant, which is the one scenario least likely to surface a tenant-context bug.
+// This version rotates tenant identity per-request (not per-VU), asserts response bodies actually
+// belong to the caller, deliberately probes a known cross-tenant resource id expecting 404, and
+// adds negative-auth/wrong-role/write-path lanes. Tenant-isolation checks are tagged
+// `isolation: "critical"` and pinned to `rate==1` in `thresholds` below — any single cross-tenant
+// leak fails the whole run, not just a quieter check-rate number in the summary.
 import http from "k6/http";
 import { check, sleep } from "k6";
 import { SharedArray } from "k6/data";
@@ -40,32 +53,107 @@ export const options = {
     // the point of a first run is to establish that baseline, not to already know the right number.
     http_req_duration: ["p(95)<1000"],
     http_req_failed: ["rate<0.01"],
+    // Hard gate, not a soft one: a single tenant-isolation check failing (cross-tenant data in a
+    // list response, a foreign resource not 404ing, an authz bypass) fails the whole run outright.
+    "checks{isolation:critical}": ["rate==1"],
   },
 };
+
+// Cheap pseudo-UUID for Idempotency-Key values — this header has no format requirement beyond
+// "a UUID v4 or any other random string with enough entropy" (deps.py's own docstring, Zalando's
+// headers-1.0.0.yaml), so Math.random() entropy is fine here; this is test-harness plumbing, not a
+// security-sensitive token, and k6's sandboxed runtime has no built-in crypto-UUID without adding
+// an external jslib dependency this project doesn't otherwise use.
+function pseudoUuid() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 export default function () {
   if (identities.length === 0) {
     throw new Error("identities.json is empty — run seed.py first");
   }
-  const identity = identities[__VU % identities.length];
+  // Random per ITERATION, not `identities[__VU % identities.length]` (the original, pinned-per-VU
+  // version): a fixed VU->identity mapping means one VU's requests are always the same tenant, so
+  // consecutive requests on a shared pooled DB connection are almost never two different tenants —
+  // exactly the case least likely to catch a tenant-context leak under connection pooling. Random
+  // selection every iteration maximizes how often adjacent requests on the same connection belong
+  // to different firms.
+  const identity = identities[Math.floor(Math.random() * identities.length)];
   const headers = { Authorization: `Bearer ${identity.token}` };
 
   const roll = Math.random();
-  if (roll < 0.6) {
+  if (roll < 0.4) {
     const res = http.get(`${BASE_URL}/notifications`, { headers });
     check(res, { "notifications 200": (r) => r.status === 200 });
-  } else if (roll < 0.85) {
+  } else if (roll < 0.55) {
     const res = http.get(`${BASE_URL}/tasks`, { headers });
     check(res, { "tasks list 200": (r) => r.status === 200 });
     const body = res.status === 200 ? res.json() : null;
+    // Tenant-ownership assertion, not just a status check: the response must never contain the one
+    // task id we know for certain belongs to a different firm (seed.py's foreign_task_id).
+    if (Array.isArray(body) && identity.foreign_task_id) {
+      const leaked = body.some((t) => t.id === identity.foreign_task_id);
+      check(null, { "tasks list never contains another firm's task": () => !leaked }, { isolation: "critical" });
+    }
     if (Array.isArray(body) && body.length > 0) {
       const task = body[Math.floor(Math.random() * body.length)];
       const detail = http.get(`${BASE_URL}/tasks/${task.id}`, { headers });
       check(detail, { "task detail 200 or 404": (r) => r.status === 200 || r.status === 404 });
     }
-  } else {
+  } else if (roll < 0.65) {
     const res = http.get(`${BASE_URL}/job-types`, { headers });
     check(res, { "job-types 200": (r) => r.status === 200 });
+  } else if (roll < 0.75) {
+    // Cross-tenant object-access probe (BOLA/IDOR under real concurrency) — the actual point of
+    // this addition. A task id we know belongs to a DIFFERENT firm must 404, matching this
+    // project's own "404 not 403" convention (never confirm another tenant's row exists).
+    if (identity.foreign_task_id) {
+      const res = http.get(`${BASE_URL}/tasks/${identity.foreign_task_id}`, { headers });
+      check(res, { "cross-tenant task fetch 404s": (r) => r.status === 404 }, { isolation: "critical" });
+    } else {
+      sleep(1);
+    }
+  } else if (roll < 0.85) {
+    // Negative-auth probe: corrupt this otherwise-valid token's signature (flip the last 8 chars)
+    // and confirm auth still rejects it under load — not just in the light single-request test
+    // suite. Still tagged isolation:critical: an auth bypass under load is exactly the same class
+    // of failure as a tenant-isolation leak.
+    const tampered = identity.token.slice(0, -8) + "AAAAAAAA";
+    const res = http.get(`${BASE_URL}/notifications`, { headers: { Authorization: `Bearer ${tampered}` } });
+    check(res, { "tampered token rejected (401)": (r) => r.status === 401 }, { isolation: "critical" });
+  } else if (roll < 0.95) {
+    // Wrong-role probe: an Employee identity hitting an Owner-only endpoint must 403 under load —
+    // RequireOwnerDep's own gate, not just its single-request pytest coverage.
+    if (identity.role === "employee") {
+      const res = http.post(
+        `${BASE_URL}/tasks`,
+        JSON.stringify({ title: "should be rejected" }),
+        { headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() } },
+      );
+      check(res, { "employee creating a task is rejected (403)": (r) => r.status === 403 }, { isolation: "critical" });
+    } else {
+      const res = http.get(`${BASE_URL}/notifications`, { headers });
+      check(res, { "notifications 200": (r) => r.status === 200 });
+    }
+  } else {
+    // Owner-only write path — deliberately a small slice (5%): this seeds real rows into a
+    // disposable database on every run (README.md's own framing), not something to run heavier
+    // without reason. Exercises the create path's own RLS/tenant-context write, not just reads.
+    if (identity.role === "owner") {
+      const res = http.post(
+        `${BASE_URL}/tasks`,
+        JSON.stringify({ title: "Load test created task" }),
+        { headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() } },
+      );
+      check(res, { "owner task creation 201": (r) => r.status === 201 });
+    } else {
+      const res = http.get(`${BASE_URL}/notifications`, { headers });
+      check(res, { "notifications 200": (r) => r.status === 200 });
+    }
   }
 
   sleep(1 + Math.random() * 2); // between-poll think time, not a tight request loop

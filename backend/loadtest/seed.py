@@ -12,6 +12,10 @@ must_change_password=false is set explicitly on every seeded profile, same as ow
 column defaults to true (models.py), and require_password_set (api/deps.py) 403s every other
 request while it's true; leaving it at the default would make every load-test request fail at the
 auth gate before reaching any of the code actually under test.
+
+Each identity also gets a `foreign_task_id` (2026-09-17 addition) — a real task id belonging to a
+DIFFERENT firm, so script.js can assert cross-tenant access actually 404s under real concurrency,
+not just measure latency on each caller's own data.
 """
 
 import argparse
@@ -40,6 +44,10 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
     firm_rows: list[dict] = []
     profile_rows: list[dict] = []
     task_rows: list[dict] = []
+    # firm_id -> [task_id, ...], client-generated below (not DB-returned) so script.js's
+    # cross-tenant probe (2026-09-17 addition) has a real task id it KNOWS belongs to a different
+    # firm than the requester, without an extra round-trip or RETURNING clause.
+    tasks_by_firm: dict[object, list[object]] = {}
     now = datetime.now(UTC)
 
     for _ in range(firms):
@@ -75,6 +83,7 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
                 {"firm_id": str(firm_id), "profile_id": str(emp_id), "role": "employee"}
             )
 
+        firm_task_ids: list[object] = []
         for _ in range(tasks_per_firm):
             # Mixed spread so _ensure_owner_deadline_notifications/_ensure_employee_deadline_
             # notifications (crud.py) have real overdue/urgent/approaching/far-future/none cases to
@@ -95,8 +104,11 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
             assigned_to = (
                 random.choice(employee_ids) if employee_ids and status != "created" else None
             )
+            task_id = uuid4()
+            firm_task_ids.append(task_id)
             task_rows.append(
                 {
+                    "id": task_id,
                     "fid": firm_id,
                     "title": "Load test task",
                     "assigned_to": assigned_to,
@@ -105,6 +117,7 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
                     "created_by": owner_id,
                 }
             )
+        tasks_by_firm[firm_id] = firm_task_ids
 
     if firm_rows:
         conn.execute(
@@ -127,13 +140,31 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
         conn.execute(
             text(
                 "INSERT INTO tasks "
-                "(firm_id, title, assigned_to, deadline, status, created_by, "
+                "(id, firm_id, title, assigned_to, deadline, status, created_by, "
                 "created_at, updated_at) "
-                "VALUES (:fid, :title, :assigned_to, :deadline, :status, :created_by, "
+                "VALUES (:id, :fid, :title, :assigned_to, :deadline, :status, :created_by, "
                 "now(), now())"
             ),
             task_rows,
         )
+
+    # Cross-tenant probe target (script.js, 2026-09-17): each identity gets one real task id known
+    # to belong to a DIFFERENT firm, so the load test can assert GET /tasks/{id} 404s for it under
+    # real concurrency — not just check status codes on the caller's own data. Rejection sampling,
+    # not a filtered list comprehension per identity: at the real target scale (2,000 firms /
+    # ~10,000 identities) an O(firms) filter per identity is O(firms x identities); picking a
+    # random firm and retrying only on the (1/firms) chance of a self-match is O(1) amortized.
+    firm_ids = [fid for fid, tids in tasks_by_firm.items() if tids]
+    for identity in identities:
+        if len(firm_ids) < 2:
+            identity["foreign_task_id"] = None  # nothing foreign exists to pick
+            continue
+        while True:
+            other_firm = random.choice(firm_ids)
+            if str(other_firm) != identity["firm_id"]:
+                break
+        identity["foreign_task_id"] = str(random.choice(tasks_by_firm[other_firm]))
+
     return identities
 
 
