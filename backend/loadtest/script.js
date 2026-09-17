@@ -112,7 +112,10 @@ export default function () {
     // this addition. A task id we know belongs to a DIFFERENT firm must 404, matching this
     // project's own "404 not 403" convention (never confirm another tenant's row exists).
     if (identity.foreign_task_id) {
-      const res = http.get(`${BASE_URL}/tasks/${identity.foreign_task_id}`, { headers });
+      const res = http.get(`${BASE_URL}/tasks/${identity.foreign_task_id}`, {
+        headers,
+        responseCallback: http.expectedStatuses(404),
+      });
       check(res, { "cross-tenant task fetch 404s": (r) => r.status === 404 }, { isolation: "critical" });
     } else {
       sleep(1);
@@ -123,7 +126,10 @@ export default function () {
     // suite. Still tagged isolation:critical: an auth bypass under load is exactly the same class
     // of failure as a tenant-isolation leak.
     const tampered = identity.token.slice(0, -8) + "AAAAAAAA";
-    const res = http.get(`${BASE_URL}/notifications`, { headers: { Authorization: `Bearer ${tampered}` } });
+    const res = http.get(`${BASE_URL}/notifications`, {
+      headers: { Authorization: `Bearer ${tampered}` },
+      responseCallback: http.expectedStatuses(401),
+    });
     check(res, { "tampered token rejected (401)": (r) => r.status === 401 }, { isolation: "critical" });
   } else if (roll < 0.95) {
     // Wrong-role probe: an Employee identity hitting an Owner-only endpoint must 403 under load —
@@ -132,7 +138,10 @@ export default function () {
       const res = http.post(
         `${BASE_URL}/tasks`,
         JSON.stringify({ title: "should be rejected" }),
-        { headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() } },
+        {
+          headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() },
+          responseCallback: http.expectedStatuses(403),
+        },
       );
       check(res, { "employee creating a task is rejected (403)": (r) => r.status === 403 }, { isolation: "critical" });
     } else {
