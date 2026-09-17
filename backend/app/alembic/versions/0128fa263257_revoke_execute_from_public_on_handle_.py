@@ -29,9 +29,33 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.execute("REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM PUBLIC")
-    op.execute("REVOKE EXECUTE ON FUNCTION public.rls_auto_enable() FROM PUBLIC")
+    # Same guard as 82764b1d04cb, same reason: rls_auto_enable() only exists on the real Supabase
+    # project, never created by any migration in this repo — a bare REVOKE fails UndefinedFunction
+    # on any fresh bootstrap (ci.yml/loadtest.yml). No-op where it doesn't exist, real revoke where
+    # it does.
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_proc WHERE proname = 'rls_auto_enable'
+                AND pronamespace = 'public'::regnamespace
+            ) THEN
+                REVOKE EXECUTE ON FUNCTION public.rls_auto_enable() FROM PUBLIC;
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:
     op.execute("GRANT EXECUTE ON FUNCTION public.handle_new_user() TO PUBLIC")
-    op.execute("GRANT EXECUTE ON FUNCTION public.rls_auto_enable() TO PUBLIC")
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_proc WHERE proname = 'rls_auto_enable'
+                AND pronamespace = 'public'::regnamespace
+            ) THEN
+                GRANT EXECUTE ON FUNCTION public.rls_auto_enable() TO PUBLIC;
+            END IF;
+        END $$;
+    """)

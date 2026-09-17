@@ -29,9 +29,35 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.execute("REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM anon, authenticated")
-    op.execute("REVOKE EXECUTE ON FUNCTION public.rls_auto_enable() FROM anon, authenticated")
+    # rls_auto_enable() exists only on the real Supabase project (created there directly, outside
+    # any migration in this repo — not something this project's own migrations define) — a fresh
+    # bootstrap (CI's ci.yml/loadtest.yml, both `alembic upgrade head` against a vanilla postgres:17
+    # container) has no such function, so a bare REVOKE fails the whole migration chain with
+    # UndefinedFunction. Guard so this is a real no-op wherever the function doesn't exist, and
+    # still revokes for real wherever it does (found live via loadtest.yml's own run, 2026-09-17).
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_proc WHERE proname = 'rls_auto_enable'
+                AND pronamespace = 'public'::regnamespace
+            ) THEN
+                REVOKE EXECUTE ON FUNCTION public.rls_auto_enable() FROM anon, authenticated;
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:
     op.execute("GRANT EXECUTE ON FUNCTION public.handle_new_user() TO anon, authenticated")
-    op.execute("GRANT EXECUTE ON FUNCTION public.rls_auto_enable() TO anon, authenticated")
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_proc WHERE proname = 'rls_auto_enable'
+                AND pronamespace = 'public'::regnamespace
+            ) THEN
+                GRANT EXECUTE ON FUNCTION public.rls_auto_enable() TO anon, authenticated;
+            END IF;
+        END $$;
+    """)
