@@ -86,10 +86,10 @@ export default function () {
   const headers = { Authorization: `Bearer ${identity.token}` };
 
   const roll = Math.random();
-  if (roll < 0.4) {
+  if (roll < 0.35) {
     const res = http.get(`${BASE_URL}/notifications`, { headers });
     check(res, { "notifications 200": (r) => r.status === 200 });
-  } else if (roll < 0.55) {
+  } else if (roll < 0.45) {
     const res = http.get(`${BASE_URL}/tasks`, { headers });
     check(res, { "tasks list 200": (r) => r.status === 200 });
     const body = res.status === 200 ? res.json() : null;
@@ -104,10 +104,10 @@ export default function () {
       const detail = http.get(`${BASE_URL}/tasks/${task.id}`, { headers });
       check(detail, { "task detail 200 or 404": (r) => r.status === 200 || r.status === 404 });
     }
-  } else if (roll < 0.65) {
+  } else if (roll < 0.52) {
     const res = http.get(`${BASE_URL}/job-types`, { headers });
     check(res, { "job-types 200": (r) => r.status === 200 });
-  } else if (roll < 0.75) {
+  } else if (roll < 0.59) {
     // Cross-tenant object-access probe (BOLA/IDOR under real concurrency) — the actual point of
     // this addition. A task id we know belongs to a DIFFERENT firm must 404, matching this
     // project's own "404 not 403" convention (never confirm another tenant's row exists).
@@ -120,7 +120,7 @@ export default function () {
     } else {
       sleep(1);
     }
-  } else if (roll < 0.85) {
+  } else if (roll < 0.66) {
     // Negative-auth probe: corrupt this otherwise-valid token's signature (flip the last 8 chars)
     // and confirm auth still rejects it under load — not just in the light single-request test
     // suite. Still tagged isolation:critical: an auth bypass under load is exactly the same class
@@ -131,7 +131,7 @@ export default function () {
       responseCallback: http.expectedStatuses(401),
     });
     check(res, { "tampered token rejected (401)": (r) => r.status === 401 }, { isolation: "critical" });
-  } else if (roll < 0.95) {
+  } else if (roll < 0.72) {
     // Wrong-role probe: an Employee identity hitting an Owner-only endpoint must 403 under load —
     // RequireOwnerDep's own gate, not just its single-request pytest coverage.
     if (identity.role === "employee") {
@@ -148,7 +148,7 @@ export default function () {
       const res = http.get(`${BASE_URL}/notifications`, { headers });
       check(res, { "notifications 200": (r) => r.status === 200 });
     }
-  } else {
+  } else if (roll < 0.77) {
     // Owner-only write path — deliberately a small slice (5%): this seeds real rows into a
     // disposable database on every run (README.md's own framing), not something to run heavier
     // without reason. Exercises the create path's own RLS/tenant-context write, not just reads.
@@ -162,6 +162,119 @@ export default function () {
     } else {
       const res = http.get(`${BASE_URL}/notifications`, { headers });
       check(res, { "notifications 200": (r) => r.status === 200 });
+    }
+  } else if (roll < 0.85) {
+    // 2026-09-18 — PATCH /notifications/{id}/read. get_notification checks recipient_id but has no
+    // explicit firm_id filter in its query (crud.py) — it leans on RLS alone for tenant scoping, so
+    // this cross-tenant probe exercises that RLS boundary directly, not just an app-layer check.
+    const list = http.get(`${BASE_URL}/notifications`, { headers });
+    const own = list.status === 200 ? list.json() : null;
+    if (Array.isArray(own) && own.length > 0) {
+      const n = own[Math.floor(Math.random() * own.length)];
+      const res = http.patch(`${BASE_URL}/notifications/${n.id}/read`, null, { headers });
+      check(res, { "notification marked read 200": (r) => r.status === 200 });
+    }
+    if (identity.foreign_notification_id) {
+      const cross = http.patch(
+        `${BASE_URL}/notifications/${identity.foreign_notification_id}/read`,
+        null,
+        { headers, responseCallback: http.expectedStatuses(404) },
+      );
+      check(
+        cross,
+        { "cross-tenant notification PATCH 404s": (r) => r.status === 404 },
+        { isolation: "critical" },
+      );
+    }
+  } else if (roll < 0.93) {
+    // 2026-09-18 — PATCH /job-types/{id}, Owner-only (RequireOwnerDep + firm-scoped get_job_type,
+    // 404-not-403). Owner exercises the real write + cross-tenant probe; Employee exercises the
+    // role gate itself, same shape as the wrong-role POST /tasks probe above.
+    if (identity.role === "owner") {
+      const list = http.get(`${BASE_URL}/job-types`, { headers });
+      const own = list.status === 200 ? list.json() : null;
+      if (Array.isArray(own) && own.length > 0) {
+        const jt = own[Math.floor(Math.random() * own.length)];
+        const res = http.patch(
+          `${BASE_URL}/job-types/${jt.id}`,
+          JSON.stringify({ is_active: jt.is_active }),
+          { headers: { ...headers, "Content-Type": "application/json" } },
+        );
+        check(res, { "job type update 200": (r) => r.status === 200 });
+      }
+      if (identity.foreign_job_type_id) {
+        const cross = http.patch(
+          `${BASE_URL}/job-types/${identity.foreign_job_type_id}`,
+          JSON.stringify({ is_active: true }),
+          {
+            headers: { ...headers, "Content-Type": "application/json" },
+            responseCallback: http.expectedStatuses(404),
+          },
+        );
+        check(
+          cross,
+          { "cross-tenant job type PATCH 404s": (r) => r.status === 404 },
+          { isolation: "critical" },
+        );
+      }
+    } else {
+      const res = http.patch(
+        `${BASE_URL}/job-types/${identity.foreign_job_type_id || pseudoUuid()}`,
+        JSON.stringify({ is_active: true }),
+        {
+          headers: { ...headers, "Content-Type": "application/json" },
+          responseCallback: http.expectedStatuses(403),
+        },
+      );
+      check(
+        res,
+        { "employee updating a job type is rejected (403)": (r) => r.status === 403 },
+        { isolation: "critical" },
+      );
+    }
+  } else {
+    // 2026-09-18 — PATCH /tasks/{id}/deadline, Owner-only, same shape as job-types above.
+    if (identity.role === "owner") {
+      const list = http.get(`${BASE_URL}/tasks`, { headers });
+      const own = list.status === 200 ? list.json() : null;
+      if (Array.isArray(own) && own.length > 0) {
+        const t = own[Math.floor(Math.random() * own.length)];
+        const res = http.patch(
+          `${BASE_URL}/tasks/${t.id}/deadline`,
+          JSON.stringify({ deadline: new Date(Date.now() + 86400000).toISOString() }),
+          { headers: { ...headers, "Content-Type": "application/json" } },
+        );
+        check(res, { "task deadline update 200": (r) => r.status === 200 });
+      }
+      if (identity.foreign_task_id) {
+        const cross = http.patch(
+          `${BASE_URL}/tasks/${identity.foreign_task_id}/deadline`,
+          JSON.stringify({ deadline: new Date(Date.now() + 86400000).toISOString() }),
+          {
+            headers: { ...headers, "Content-Type": "application/json" },
+            responseCallback: http.expectedStatuses(404),
+          },
+        );
+        check(
+          cross,
+          { "cross-tenant task deadline PATCH 404s": (r) => r.status === 404 },
+          { isolation: "critical" },
+        );
+      }
+    } else {
+      const res = http.patch(
+        `${BASE_URL}/tasks/${identity.foreign_task_id || pseudoUuid()}/deadline`,
+        JSON.stringify({ deadline: new Date(Date.now() + 86400000).toISOString() }),
+        {
+          headers: { ...headers, "Content-Type": "application/json" },
+          responseCallback: http.expectedStatuses(403),
+        },
+      );
+      check(
+        res,
+        { "employee updating a task deadline is rejected (403)": (r) => r.status === 403 },
+        { isolation: "critical" },
+      );
     }
   }
 

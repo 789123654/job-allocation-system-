@@ -191,6 +191,27 @@ This doesn't replace `tests/crud/test_tenant_isolation_*.py` (those are the prec
 proof); it answers a different question those can't: does isolation still hold at real concurrency,
 under real connection-pool reuse, not just in a single test transaction.
 
+## Saved command: 300-VU / 2000-user security run (2026-09-18)
+
+The isolation/authz checks above only exist on `phase5/tenant-isolation-defense-in-depth` — they
+were never merged to `main`. `gh workflow run` defaults to `main` when `--ref` is omitted, which
+silently runs the *old* script with none of the isolation checks (found the hard way this session:
+a "clean" run with 0 failures that had actually executed zero security checks). Always pass `--ref`
+explicitly until this branch merges:
+
+```bash
+gh workflow run loadtest.yml \
+  --ref phase5/tenant-isolation-defense-in-depth \
+  -f vus=300 -f hold_duration=3m \
+  -f firms=200 -f employees_per_firm=10 -f tasks_per_firm=60
+```
+
+200 firms × 10 employees/firm = 2,000 seeded users, 300 peak concurrent VUs. Watch it with
+`gh run watch <run-id> --exit-status`; pull real per-check pass counts (not just the console
+summary, which can silently omit checks — see above) with
+`gh run download <run-id> -n k6-summary -D <dir>` and read `<dir>/summary.json`'s
+`root_group.checks` and `metrics["checks{isolation:critical}"]`.
+
 ## What's not built (deliberately, not an oversight)
 
 - **A real-deployment run** — needs actual Supabase-issued tokens for real synthetic test users
