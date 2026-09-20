@@ -240,11 +240,30 @@ gets its own check, not inherited trust from the mechanism's docs-example defaul
 (skill-verification-discipline.md failure mode 7). CSP's `connect-src` (`tauri.conf.json`) allows
 `https://*.ingest.sentry.io` accordingly.
 
+**Corrected 2026-09-19 — "default-off" was not enough.** The paragraph above says leaving
+`send_default_pii` unset keeps request bodies and headers out of Sentry. Capturing a real event from a
+FastAPI app with the SDK's defaults (sentry-sdk 2.68.1) showed otherwise: the request body was in
+`request.data`, and every stack frame's local variables were attached — including the raw
+`Authorization: Bearer` header inside the ASGI scope. `include_local_variables=False`,
+`max_request_body_size="never"` and a `before_send` scrubber (`backend/app/core/sentry_config.py`) now
+close that; the trade-off (no variable snapshot on an event) is in `OBSERVABILITY.md` §3. The
+"structured JSON logs" promised above are implemented (same date): tenant-tagged, injection-safe,
+allowlisted fields, database-echoed values redacted.
+
 **Uptime alerting — a real gap Railway itself admits to.** Its own docs state plainly: no built-in alerting;
 forward to a third-party tool for that. **UptimeRobot's free tier** (verified: generous free monitor count,
-5-minute check interval) pings the API's health-check endpoint and emails on downtime — the free, minimal
+5-minute check interval) pings the API and emails on downtime — the free, minimal
 answer to "if the pilot's API goes down at 2am, does anyone find out." Not real-time, not enterprise-grade,
-proportionate to a 10-40 user pilot.
+proportionate to a 10-40 user pilot. **Point it at `/ready`, not `/health` (revised 2026-09-19):** `/health`
+is liveness only and stays green while Postgres is down; `/ready` runs a bounded, fail-closed database probe
+(`OBSERVABILITY.md` §4).
+
+**Added 2026-09-19 (Observability Phase 1, `OBSERVABILITY.md`):** two scheduled GitHub Actions checks, both
+off until a repo variable enables them — a least-privilege read-only database health check
+(`ops-db-check.yml`, catches connection headroom, stuck/slow/blocked work, vacuum lag, table growth) and a
+tenant-isolation canary (`isolation-canary.yml`, synthetic firms probing the deployed API). Neither needs new
+infrastructure or a paid service; a failed run is the notification. The log inventory (ASVS 16.1.1), the
+alert matrix with what is *not* yet watched, and the runbooks are in that file.
 
 **Explicitly not built this phase**: no APM/tracing (Datadog, New Relic-style), no log aggregation platform,
 no on-call rotation/paging. All infrastructure for a scale and team size this project doesn't have yet — the

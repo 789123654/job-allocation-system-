@@ -1,7 +1,12 @@
 // API_SPEC.md / notifications.py's NotificationOut — read data, not form input, no Zod schema
-// needed. The 8 type values below mirror DATA_MODEL.md §5's table exactly (its own 1:1 mapping
+// needed. The 9 type values below mirror DATA_MODEL.md §5's table exactly (its own 1:1 mapping
 // to PRD §2.5/§3.4 bullets), re-read fresh this pass rather than assumed from the bare `type:
 // string` this interface had when only the Dashboard's Issues Raised panel consumed it.
+//
+// issue_resolved added 2026-09-18 (reported gap): resolve_issue previously only notified the
+// issue's raiser for resolution_type="reassigned" (task_reassigned) — "clarified" and
+// "deadline_adjusted" left them with no signal at all. Backend now fires this for all three
+// (crud.py's resolve_issue; DB CHECK constraint widened via migration 0563652c7653).
 export type NotificationType =
   | "task_submitted"
   | "task_overdue"
@@ -10,7 +15,8 @@ export type NotificationType =
   | "task_assigned"
   | "task_reassigned"
   | "task_deadline_approaching"
-  | "task_overdue_own";
+  | "task_overdue_own"
+  | "issue_resolved";
 
 export interface Notification {
   id: string;
@@ -50,5 +56,7 @@ export function notificationMessage(type: NotificationType, taskTitle: string | 
       return `${taskTitle ? `"${taskTitle}"` : "A task"} is approaching its deadline`;
     case "task_overdue_own":
       return `Your task ${task} is overdue`;
+    case "issue_resolved":
+      return `Your issue on ${task} was resolved`;
   }
 }

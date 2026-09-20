@@ -20,10 +20,13 @@ Derived directly from the PRD, nothing speculative added — this is also the in
 | My Tasks (own pending + reassigned work) | §3.2 | Employee |
 | Task Detail & Submit (billing-type tasks: Mark Billed instead of Mark Completed — see below) | §3.3/§4.2 | Employee |
 | Raise Issue | §3.3 | Employee |
+| Issue Detail (read-only — see below) | §2.7/§3.4/§4.3 (added 2026-09-18) | Employee |
 | Notifications (both roles, own list per `API_SPEC.md` `GET /notifications`) | §2.5/§3.4 | Both |
 | Change Password (self-service, any time — see below) | — (added 2026-09-02) | Both |
 
-11 product screens plus Login, Set New Password, and Change Password. Matches `ARCHITECTURE.md` §7's "CRUD-dashboard-shaped" framing — no screen here needs anything beyond lists, forms, and detail views.
+12 product screens plus Login, Set New Password, and Change Password. Matches `ARCHITECTURE.md` §7's "CRUD-dashboard-shaped" framing — no screen here needs anything beyond lists, forms, and detail views.
+
+**Issue Detail, added 2026-09-18 (reported gap):** the raiser's read-only counterpart to Issue Resolution above — `GET /issues/{id}` was Owner-only until this pass, so an Employee whose issue was resolved had no way to ever read the Owner's `resolution_notes`; their "issue resolved" notification opened Task Detail & Submit instead, which has no idea an issue exists at all. Widened server-side (`crud.get_issue`, least-privilege: Owner sees any issue in their firm, an Employee only their own) and given this one screen — `/issues/:issueId`, `IssueDetailPage` — showing the same description/resolution fields Issue Resolution shows the Owner, minus the resolve form.
 
 **Corrected 2026-09-02, same pattern as the earlier Task List merge — found while grounding the Employee loop before drawing it:** this table originally listed "Mark Billing Task Billed" as its own screen. Checked PRD §4.2 directly: *"billing task appears in that employee's normal task list → Employee marks it Billed (no review step)."* That's the same task list and the same task-opening flow as any other task — Task Detail & Submit — just a different terminal action button depending on `task_type`, not a second screen. Folded in above; screen count corrected 12 → 11 (product screens).
 
@@ -248,6 +251,19 @@ Kebab-case file naming, enforced via the same `check-file` ESLint plugin the sou
   only the 4 billing fields would leave the same file inconsistent (some inputs wired, most not), and
   no code-review finding named the gap itself, only its two symptoms. Revisit in Phase 2 as one pass
   across every form component, not per-field patches.
+- **No persistent "issue raised" indicator on a task row — deferred to Phase 2.** Reported
+  2026-09-18: after an Employee raises an issue, `crud.py`'s `create_issue` deliberately never
+  mutates `Task.status` (PRD §2.7/§4.3 — an issue is its own row, not a task state; there is no
+  `issue_raised` value in `TaskStatus` at all), so My Tasks' Status cell correctly keeps showing
+  "Pending"/"In progress" afterward. Shipped 2026-09-18 as the cheap fix: `RaiseIssueDialog` now
+  shows an explicit "Issue raised" confirmation instead of closing silently (this app has no toast
+  system), so the Employee gets one-time feedback that it worked. What's still missing: nothing
+  shows on the row itself after that dialog closes, or on reload — `TaskOut` carries no issue
+  field at all (`mappers.ts`'s `TaskOutDto`), so the frontend has no data to render a badge from.
+  The real fix needs a backend change: add e.g. `has_open_issue: bool` to `TaskOut` (a join against
+  open `Issues` per task in `crud.list_tasks`/`get_task`), then a small badge next to Status on
+  both My Tasks and the Owner Dashboard's All Tasks table. Deferred because it's a schema/API
+  change, not a frontend-only patch like the confirmation dialog was.
 
 ---
 

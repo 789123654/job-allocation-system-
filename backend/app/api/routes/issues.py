@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from app import crud
-from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
+from app.api.deps import ActiveProfileDep, IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.api.routes.tasks import IssueOut
 from app.core.idempotency import with_idempotency
 from app.core.validation import NoNulStr
@@ -45,14 +45,18 @@ class IssueResolveRequest(BaseModel):
 
 
 @router.get("/{issue_id}")
-def get_issue(issue_id: UUID, actor: RequireOwnerDep, session: SessionDep) -> IssueOut:
+def get_issue(issue_id: UUID, actor: ActiveProfileDep, session: SessionDep) -> IssueOut:
     # Added for the Dashboard's "Issues Raised" panel (Phase 4, Owner-side Tasks slice,
     # 2026-09-12) — GET /notifications only carries {type, task_id, issue_id}, no description
     # text, and resolve_issue was previously the only way to touch an Issue at all (a mutating
-    # read, wrong for a panel that just displays it). Same RLS/Owner-only shape as resolve_issue
-    # below, re-verified fresh this pass (migration a3f5c9e21d07: issues has ENABLE+FORCE ROW
-    # LEVEL SECURITY + a tenant_isolation policy, same as job_types) — not a new authorization
-    # mechanism, just a read-only sibling of an already-vetted one.
+    # read, wrong for a panel that just displays it). RLS-scoped (migration a3f5c9e21d07:
+    # ENABLE+FORCE ROW LEVEL SECURITY + a tenant_isolation policy, same as job_types).
+    #
+    # Widened from RequireOwnerDep to ActiveProfileDep, 2026-09-18 (reported gap): the raiser
+    # themselves had no way to ever read their own issue — including resolution_notes once the
+    # Owner resolved it. crud.get_issue is what actually enforces this isn't a blanket-access
+    # widening: an Employee only gets their own (raised_by == actor.id), 404 not 403 — see its
+    # docstring.
     issue = crud.get_issue(session, actor, issue_id)
     if issue is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Issue not found")

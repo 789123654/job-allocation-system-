@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { queryClient } from "@/lib/query-client";
+import { setSentryTenant } from "@/lib/sentry-context";
 import { supabase } from "@/lib/supabase-client";
 
 // Lives here (shared), not in features/auth/ — the ESLint unidirectional-import rule forbids one
@@ -55,10 +56,18 @@ function deriveState(
 // survives a session boundary at all, regardless of whose key it was under). Both are cheap; only
 // relying on one and calling the other "redundant" would reopen exactly the gap this pass found.
 async function applySessionUpdate(
-  setState: (state: SessionState) => void,
+  setStateRaw: (state: SessionState) => void,
   session: Session | null,
   isLoading: boolean,
 ): Promise<void> {
+  // The ONE place the Sentry tenant tag follows session state: every branch below (signed out,
+  // claims unavailable, claims read) goes through this, so a logout or a switch to another firm can
+  // never leave the previous firm's id on later error reports (code-review root cause A — fix at
+  // the single choke point, not per branch).
+  const setState = (state: SessionState) => {
+    setSentryTenant(state.firmId);
+    setStateRaw(state);
+  };
   if (!session) {
     setState(deriveState(null, undefined, isLoading));
     queryClient.clear();

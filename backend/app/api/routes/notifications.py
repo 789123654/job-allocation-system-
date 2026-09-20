@@ -63,9 +63,12 @@ def mark_notification_read(
     if notification is None:
         # 404, not 403 — recipient-only, same IDOR reasoning as every other resource here.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Notification not found")
+    # Title lookup BEFORE mark_notification_read, not after: that call commits, which ends the
+    # transaction the RLS tenant context (`set_config(..., true)`) lives in, so a query after it
+    # runs with no tenant context — a 500 (uuid-cast DataError) or a silently null title. Same bug
+    # class as crud.py's module docstring; found 2026-09-19 (test_notifications_real_db.py).
+    task_ids = [notification.task_id] if notification.task_id else []
+    titles = crud.get_task_titles(session, actor, task_ids)
     notification = crud.mark_notification_read(session, notification)
-    titles = crud.get_task_titles(
-        session, actor, [notification.task_id] if notification.task_id else []
-    )
     task_title = titles.get(notification.task_id) if notification.task_id else None
     return _to_notification_out(session, actor, notification, task_title)

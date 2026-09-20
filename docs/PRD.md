@@ -66,7 +66,7 @@ When an employee submits (marks complete) an assigned task, the owner reviews it
 
 ### 2.7 Issue Handling
 
-When an employee raises an issue on an assigned task, the owner is notified and can view the issue against that task to resolve it (e.g. clarify scope, adjust deadline, reassign — reassignment from this path also notifies the employee, same as a review-triggered reassignment, see §3.3).
+When an employee raises an issue on an assigned task, the owner is notified and can view the issue against that task to resolve it (e.g. clarify scope, adjust deadline, reassign — reassignment from this path also notifies the employee, same as a review-triggered reassignment, see §3.3). **Every resolution notifies the employee who raised it that it's been resolved** (added 2026-09-18, reported gap — the original spec above only named the reassign case's own reassignment notice, leaving "clarify" and "deadline adjusted" resolutions with no notice to the raiser at all).
 
 ### 2.8 Billing Task Creation (replaces the original "Billing button → Billing Associate queue" flow)
 
@@ -108,6 +108,7 @@ The billing task then follows the **employee's normal task flow** (§3), except 
 - Task reassigned to them — covers both trigger paths (§3.3)
 - Task approaching deadline
 - **Task not completed by deadline** (new — the original PRD only notified the Owner on overdue; employees now get their own overdue notice on their own tasks too, generated firm-wide so they land whether or not the employee has opened the app — see `API_SPEC.md` Notifications note)
+- **An issue they raised was resolved** (added 2026-09-18 — covers all three resolution outcomes in §2.7/§4.3, not just the reassign case, which already had its own separate "task reassigned" notice above)
 
 ### 3.5 Interface
 - Desktop only for this phase (mobile dropped, see §6)
@@ -124,14 +125,14 @@ Owner reviews a submitted task → presses Billing → linked billing task creat
 
 ### 4.3 Issue Flow
 
-Employee raises an issue on an assigned task → Owner notified → Owner views issue against the task → Owner resolves (clarify, adjust deadline, or reassign — reassignment here notifies the employee same as §3.3).
+Employee raises an issue on an assigned task → Owner notified → Owner views issue against the task → Owner resolves (clarify, adjust deadline, or reassign — reassignment here notifies the employee same as §3.3) → **employee notified their issue was resolved, for all three outcomes** (added 2026-09-18).
 
 ### 4.4 Notification Summary (fully updated)
 
 | Role | Notified When |
 |---|---|
 | Owner | Task submitted by employee · Task overdue · **Task 1 day from deadline (highlighted)** · Issue raised by employee |
-| Employee | New task assigned to them (individually) · Task reassigned to them (post-review or post-issue-resolution) · Task approaching deadline · **Task not completed by their own deadline** |
+| Employee | New task assigned to them (individually) · Task reassigned to them (post-review or post-issue-resolution) · Task approaching deadline · **Task not completed by their own deadline** · **An issue they raised was resolved (added 2026-09-18)** |
 
 ## 5. Login Flow
 

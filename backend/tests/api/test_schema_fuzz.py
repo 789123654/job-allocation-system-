@@ -214,9 +214,10 @@ def test_every_operation_rejects_a_missing_token(case: "schemathesis.Case[Any]")
     running and blew up). In practice this is 401/403 from the auth dependency, plus the odd 404/
     405/422 from schemathesis's negative phase mutating the method or a path param; a documented
     method wrongly rejected would be caught by test_api_contract's positive run above.
-    `/health` is the one intentionally public route.
+    `/health` (liveness) and `/ready` (readiness, app/core/health.py; only "ok"/"unavailable", no
+    data) are the intentionally public routes: an uptime monitor can't hold a token.
     """
-    if case.path == "/health":
+    if case.path in ("/health", "/ready"):
         pytest.skip("intentionally public")
     response = case.call()  # no Authorization header
     assert 400 <= response.status_code < 500, (

@@ -132,7 +132,12 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
 
         job_type_id = uuid4()
         job_type_rows.append(
-            {"id": job_type_id, "fid": firm_id, "name": "Load test job type", "created_by": owner_id}
+            {
+                "id": job_type_id,
+                "fid": firm_id,
+                "name": "Load test job type",
+                "created_by": owner_id,
+            }
         )
         job_type_by_firm[firm_id] = job_type_id
 

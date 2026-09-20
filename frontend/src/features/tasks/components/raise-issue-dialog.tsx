@@ -34,7 +34,11 @@ export function RaiseIssueDialog({ taskId }: { taskId: string }) {
   async function onSubmit(input: RaiseIssueInput) {
     try {
       await createIssue.mutateAsync({ taskId, idempotencyKey, description: input.description });
-      onOpenChange(false);
+      // Deliberately NOT closing here (reported gap, 2026-09-18): the task's own status never
+      // changes when an issue is raised (crud.py's create_issue, by design — PRD §2.7/§4.3), and
+      // this app has no toast system, so a silent auto-close left the employee unsure whether
+      // anything happened. createIssue.isSuccess below swaps the form for an explicit
+      // confirmation instead; the employee closes it themselves.
     } catch {
       // createIssue.isError/.error already reflects this — rendered below.
     }
@@ -50,22 +54,39 @@ export function RaiseIssueDialog({ taskId }: { taskId: string }) {
         </Button>
       </DialogTrigger>
       <DialogContent>
-        <DialogTitle>Raise an issue</DialogTitle>
-        <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
-          <div>
-            <Label htmlFor="description">What's the issue?</Label>
-            <Input id="description" {...register("description")} />
-            {errors.description && (
-              <p className="mt-1 text-sm text-(--color-ledger-danger)">
-                {errors.description.message}
-              </p>
-            )}
-          </div>
-          {errorMessage && <p className="text-sm text-(--color-ledger-danger)">{errorMessage}</p>}
-          <Button type="submit" disabled={createIssue.isPending}>
-            {createIssue.isPending ? "Submitting…" : "Submit"}
-          </Button>
-        </form>
+        {createIssue.isSuccess ? (
+          <>
+            <DialogTitle>Issue raised</DialogTitle>
+            <p className="text-sm text-(--color-ledger-text-muted)">
+              The owner has been notified. This task's status stays the same until they resolve
+              it.
+            </p>
+            <Button type="button" className="mt-4" onClick={() => onOpenChange(false)}>
+              Close
+            </Button>
+          </>
+        ) : (
+          <>
+            <DialogTitle>Raise an issue</DialogTitle>
+            <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
+              <div>
+                <Label htmlFor="description">What's the issue?</Label>
+                <Input id="description" {...register("description")} />
+                {errors.description && (
+                  <p className="mt-1 text-sm text-(--color-ledger-danger)">
+                    {errors.description.message}
+                  </p>
+                )}
+              </div>
+              {errorMessage && (
+                <p className="text-sm text-(--color-ledger-danger)">{errorMessage}</p>
+              )}
+              <Button type="submit" disabled={createIssue.isPending}>
+                {createIssue.isPending ? "Submitting…" : "Submit"}
+              </Button>
+            </form>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

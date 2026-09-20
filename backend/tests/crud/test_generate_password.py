@@ -8,7 +8,7 @@ but 500 runs makes that overwhelmingly likely to catch.
 
 import string
 
-from app.crud import _generate_password
+from app.crud import _generate_password  # pyright: ignore[reportPrivateUsage]
 
 
 def test_generated_password_always_has_all_required_character_classes() -> None:

@@ -1,8 +1,13 @@
+import logging
+import threading
+import time
 from collections.abc import Callable, Generator
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import Engine, event
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import QueuePool
 from sqlmodel import Session, create_engine
 from sqlmodel import text as sql_text
 
@@ -10,7 +15,71 @@ from app.core.config import settings
 from app.models import Profile
 
 # Migrations (Alembic) own schema creation, not create_all() (fastapi/sql-databases.md).
-engine = create_engine(str(settings.DATABASE_URL))
+engine = create_engine(
+    str(settings.DATABASE_URL),
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    # Without this SQLAlchemy appends `[parameters: {...}]` to every failed statement's message —
+    # i.e. a firm's task title/description into Railway logs and Sentry (tests/core/
+    # test_db_parameter_hiding.py). The SQL text is kept. Postgres's OWN message can still echo a
+    # value; core/redaction.py handles that at the log/Sentry sinks.
+    hide_parameters=True,
+)
+
+_pool_logger = logging.getLogger("app.pool")
+
+
+def install_pool_monitor(
+    target: Engine,
+    *,
+    capacity: int,
+    warn_ratio: float = 0.7,
+    min_interval_seconds: float = 30.0,
+) -> None:
+    """Warn (logger `app.pool`) when the pool is nearly full. This is the leading indicator the k6
+    PATCH run (2026-09-18) showed nothing gives: it went from healthy to `QueuePool limit ...
+    reached` with no earlier signal. Fires from the pool's documented `checkout` event;
+    rate-limited per engine so a saturated pool warns once per interval, not once per request. A
+    listener error must never break a checkout (ASVS 16.5.2), hence the catch-all.
+    """
+    last_warned = float("-inf")
+    lock = threading.Lock()
+
+    def on_checkout(dbapi_connection: object, connection_record: object, proxy: object) -> None:
+        nonlocal last_warned
+        try:
+            pool = target.pool
+            if not isinstance(pool, QueuePool):
+                return
+            checked_out = pool.checkedout()
+            utilization = checked_out / capacity
+            if utilization < warn_ratio:
+                return
+            now = time.monotonic()
+            with lock:
+                if now - last_warned < min_interval_seconds:
+                    return
+                last_warned = now
+            _pool_logger.warning(
+                "Database connection pool utilization high",
+                extra={
+                    "event": "pool_high_utilization",
+                    "checked_out": checked_out,
+                    "capacity": capacity,
+                    "utilization": round(utilization, 3),
+                },
+            )
+        except Exception:
+            return
+
+    event.listen(target, "checkout", on_checkout)
+
+
+install_pool_monitor(
+    engine,
+    capacity=settings.DB_POOL_SIZE + settings.DB_MAX_OVERFLOW,
+    warn_ratio=settings.DB_POOL_WARN_RATIO,
+)
 
 
 def as_aware_utc(value: datetime) -> datetime:

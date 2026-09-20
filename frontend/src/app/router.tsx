@@ -9,6 +9,7 @@ import { useEmployees } from "@/features/employees/api/get-employees";
 import { OwnerDashboardPage } from "@/app/owner-dashboard-page";
 import { JobTypeManagementPage } from "@/features/job-types/components/job-type-management-page";
 import { useNotifications } from "@/features/notifications/api/get-notifications";
+import { IssueDetailPage } from "@/features/tasks/components/issue-detail-page";
 import { IssueResolutionPage } from "@/features/tasks/components/issue-resolution-page";
 import { MyTasksPage } from "@/features/tasks/components/my-tasks-page";
 import { NotificationsPage } from "@/features/notifications/components/notifications-page";
@@ -180,6 +181,15 @@ function TaskDetailRoute() {
   return <TaskDetailPage key={taskId} />;
 }
 
+// Same key-remount reasoning as TaskDetailRoute above, applied to IssueDetailPage — a plain read
+// view (no per-instance Idempotency-Key to worry about, unlike TaskDetailPage/OwnerTaskReviewRoute
+// et al.), but keying it still avoids a stale query-cache render if the raiser navigates from one
+// resolved issue's notification straight to another's without an intervening full page load.
+function IssueDetailRoute() {
+  const { issueId } = useParams<{ issueId: string }>();
+  return <IssueDetailPage key={issueId} />;
+}
+
 // Same key-remount reasoning as TaskDetailRoute above, applied to OwnerTaskReviewPage's own
 // per-task Idempotency-Key. Also the composition point FRONTEND_ARCHITECTURE.md §2's "features
 // cannot import each other" requires: features/tasks can't import features/employees directly,
@@ -234,6 +244,7 @@ export const router = createBrowserRouter([
         children: [
           { path: "tasks", element: <MyTasksPage /> },
           { path: "tasks/:taskId", element: <TaskDetailRoute /> },
+          { path: "issues/:issueId", element: <IssueDetailRoute /> },
         ],
       },
     ],

@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 from sqlmodel import text as sql_text
 
 from app import crud
+from app.core import request_context
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import InvalidTokenError, verify_access_token
@@ -80,6 +81,13 @@ def get_current_profile(
         {"firm_id": str(firm_id)},
     )
 
+    # Log identity, bound from the SIGNATURE-VERIFIED claim (never a client header) at the same
+    # point as the Sentry tag below, so even a request that later fails the profile check is
+    # attributable to a tenant. The one place identity enters the logs (code-review root cause
+    # A: one site, not threaded through every route). bind_identity() drops a value that isn't a
+    # valid UUID.
+    request_context.bind_identity(tenant_id=firm_id)
+
     # Tenant tag, set as early as firm_id is known-good — every log line and Sentry event for the
     # rest of this request is then attributable to a tenant without threading firm_id through every
     # call site by hand (saas-multitenant-architecture ch07: "every metric event a service emits
@@ -113,6 +121,9 @@ def get_current_profile(
         )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account inactive or not found")
 
+    # From the DB profile row, not the JWT: role in a token can lag or be crafted by a misissued
+    # token; require_owner already trusts the row for the same reason.
+    request_context.bind_identity(actor_id=profile.id, actor_role=profile.role)
     logger.debug("Authentication succeeded for profile %s (firm %s)", user_id, firm_id)
     return profile
 

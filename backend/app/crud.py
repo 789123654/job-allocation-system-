@@ -105,7 +105,7 @@ def _paginate[StmtT: Select[Any]](stmt: StmtT, *order_by: Any, offset: int, limi
     return stmt.order_by(*order_by).offset(offset).limit(limit)
 
 
-_PASSWORD_SYMBOLS = "!@#$%^&*()-_=+"
+_PASSWORD_SYMBOLS = "!@#$%^&*()-_=+"  # noqa: S105 — a character set to draw from, not a credential
 
 
 def _generate_password() -> str:
@@ -729,9 +729,25 @@ def create_issue(session: Session, actor: Profile, task: Task, description: str)
 
 
 def get_issue(session: Session, actor: Profile, issue_id: UUID) -> Issue | None:
-    return session.exec(
+    """Reported gap, 2026-09-18: GET /issues/{id} was Owner-only (RequireOwnerDep) — the raiser
+    themselves had no way to ever see their own issue, including its resolution_notes once the
+    Owner resolved it (issue_resolved notified them it happened, with nowhere to read what it
+    said). Now reachable by any authenticated actor (ActiveProfileDep, issues.py); this function is
+    what actually enforces the narrowed access — an Owner still sees any issue in their firm
+    (unchanged), an Employee only their own (`raised_by`), same 404-not-403 IDOR pattern as
+    get_task/get_notification (least-privilege widening, not a blanket role change —
+    Authorization_Cheat_Sheet.md "Enforce Least Privileges";
+    Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md; ASVS 5 §8.2.2).
+    """
+    issue = session.exec(
         select(Issue).where(Issue.id == issue_id, Issue.firm_id == actor.firm_id)
     ).first()
+    if issue is None:
+        return None
+    if actor.role != "owner" and issue.raised_by != actor.id:
+        record_access_denial(session, actor, "issue", issue.id, "wrong_owner")
+        return None
+    return issue
 
 
 def _lock_issue(session: Session, firm_id: UUID, issue_id: UUID) -> Issue:
@@ -808,6 +824,15 @@ def resolve_issue(
     for stale in stale_notifications:
         stale.is_read = True
         session.add(stale)
+
+    # Reported gap, 2026-09-18: before this, only resolution_type="reassigned" told the raiser
+    # anything at all (via _reassign_task's own "task_reassigned" notify) — "clarified" and
+    # "deadline_adjusted" left them with zero signal, not even a stale one. Fires unconditionally,
+    # for all three resolution types, same transaction (ASVS 2.3.3), same tenant-scoped
+    # firm_id/recipient_id `_notify` already uses at every other call site — `locked.firm_id` and
+    # `issue.raised_by` are both already tenant-scoped by `_lock_issue`/`get_issue` above, no new
+    # unscoped lookup (ASVS 8.2.2 / Multi_Tenant_Security_Cheat_Sheet.md §3).
+    _notify(session, locked.firm_id, issue.raised_by, "issue_resolved", locked.task_id, locked.id)
 
     return locked
 
