@@ -101,9 +101,14 @@ def test_uvicorns_access_line_stays_disabled_after_uvicorn_applies_its_own_confi
 ) -> None:
     """The access line has the raw path AND query string (ASVS 14.2.1); app.access has the route."""
     secret = _secret()
-    # codeql[py/clear-text-logging-sensitive-data] deliberate: assert below proves no leak
     logging.getLogger("uvicorn.access").info(
-        '%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", f"/tasks?q={secret}", "1.1", 200
+        '%s - "%s %s HTTP/%s" %d',
+        "127.0.0.1:5000",
+        "GET",
+        # codeql[py/clear-text-logging-sensitive-data] deliberate: assert below proves no leak
+        f"/tasks?q={secret}",
+        "1.1",
+        200,
     )
     out, err = capsys.readouterr()
     assert secret not in out + err
