@@ -469,7 +469,16 @@ jobs:
           # rule-id]` comment is placed. The `+` prefix ADDS to the default suite, confirmed against
           # GitHub's own docs (docs.github.com code-scanning "customizing your advanced setup"),
           # rather than replacing it -- the other 45 queries still run exactly as before.
-          queries: ${{ matrix.language == 'python' && '+codeql/python-queries:AlertSuppression.ql' || '' }}
+          #
+          # Version pin (@1.8.9, confirmed live as exactly what this job's own CodeQL 2.26.4 toolchain
+          # bundles for codeql/python-queries -- grepped the raw job log's own "Loaded .../python-
+          # queries/1.8.9/..." lines): an UNVERSIONED reference (`codeql/python-queries:AlertSuppression
+          # .ql`, tried first) failed with "Specifier for external repository is invalid" -- CodeQL's
+          # config-file query resolver parsed the bare, unversioned form as an attempt to fetch an
+          # external git repo named "codeql/python-queries" rather than resolve the already-installed
+          # bundled pack. The one working example in GitHub's own docs for this exact `uses:` syntax
+          # includes an explicit version ("scope/pack4@4.5.6:path/to/queries"), which this now matches.
+          queries: ${{ matrix.language == 'python' && '+codeql/python-queries@1.8.9:AlertSuppression.ql' || '' }}
       - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           upload: never
