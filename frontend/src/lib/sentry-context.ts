@@ -46,13 +46,54 @@ function withTenantTag<T extends ErrorEvent | TransactionEvent>(event: T): T {
 // case-insensitively because a category we did not anticipate must not become a way around the scrubber.
 const UI_DETAIL_REMOVED = "[element detail removed]";
 
+// BATCH 2 SLICE 3 (2026-09-22). `fetch`/`xhr` breadcrumbs carry `data.url` and `navigation`
+// breadcrumbs carry `data.from`/`data.to`, all populated by @sentry/browser's own instrumentation
+// (confirmed by reading the installed integrations/breadcrumbs.js and browser-utils/instrument/
+// xhr.js, not assumed) with NO sanitisation: `xhr.js` stores exactly the string this app's own
+// fetch call passed to `${env.API_BASE_URL}${path}` (api-client.ts), and `navigation`'s `from`/`to`
+// go through @sentry/core's `parseUrl`, whose `relative` field is literally `path + query +
+// fragment` for a same-origin URL. So a search page's `?q=<client-confidential text>` or a
+// `/employees?email=...` reset-password path would reach Sentry raw.
+//
+// Deliberately mirrors the backend's `_strip_url_path_and_query` (sentry_config.py) rather than
+// inventing a second convention: a URL is arbitrary client-supplied text with no shape a scrubber
+// can selectively redact (same reasoning as this file's own `ui.*` fail-closed decision above), so
+// path/query/fragment are dropped entirely and only scheme+host survives. Accepted cost, same as
+// the backend's: which specific endpoint/page is no longer visible from the breadcrumb alone.
+const STRIPPED_URL = "[stripped: ASVS 14.2.1, never sent to Sentry]";
+const URL_KEYS = ["url", "from", "to"] as const;
+
+function stripUrlPathAndQuery(url: string): string {
+  try {
+    return new URL(url, window.location.origin).origin;
+  } catch {
+    return STRIPPED_URL;
+  }
+}
+
+function stripUrlsFromData(data: Breadcrumb["data"]): void {
+  if (!data) return;
+  for (const key of URL_KEYS) {
+    // Fail closed on the key's presence, not its shape: the real SDK only ever puts a string here
+    // (confirmed by reading xhr.js/fetch.js/navigation's history handler), but a hostile-input test
+    // for this exact function found that an unexpected non-string value (array/object) was being
+    // left untouched -- same "malformed shape is worse to trust than to replace" reasoning as the
+    // backend's _exception_entries/_breadcrumb_entries tolerance.
+    if (key in data) {
+      data[key] = typeof data[key] === "string" ? stripUrlPathAndQuery(data[key]) : STRIPPED_URL;
+    }
+  }
+}
+
 export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
   const category = typeof breadcrumb.category === "string" ? breadcrumb.category.toLowerCase() : "";
   if (category === "console") return null;
   if (category.startsWith("ui")) {
     breadcrumb.message = UI_DETAIL_REMOVED;
     delete breadcrumb.data;
+    return breadcrumb;
   }
+  stripUrlsFromData(breadcrumb.data);
   return breadcrumb;
 }
 

@@ -15,10 +15,10 @@ into "Completed Audits" below, and reset "Current Audit" to `status: idle` befor
 
 ```
 status: in-progress   <!-- idle | in-progress | complete -->
-phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2 (slice 1-2 of 3): Sentry query_string, breadcrumb.data, before_send_transaction (slice 1); chained AuthError exception value inside a Sentry event (slice 2)
-scope_files: backend/app/core/sentry_config.py; tests backend/tests/core/test_sentry_config_hostile.py (new)
+phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2 (slice 1-3 of 3, LAST SLICE): Sentry query_string, breadcrumb.data, before_send_transaction (slice 1); chained AuthError exception value inside a Sentry event (slice 2); frontend fetch/xhr/navigation breadcrumb data.url|from|to (slice 3)
+scope_files: backend/app/core/sentry_config.py; tests backend/tests/core/test_sentry_config_hostile.py (new); frontend/src/lib/sentry-context.ts; tests frontend/src/lib/sentry-context.test.ts, frontend/src/lib/sentry-context.hostile.test.ts (both updated)
 date: 2026-09-22
-commit: slice 1 committed and pushed (7770e81, branch phase5/tenant-isolation-defense-in-depth); slice 2 PENDING — not yet committed
+commit: slice 1 committed and pushed (7770e81); slice 2 committed and pushed (110fffb, branch phase5/tenant-isolation-defense-in-depth); slice 3 PENDING — not yet committed
 ```
 
 Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20). Fill them while `in-progress`; the guard hook
@@ -284,8 +284,114 @@ evidence; write `PENDING — <what is missing>` until it exists. Add one `req_NN
   rebuilt and functionally reverified (`pytest`, not just a file-layout check). All subsequent container runs
   used a read-only host mount with an in-container copy, confirmed leak-free by the same sweep after each run.
 
+- `req_35`: BATCH 2 SLICE 3 (LAST SLICE) — @sentry/browser's own `fetch`/`xhr`/`navigation` breadcrumb
+  instrumentation populates `data.url` (fetch/xhr) and `data.from`/`data.to` (navigation) with the literal,
+  unsanitised request/route string, including query string and fragment | ASVS 14.2.1 (owasp-asvs-5/chapters/
+  v14-data-protection.md:22, "never in URL/query string"), ASVS 14.2.3 ("never sent to untrusted parties");
+  Third_Party_Javascript_Management_Cheat_Sheet.md "Risk 3: Disclosure of sensitive information to 3rd parties"
+  (Sentry is exactly this: the browser contacts Sentry's servers directly with breadcrumb data);
+  Logging_Vocabulary_Cheat_Sheet.md:848 (same principle already stated there for CSP reports — "strip the query
+  string/fragment before logging"); named as an outstanding batch-2 item in req_23 above | applies | evidence:
+  read the INSTALLED SDK source directly (mode 9, not assumed from docs) —
+  `node_modules/@sentry/browser/build/npm/esm/prod/integrations/breadcrumbs.js` `_getXhrBreadcrumbHandler`/
+  `_getFetchBreadcrumbHandler` build `data` from `sentryXhrData`/`fetchData` with no sanitisation;
+  `node_modules/@sentry/browser-utils/.../instrument/xhr.js` confirms `url` is exactly the string this app's own
+  `api-client.ts` passed to `fetch(\`${env.API_BASE_URL}${path}\`)`; `_getHistoryBreadcrumbHandler` builds
+  `from`/`to` via `@sentry/core`'s `parseUrl`, whose `.relative` field is literally `path + query + fragment`
+  for a same-origin URL (read `node_modules/@sentry/core/build/esm/utils/url.js` directly). This app's own
+  EXISTING tests already encoded the leak as a requirement before this fix — `sentry-context.test.ts`'s
+  `"passes network and navigation breadcrumbs through unchanged"` and `sentry-context.hostile.test.ts`'s
+  `it.each(["fetch","xhr","navigation",...])("passes %s through unchanged")` both asserted the pre-fix
+  (vulnerable) behavior verbatim, confirming this was a real, reachable gap, not a hypothetical one. Fixed in
+  `scrubBreadcrumb` (`sentry-context.ts`): a new `stripUrlsFromData` strips `data.url`/`from`/`to` to
+  scheme+host only via `new URL(value, window.location.origin).origin`, falling back to a fixed placeholder on
+  a value that isn't a string or that `new URL` itself can't parse. Deliberately mirrors the backend's own
+  already-reviewed `_strip_url_path_and_query` (`sentry_config.py`, batch 2 slice 1) rather than inventing a
+  second convention for the same problem — same ASVS 14.2.1 reasoning, same accepted debuggability cost (which
+  endpoint/page is no longer visible from the breadcrumb alone), avoiding CODE_REVIEW_FINDINGS root-cause (A)
+  by using the identical strip-not-parse pattern instead of a frontend-specific reinvention.
 
-## Completed Audits
+- `req_36`: failure mode 7 — an already-vetted shared mechanism (`scrubBreadcrumb`, vetted 2026-09-21 for the
+  `ui.*`/`console` categories) reused on a new call site (`fetch`/`xhr`/`navigation`) without assuming the prior
+  vetting covers it | docs/skill-verification-discipline.md failure mode 7 | applies | evidence: explicitly
+  asked what's different about this call site's data before writing the fix — the `ui.*` fix's own reasoning
+  (attacker-controlled text with no safe grammar to parse) does NOT directly transfer, because `fetch`/`xhr`/
+  `navigation` data is not attacker-controlled DOM content, it is this app's own constructed URLs (confirmed via
+  `api-client.ts`) — the risk is query-string VALUES (search terms, emails), not markup-injection-style parsing
+  attacks. This is why the fix is a new, URL-shape-aware helper (`stripUrlPathAndQuery`) rather than reusing the
+  `ui.*` branch's fixed-placeholder-and-delete approach unchanged.
+
+- `req_37`: tests — 51 new/changed hostile-input tests in `sentry-context.hostile.test.ts` (16 hostile URL
+  payloads × 3 fields [url/from/to]: plain query, fragment-only, query+fragment, embedded credentials, relative
+  with query, dot-relative, protocol-relative, double-encoded, 50 stacked params, `javascript:`/`data:` URIs,
+  unicode, newline-in-query, a 60KB query string, plain non-URL text, empty string; plus non-string-value
+  fail-closed, no-data tolerance, idempotency) and 3 new/changed tests in `sentry-context.test.ts` (fetch
+  url-stripping keeps method/status_code, navigation from/to stripping, unparseable-URL placeholder fallback).
+  100% line/branch/function/statement coverage on `sentry-context.ts` (`coverage-summary.json`, confirmed via
+  `node -e` read of the real JSON output, not the text reporter's table — which silently omits fully-covered
+  files, discovered mid-verification and cross-checked this way instead of trusted at face value). Negative
+  control (rule 10.1): `git stash push -- frontend/src/lib/sentry-context.ts` to isolate the source fix from the
+  new/changed tests, reran both test files — **48 of 247 tests failed** exactly as expected (every new
+  URL-stripping assertion, the fetch/xhr/navigation-keeps-fields tests, the negative "not.toContain" checks);
+  `git stash pop` restored the fix, full rerun: 248/248 pass. One hostile test caught a REAL gap in my own first
+  draft before this was ever reported done: a non-string `data.url`/`from`/`to` (array/object) was left
+  untouched by a naive `typeof === "string"` guard, which could leak if the SDK or a future caller ever put a
+  non-string value there — fixed to fail closed on the key's presence, not its shape (mirrors
+  `_exception_entries`/`_breadcrumb_entries`'s tolerance on the backend). Full frontend suite: `npx vitest run`
+  → **385/385 pass**, 27 files, no regressions. `npx tsc --noEmit` clean; `npx eslint` on the 3 changed files
+  clean (0 errors).
+
+- `req_38`: failure mode 11 — independent-review decision asked, not assumed | docs/skill-verification-
+  discipline.md failure-mode-11 convention | applies | evidence: asked via `AskUserQuestion` whether this slice
+  should get an independent blind-test pass (a fresh agent, isolated worktree, contract-only, no view of the fix
+  or these tests) before being considered done, same as batch 1's `ui.*` scrubber got and slice 2 was asked
+  about; user chose "Skip it, same as slice 2" — a decision made explicitly each time it comes up, not carried
+  forward automatically from the slice 2 answer.
+
+- `req_39`: mutation testing on `sentry-context.ts` attempted via Stryker first (`npx stryker run
+  --mutate "src/lib/sentry-context.ts"`, no config-file edit needed — scoped via the CLI flag) |
+  verification-and-shipping-discipline (mutation testing as a check on whether tests actually assert
+  the right thing, not just execute the code) | BLOCKED — Stryker itself is broken on this machine, not
+  a code/test issue: first run reported a nonsensical `37.50%` score (1 killed / 14 timeout / 25
+  survived / 21 errors out of 61 mutants); a `--logLevel debug` re-run crashed immediately with
+  `StrykerError: TypeError: Converting circular structure to JSON` inside
+  `@stryker-mutator/vitest-runner`'s own `VitestTestRunner.init` (full traceback in the debug log,
+  session scratchpad `stryker_debug.log`) — a known-shape incompatibility between the installed
+  `vitest@5.0.0` and `@stryker-mutator/vitest-runner@10.0.0` (Vitest 5's resolved config has a
+  circular reference Stryker's worker-serialization step wasn't built to handle), confirmed to crash
+  BEFORE any mutant's test run — not something slice 3's code triggered. Per mode 11, asked the user
+  how to proceed (fix the shared frontend tooling / accept without mutation testing / hand-roll a
+  harness for this one file) rather than picking unilaterally; user chose the hand-rolled harness.
+
+- `req_40`: hand-rolled mutation harness for `sentry-context.ts`, same pattern as backend batch 1's
+  `mutate_pass2.py` | verification-and-shipping-discipline; docs/skill-verification-discipline.md rule
+  10.2-adjacent (an independent check that tests catch real logic breaks, not just execute) | applies |
+  evidence: session-scratchpad `mutate_sentry_context.mjs` — 11 targeted mutations of the slice's real
+  logic (keep full URL instead of stripping to origin; drop the `new URL` base argument; fail OPEN
+  instead of closed on an unparseable URL; remove the `!data` guard; drop `"url"` from `URL_KEYS`;
+  make the key-presence check always false; flip the string-type ternary; remove the category
+  `typeof` guard; break the `"console"` literal match; make the `ui` prefix check always true; delete
+  the `stripUrlsFromData` call entirely), each applied via an exact-line match (throws loudly on any
+  drift, so it can't silently mutate the wrong line), the real two test files run against each, then
+  restored — restoration verified byte-for-byte identical to the original after every run, not
+  assumed. First run: **9/11 killed, 2 survived**, both real gaps, not equivalents — inspected by hand,
+  not just counted: (a) removing the URL base argument makes every *relative* (same-origin) URL throw
+  on parse and silently fall back to the placeholder, which still passes a "no leak" assertion since
+  the placeholder also contains no secret — the test never checked the *correct* value for a benign
+  case, the exact same "checked absence, not the real value" lesson req_34's mutmut round and batch
+  1's req_11 already taught this project; (b) no hostile test exercised a non-string, non-nullish
+  `category` (e.g. a number) — a mutant using `?.`/`??` instead of the `typeof` guard behaves
+  identically for `null`/`undefined` (already covered) but crashes on `(123).toLowerCase is not a
+  function`, uncaught by anything. Closed with 2 new tests: one asserting a benign relative
+  navigation URL resolves to the real `window.location.origin` (not the placeholder), one
+  `it.each([123, true, {}, [], () => 1])` proving `scrubBreadcrumb` doesn't throw on a non-string,
+  non-nullish category. Re-run: **11/11 killed, 0 survived**, file restored exactly (byte-for-byte
+  check passed). Full re-verification after the fix: 254/254 pass on the two changed files
+  (negative control re-run too: 50/254 correctly fail on pre-fix code, up from 48 — confirms the 2
+  new tests also fail pre-fix); full frontend suite 391/391 pass, 27 files; 100% line/branch/function/
+  statement coverage on `sentry-context.ts` (`coverage-summary.json`, read directly, not the
+  text-reporter table which hides fully-covered files); `npx tsc --noEmit` and `npx eslint` on all 3
+  changed files both clean.
 
 ### Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 1: 3-round fix + 3-pass re-review pilot (2026-09-21 to 2026-09-22)
 

@@ -130,14 +130,48 @@ describe("scrubBreadcrumb", () => {
     ).toBeNull();
   });
 
-  it("passes network and navigation breadcrumbs through unchanged", () => {
+  // Contract changed 2026-09-22 (batch 2 slice 3, req_23): fetch/xhr/navigation breadcrumbs used to
+  // pass through unchanged, but @sentry/browser populates their `data.url`/`data.from`/`data.to`
+  // with the literal request/route path+query, unsanitised (confirmed by reading the installed SDK
+  // source). Non-URL fields (method, status_code) still pass through untouched.
+  it("strips path and query from a fetch breadcrumb's url, keeps method/status_code", () => {
     const fetchCrumb: Breadcrumb = {
       category: "fetch",
-      data: { url: "http://localhost:8000/tasks", status_code: 200 },
+      data: { url: "http://localhost:8000/tasks?search=confidential", method: "GET", status_code: 200 },
     };
-    expect(scrubBreadcrumb(fetchCrumb)).toEqual(fetchCrumb);
+    const result = scrubBreadcrumb({ ...fetchCrumb, data: { ...fetchCrumb.data } });
+    expect(result?.data?.url).toBe("http://localhost:8000");
+    expect(result?.data?.method).toBe("GET");
+    expect(result?.data?.status_code).toBe(200);
+  });
+
+  it("strips path and query from a navigation breadcrumb's from/to", () => {
+    const nav: Breadcrumb = { category: "navigation", data: { from: "/tasks?q=secret", to: "/employees" } };
+    const result = scrubBreadcrumb({ ...nav, data: { ...nav.data } });
+    expect(result?.data?.from).not.toContain("secret");
+    expect(result?.data?.to).not.toContain("/employees");
+  });
+
+  // A hand-rolled mutation pass (Stryker itself crashes on this machine, see req_40) found that
+  // dropping the `new URL(url, BASE)` base argument still "passed" the test above: every relative
+  // (same-origin) URL then throws on parse and silently falls back to the placeholder, which also
+  // happens to contain no secret -- a real assertion-strength gap, not just a leak check. This
+  // asserts the CORRECT resolved value for a benign relative URL, not just "no leak".
+  it("resolves a benign relative navigation url to this page's real origin, not the fallback placeholder", () => {
     const nav: Breadcrumb = { category: "navigation", data: { from: "/tasks", to: "/" } };
-    expect(scrubBreadcrumb(nav)).toEqual(nav);
+    const result = scrubBreadcrumb({ ...nav, data: { ...nav.data } });
+    expect(result?.data?.from).toBe(window.location.origin);
+    expect(result?.data?.to).toBe(window.location.origin);
+    expect(result?.data?.from).not.toBe("[stripped: ASVS 14.2.1, never sent to Sentry]");
+  });
+
+  // `new URL()` itself throws on a handful of malformed absolute URLs (confirmed live in node: e.g.
+  // "http://" with no host) — the catch branch falls back to a fixed placeholder rather than leaving
+  // the unparseable (but possibly still sensitive) original string in place.
+  it("falls back to a fixed placeholder when the url string itself is unparseable", () => {
+    const crumb: Breadcrumb = { category: "fetch", data: { url: "http://" } };
+    const result = scrubBreadcrumb({ ...crumb, data: { ...crumb.data } });
+    expect(result?.data?.url).toBe("[stripped: ASVS 14.2.1, never sent to Sentry]");
   });
 
   it("tolerates a ui breadcrumb with no message", () => {

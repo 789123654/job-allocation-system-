@@ -146,14 +146,92 @@ describe("scrubBreadcrumb: the categories it must not touch or must drop", () =>
     expect(scrubBreadcrumb({ category, message: "task: SENSITIVE", data: { arguments: ["SENSITIVE"] } })).toBeNull();
   });
 
-  it.each(["fetch", "xhr", "navigation", "sentry.event", "info"])("passes %s through unchanged", (category) => {
-    const crumb: Breadcrumb = { category, message: "GET /api/tasks", data: { url: "/api/tasks?status=open" } };
+  it.each(["sentry.event", "info"])("passes %s through unchanged (no url-shaped data)", (category) => {
+    const crumb: Breadcrumb = { category, message: "GET /api/tasks", data: { note: "not a url field" } };
     expect(scrubBreadcrumb({ ...crumb, data: { ...crumb.data } })).toEqual(crumb);
+  });
+
+  // batch 2 slice 3 (req_23): fetch/xhr/navigation data.url|from|to are stripped to scheme+host,
+  // not passed through — see sentry-context.test.ts for the behavioral assertions. Everything else
+  // on the breadcrumb (category, message, non-url data keys) is untouched.
+  it.each(["fetch", "xhr", "navigation"])("%s keeps its category and non-url fields", (category) => {
+    const crumb: Breadcrumb = { category, message: "GET /api/tasks", data: { status_code: 200 } };
+    const result = scrubBreadcrumb({ ...crumb, data: { ...crumb.data } });
+    expect(result?.category).toBe(category);
+    expect(result?.message).toBe("GET /api/tasks");
+    expect(result?.data?.status_code).toBe(200);
   });
 
   it("passes a breadcrumb with no category through unchanged", () => {
     const crumb: Breadcrumb = { message: "hello" };
     expect(scrubBreadcrumb({ ...crumb })).toEqual(crumb);
+  });
+
+  // A hand-rolled mutation pass (req_40) found no test exercised a non-string, non-nullish
+  // category (e.g. a number): `breadcrumb.category?.toLowerCase()` -- a mutant of the real
+  // `typeof === "string"` guard -- crashes on `(123).toLowerCase is not a function` while still
+  // passing every other test here, since undefined/null were already covered.
+  it.each([123, true, {}, [], () => 1])("does not throw when category is %s (not a string, not nullish)", (bad) => {
+    const crumb = { category: bad, message: "hello" } as unknown as Breadcrumb;
+    expect(() => scrubBreadcrumb(crumb)).not.toThrow();
+  });
+});
+
+// batch 2 slice 3 (req_23): hostile URL payloads for the new data.url/from/to stripping. Same
+// marker convention as the section above: a partial strip leaves the trailing marker behind.
+describe("scrubBreadcrumb: no query string or fragment survives in url/from/to, whatever it contains", () => {
+  const HOSTILE_URLS: Record<string, string> = {
+    plain_query: "http://api.example.test/tasks?search=MARKER",
+    fragment_only: "http://api.example.test/tasks#MARKER",
+    query_and_fragment: "http://api.example.test/tasks?search=MARKER#MARKER2",
+    credentials_embedded: "http://user:MARKER@api.example.test/tasks",
+    relative_with_query: "/tasks?search=MARKER",
+    relative_dot: "./tasks?search=MARKER",
+    protocol_relative: "//api.example.test/tasks?search=MARKER",
+    double_encoded: "http://api.example.test/tasks?q=%2557MARKER",
+    many_params: "http://api.example.test/tasks?" + Array.from({ length: 50 }, (_, i) => `p${i}=MARKER`).join("&"),
+    javascript_uri: "javascript:MARKER",
+    data_uri: "data:text/plain,MARKER",
+    unicode_query: "http://api.example.test/tasks?q=héllo-MARKER-✓",
+    newline_in_query: "http://api.example.test/tasks?q=line1%0AMARKER",
+    very_long_query: `http://api.example.test/tasks?q=${"MARKER".repeat(10_000)}`,
+    not_a_url_at_all: "MARKER not a url just text",
+    empty_string: "",
+  };
+
+  for (const key of ["url", "from", "to"] as const) {
+    describe(`data.${key}`, () => {
+      for (const [pname, urlTemplate] of Object.entries(HOSTILE_URLS)) {
+        it(pname, () => {
+          const payload = urlTemplate.replace(/MARKER2?/g, (m) => (m === "MARKER2" ? "SECONDMARK" : "SECRETMARK"));
+          const crumb: Breadcrumb = { category: "fetch", data: { [key]: payload } };
+          const result = scrubBreadcrumb(crumb);
+          const text = JSON.stringify(result) ?? "";
+          expect(text.includes("SECRETMARK"), `${key}=${payload} leaked SECRETMARK`).toBe(false);
+          expect(text.includes("SECONDMARK"), `${key}=${payload} leaked SECONDMARK`).toBe(false);
+        });
+      }
+    });
+  }
+
+  it("does not throw and does not leak when url is not a string", () => {
+    for (const bad of [123, null, undefined, { toString: () => "SECRETMARK" }, ["SECRETMARK"], true]) {
+      const crumb = { category: "fetch", data: { url: bad } } as unknown as Breadcrumb;
+      expect(() => scrubBreadcrumb(crumb)).not.toThrow();
+      const text = JSON.stringify(scrubBreadcrumb(crumb)) ?? "";
+      expect(text.includes("SECRETMARK")).toBe(false);
+    }
+  });
+
+  it("tolerates a breadcrumb with no data at all", () => {
+    expect(() => scrubBreadcrumb({ category: "fetch" })).not.toThrow();
+    expect(() => scrubBreadcrumb({ category: "navigation", data: {} })).not.toThrow();
+  });
+
+  it("is idempotent on a fetch breadcrumb", () => {
+    const once = scrubBreadcrumb({ category: "fetch", data: { url: "http://api.example.test/tasks?q=1" } });
+    const twice = scrubBreadcrumb({ ...once, data: { ...once?.data } } as Breadcrumb);
+    expect(twice).toEqual(once);
   });
 });
 
