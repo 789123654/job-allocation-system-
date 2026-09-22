@@ -462,6 +462,14 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none # both languages here are interpreted — nothing to build
+          # Scoped to python only -- javascript-typescript's query suite is untouched. Confirmed
+          # live (2026-09-22, three failed CI runs) that this job's default 45-query suite does NOT
+          # include AlertSuppression.ql -- the "Fail if CodeQL found anything" step's .suppressions
+          # filter below can never see a suppressed result without this, no matter how a `# codeql[
+          # rule-id]` comment is placed. The `+` prefix ADDS to the default suite, confirmed against
+          # GitHub's own docs (docs.github.com code-scanning "customizing your advanced setup"),
+          # rather than replacing it -- the other 45 queries still run exactly as before.
+          queries: ${{ matrix.language == 'python' && '+codeql/python-queries:AlertSuppression.ql' || '' }}
       - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           upload: never
