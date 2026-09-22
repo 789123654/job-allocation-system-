@@ -6,6 +6,7 @@ so attacker-controlled text (a header, a path, an exception message) can never f
 log line (REST_Security_Cheat_Sheet.md, Logging_Cheat_Sheet.md "Attacks on Logs").
 """
 
+import contextlib
 import json
 import logging
 import math
@@ -89,6 +90,21 @@ class _LiveStdoutHandler(logging.StreamHandler[TextIO]):
     def stream(self) -> TextIO:  # pyright: ignore[reportIncompatibleVariableOverride]
         return sys.stdout
 
+    def handleError(self, record: logging.LogRecord) -> None:
+        """The stdlib version prints the raw `Message:` and `Arguments:` of a malformed log call to
+        stderr, which would put the very values the redactor exists to remove into a log stream the
+        redactor never sees. Say only that a record failed, and which logger and error class."""
+        error = sys.exc_info()[0]
+        note = {
+            "level": "ERROR",
+            "logger": "app.logging",
+            "message": "a log record could not be formatted",
+            "failed_logger": record.name,
+            "error": error.__name__ if error else None,
+        }
+        with contextlib.suppress(Exception):  # a logging failure must never raise into the caller
+            sys.stderr.write(json.dumps(note, ensure_ascii=True, separators=(",", ":")) + "\n")
+
 
 def configure_logging() -> None:
     """Idempotent — importing app.main twice (reloads, tests) must not double every line."""
@@ -103,3 +119,13 @@ def configure_logging() -> None:
     # sensitive belongs in a URL log) and would duplicate the app.access record, which logs the
     # route template instead.
     logging.getLogger("uvicorn.access").disabled = True
+    # uvicorn applies its OWN logging config when the server starts, after this module was imported,
+    # which (a) re-enables the access logger above and (b) gives `uvicorn` a private stderr handler
+    # with propagate=False. Starlette re-raises an unhandled exception after the app's 500 handler
+    # ran, and uvicorn logs it on `uvicorn.error`: a second, UNREDACTED traceback. So the app calls
+    # this again from its lifespan (main.py), which runs after uvicorn's config, and drops that
+    # handler so those records reach the root handler and its redaction.
+    for name in ("uvicorn", "uvicorn.error"):
+        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger.handlers.clear()
+        uvicorn_logger.propagate = True

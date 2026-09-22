@@ -31,7 +31,7 @@ control, retention. Retention numbers were read from the vendors' own docs on 20
 | Layer | What | Format | Where it goes | Used for | Who can read it | Retention |
 |---|---|---|---|---|---|---|
 | API request log (`app.access`) | one line per request: `method`, route **template**, `status`, `duration_ms`, `pool_checked_out/capacity`, `threadpool_borrowed/total`, plus `request_id`, `tenant_id`, `actor_id`, `actor_role`, UTC `ts` | one JSON object per line, stdout | Railway's log store | latency/error investigation by tenant; correlating a report to one request | Railway project members | 7 days on Trial/Hobby, 30 on Pro (Railway docs) |
-| API app logs (`app.auth`, `app.pool`, `app.health`, `app`, `crud`, `employees`) | auth failures (the JWT library's reason, never the token), pool ≥70% warning, readiness probe failure (exception **class** only), unhandled-exception traceback (`exc`), Supabase admin failures | same JSON, same fields | Railway | leading indicators, crash diagnosis | same | same |
+| API app logs (`app.auth`, `app.pool`, `app.health`, `app`, `crud`, `employees`) | auth failures (the JWT library's reason, never the token), pool ≥70% warning, readiness probe failure (exception **class** only), unhandled-exception traceback (`exc`, redacted), Supabase admin failures (class, HTTP status and Supabase error code only) | same JSON, same fields | Railway | leading indicators, crash diagnosis | same | same |
 | `access_denials` table | same-tenant authorization denials (durable, tenant-scoped) | Postgres rows under RLS | Supabase Postgres | audit; not for real-time | the firm's owner via the app; DB admins | permanent (`DATA_MODEL.md`) |
 | `audit_log` table | admin actions | Postgres rows under RLS | Supabase Postgres | audit | as above | permanent |
 | Sentry (backend) | unhandled exceptions + traces; tags `tenant_id`, `release`, `environment` | Sentry events | Sentry (third party) | crash triage, performance | Sentry project members (1 seat on the free plan) | 30-day lookback on the free Developer plan (Sentry pricing page) |
@@ -52,7 +52,7 @@ never to exclude events from "known" callers such as uptime monitors.
 
 ## 3. What may leave the process (verified, not assumed)
 
-Three leaks were found by looking at real output rather than trusting defaults. Each has a test that
+Six leaks were found by looking at real output rather than trusting defaults. Each has a test that
 fails without its fix (`SECURITY_AUDIT_CHECKLIST.md`, Observability Phase 1 entry).
 
 1. **SQLAlchemy appended `[parameters: {...}]` to every failed statement's message.** Any failed
@@ -61,8 +61,37 @@ fails without its fix (`SECURITY_AUDIT_CHECKLIST.md`, Observability Phase 1 entr
 2. **PostgreSQL's own error text echoes the value** — `invalid input syntax for type uuid: "<value>"`,
    `DETAIL: Key (name)=(<value>) already exists.`, and for NOT NULL/CHECK failures
    `DETAIL: Failing row contains (<the whole row>)`. `app/core/redaction.py` removes these from the
-   JSON log line (`message`, `exc`) and from Sentry events. It is **best effort** — it recognises
-   Postgres's message shapes — so it is a second layer, not permission to log data.
+   JSON log line (`message`, `exc`) and from Sentry events, including chained causes, ExceptionGroup
+   members and SQLAlchemy-wrapped errors (the `[SQL: …]` statement and the Background line are kept;
+   `[parameters: …]` is replaced). It is a second layer, not permission to log data, and it has
+   three stated properties:
+   - **It fails closed.** If the redactor itself raises, or is handed something that is not text, the
+     output is `[exception text withheld: redaction failed]`, never the raw text (ASVS 16.5.3).
+   - **Its cost is bounded.** Input is cut at 64 KB and the work is linear (ASVS 1.3.12). The first
+     version was quadratic (16 KB took 17 s), found by an independent review and now covered by a
+     scaling test.
+   - **It has one known limit.** It works on text, and text cannot tell a client value that
+     reproduces a *whole* genuine terminator (a chain marker, a blank line and a `Traceback` line)
+     from the real one, so such a value can end redaction early and the rest of it leaks. It is
+     recorded as a strict expected-failure test
+     (`test_a_value_that_forges_a_complete_chain_marker_is_the_known_limit`), so it cannot be
+     forgotten or quietly changed. The complete fix is to render exceptions from the exception
+     object instead of from text; not done yet.
+   - **It recognises the shapes this app can produce, not every Postgres message.** Labels
+     (`DETAIL`, `CONTEXT`, `HINT`, `QUERY`, `LINE n`, `[parameters: …]`), the `Class: message "<v>"`
+     head, and a list of Postgres message templates for label-less messages (`invalid input syntax
+     for type …`, `time zone "<v>" not recognized`, constraint violations). Translated
+     (`lc_messages`) messages and other echo shapes such as `syntax error at or near` are not
+     covered: Supabase runs in English and this app never builds SQL text from a client value. A
+     message an application author writes (`RAISE EXCEPTION 'bad %', v` in PL/pgSQL) is not a
+     Postgres template and is not recognised; the app's own SQL has no such call. The `QUERY` label
+     is defence in depth: every real Postgres 17 shape provoked puts it under a `LINE n:` line whose
+     skip already covers it (a mutation run showed no real-shape test needed it), and a hand-built
+     test pins that it works alone.
+   - **The ExceptionGroup layout is read from the text's own first line, never from a substring.**
+     An independent review forged the layout with two lines inside a value and leaked the
+     neighbouring columns; a value can never be the first line. A group that follows a chain is not
+     recognised, so it is over-redacted, never under-redacted.
 3. **The Sentry Python SDK's defaults send more than `send_default_pii` controls.** Captured from a
    real event (sentry-sdk 2.68.1, project's exact settings): the request body was in
    `request.data`, and every stack frame's local variables were attached — including the ASGI
@@ -72,11 +101,42 @@ fails without its fix (`SECURITY_AUDIT_CHECKLIST.md`, Observability Phase 1 entr
    **Cost, stated:** a Sentry event no longer has a variable snapshot or the failing request body; to
    reproduce, use `request_id` + route + `tenant_id` from the JSON logs. Stack trace, source
    context, tags, release and environment are unchanged.
+4. **Supabase Auth errors can echo the email address** being created (`Email address "x@y" is
+   invalid`). The two places that logged that text (`POST /employees`, `POST
+   /employees/{id}/reset-password`) now log `describe_auth_error(exc)`: the class, the HTTP status
+   and Supabase's own error code, and only when the code is one the library knows. A structural test
+   (`test_no_logger_call_in_the_app_passes_a_bare_exception`) fails if any logger call in `app/`
+   passes an exception object, `str()`/`repr()`/`ascii()`/`format()` of one, its `.args`, or an
+   f-string or `%` expression containing one, unless it is on a short allowlist with a written
+   reason (today only `app/api/deps.py`, whose JWT library messages never contain the token). The
+   detector is itself tested against snippets that must and must not be flagged.
+5. **uvicorn printed a second, raw traceback, and its own access line was back on.** Found by running
+   the real app under real uvicorn (an earlier test never started uvicorn, so it passed while the
+   claim was false). uvicorn applies its own logging config when the server starts, after
+   `app.main` was imported: that re-enables `uvicorn.access` (raw path and query string, ASVS
+   14.2.1) and gives `uvicorn`/`uvicorn.error` a private stderr handler with `propagate=False`.
+   Starlette re-raises an unhandled exception after the app's 500 handler, so uvicorn logged the
+   whole traceback (with the client's value) unredacted. Fix: `configure_logging()` runs again in the
+   app's `lifespan` (FastAPI events docs), which runs after uvicorn's config; it drops those handlers
+   and re-disables the access logger. **Stated consequence:** every unhandled exception now appears
+   twice, once from the app and once as `uvicorn.error`, both redacted (probe: 0 raw values, 2
+   redacted lines). uvicorn's first two startup lines ("Started server process", "Waiting for
+   application startup") are printed before the lifespan and stay in uvicorn's plain format; they
+   carry no request data. `test_uvicorn_logging.py` starts a real uvicorn subprocess to prove it.
+6. **A malformed log call made the stdlib print the raw record.** `Handler.handleError` writes
+   `Message:` and `Arguments:` (the raw values) to stderr when formatting fails (a programmer's
+   placeholder mismatch is enough). The app's handler overrides it and writes one fixed JSON note
+   (the failing logger and the exception class, nothing else).
 
 The desktop client: default click breadcrumbs describe an element by its `title`, `aria-label`,
 `alt` and `name` values (read from the installed `@sentry/core`), and this app renders task
-descriptions in `<td title=…>` — so `beforeBreadcrumb` strips those values and drops `console`
-breadcrumbs. The tenant tag is validated as a UUID before it can be sent and is cleared on logout
+descriptions in `<td title=…>`. `beforeBreadcrumb` therefore **fails closed**: every `ui.*`
+breadcrumb keeps its category and timestamp but its message is replaced by a fixed string and its
+`data` is removed, and `console` breadcrumbs are dropped (the category is compared case-insensitively).
+It does not try to recognise attribute values, because a regex over client text can always be
+walked around (the first version was, by an attribute value containing a double quote). **Cost, stated:** a Sentry
+event no longer says *which* button or cell was clicked, only that a UI click happened. The tenant tag
+is validated as a UUID before it can be sent and is cleared on logout
 (single choke point in `session-store.tsx`). Browser tracing propagates `sentry-trace`/`baggage`
 only to the same origin by default (Sentry docs), so the API's CORS `allow_headers` needs no change;
 if `tracePropagationTargets` is ever widened to the API, add both headers there first.
@@ -218,8 +278,14 @@ for writes at expected load; `/ready` 99.5%; zero isolation violations (canary).
    decision for you.
 5. **`X-Request-ID`** is returned on every response but is not in CORS `expose_headers`, so the
    desktop client cannot read it to show in an error dialog. One line to add when wanted.
-6. **Redaction is best effort** (Postgres message shapes); `message`/`exc` can still carry text from
-   other libraries, e.g. Supabase admin errors logged in `routes/employees.py`.
+6. **Redaction covers Postgres/psycopg/SQLAlchemy message shapes only** (the list and its boundary are
+   in §3 item 2), plus one stated limit (a value that reproduces a whole genuine terminator). The two
+   Supabase admin sinks are fixed (§3 item 4), as are uvicorn's second traceback and the stdlib's
+   `handleError` print (§3 items 5 and 6). Still open, from the 2026-09-19 review (batches 2 and 3): Pydantic
+   `ResponseValidationError` / `input_value` text, the `logentry.params`, `extra` and breadcrumb `data`
+   fields of a Sentry event, chained `AuthError` values inside a Sentry exception, and
+   `before_send_transaction`. Any other library's exception text is unredacted unless it reaches the
+   redactor's choke point, which is what the structural test in §3 item 4 is there to watch.
 7. **`ops_monitor` can read query text** in `pg_stat_activity` (`pg_monitor`); mitigated by code and
    tests, not by the database. `default_transaction_read_only` on the role is defense in depth (a
    session may override it); the boundary is that the role has **no** table privileges — a test asserts
@@ -243,6 +309,10 @@ for writes at expected load; `/ready` 99.5%; zero isolation violations (canary).
 `docs/SECURITY_AUDIT_CHECKLIST.md` → "Observability Phase 1" (negative controls, blind-test outcome,
 severity trend). Tests: `backend/tests/core/` (`test_request_logging`, `test_logging_setup`,
 `test_health`, `test_pool_monitor`, `test_redaction`, `test_db_parameter_hiding`,
-`test_sentry_config`, `test_observability_blind`), `backend/tests/ops/` (`test_db_check`,
-`test_canary_*`), `backend/tests/api/test_notifications_real_db.py`, and
-`frontend/src/lib/sentry-context.test.ts`, `frontend/src/stores/session-store.test.tsx`.
+`test_sentry_config`, `test_observability_blind`, and the attack-shaped `test_redaction_hostile`
+and `test_log_sinks_hostile`), `backend/tests/ops/` (`test_db_check`, `test_canary_*`),
+`backend/tests/api/test_notifications_real_db.py`, and `frontend/src/lib/sentry-context.test.ts`,
+`frontend/src/lib/sentry-context.hostile.test.ts`, `frontend/src/stores/session-store.test.tsx`.
+The hostile tests provoke real Postgres errors (`TEST_MIGRATIONS_DATABASE_URL`; they skip without
+it) and were each shown to fail on the unfixed code and against deliberate breakages of the fix
+(mutants); the numbers are in the audit entry.

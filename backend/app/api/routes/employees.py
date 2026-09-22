@@ -10,6 +10,7 @@ from app import crud
 from app.api.deps import IdempotencyKeyHeader, RequireOwnerDep, SessionDep
 from app.core.db import commit_or_recover
 from app.core.idempotency import record_idempotency_key, reject_if_idempotency_key_used
+from app.core.supabase_admin import describe_auth_error
 from app.core.validation import LimitQuery, NoNulStr, OffsetQuery
 from app.models import IdempotencyKey
 
@@ -72,7 +73,9 @@ def create_employee(
         # AuthApiError, so the narrower except above never caught it; this was the actual cause of
         # an unhandled 500 found in manual testing, 2026-09-16, now fixed at the source in
         # crud._generate_password — this is the belt-and-suspenders catch-all for anything else).
-        logger.error("Supabase admin.create_user failed: %s", exc)
+        # Never `exc` itself: Supabase's message can echo the email address (client PII) into
+        # the log line.
+        logger.error("Supabase admin.create_user failed: %s", describe_auth_error(exc))
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not create employee account"
         ) from exc
@@ -145,7 +148,7 @@ def reset_password(
         # Same belt-and-suspenders catch as create_employee above — this call goes through the
         # same crud._generate_password (already fixed at the source), but a raw Supabase Auth
         # failure of any kind should never reach the client as an unhandled 500.
-        logger.error("Supabase admin.update_user_by_id failed: %s", exc)
+        logger.error("Supabase admin.update_user_by_id failed: %s", describe_auth_error(exc))
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not reset employee password"
         ) from exc

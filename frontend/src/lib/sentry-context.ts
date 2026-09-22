@@ -29,19 +29,29 @@ function withTenantTag<T extends ErrorEvent | TransactionEvent>(event: T): T {
 }
 
 // Sentry's default click breadcrumbs describe the element by tag/class/id AND its title, aria-label,
-// alt and name attribute VALUES (read from the installed @sentry/core htmlTreeAsString, 2026-09-19,
-// not assumed). This app renders `<td title={task.description}>`, so a click on that cell followed
-// by any error would ship client-confidential text (a CA firm's task description) to a third party
-// as breadcrumb data. The attribute names stay (they still say WHAT was clicked); the values go.
-// Console breadcrumbs carry raw console arguments, so they are dropped entirely.
-// TCASVS 3.2.3 (app logs never hold sensitive data), ASVS 14.2.3, Logging_Cheat_Sheet.md "Data to
-// exclude: commercially-sensitive".
-const ATTRIBUTE_VALUES = /\[(title|aria-label|alt|name)="[^"]*"\]/g;
+// alt and name attribute VALUES, written raw and unescaped (read from the installed @sentry/core
+// htmlTreeAsString, 2026-09-19, not assumed). This app renders `<td title={task.description}>`, so a
+// click on that cell followed by any error would ship client-confidential text (a CA firm's task
+// description) to a third party as breadcrumb data.
+//
+// FAIL CLOSED (2026-09-21). The first version stripped the attribute values with a regex. An independent
+// review showed why that cannot be made safe: the value is attacker-controlled text that may itself contain
+// the quotes, brackets and " > " the grammar is built from, so any pattern that has to PARSE it can be
+// walked past (a title containing a double quote already leaked). So a `ui.*` breadcrumb now keeps only its
+// category, type, level and timestamp: the message is replaced with a fixed string and the data removed.
+// The cost, accepted: Sentry no longer shows WHICH element was clicked. ASVS 1.3.12, TCASVS 3.2.3,
+// Logging_Cheat_Sheet.md "Data to exclude: commercially-sensitive".
+//
+// Console breadcrumbs carry raw console arguments, so they are dropped entirely. Categories are compared
+// case-insensitively because a category we did not anticipate must not become a way around the scrubber.
+const UI_DETAIL_REMOVED = "[element detail removed]";
 
 export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
-  if (breadcrumb.category === "console") return null;
-  if (breadcrumb.category?.startsWith("ui.") && breadcrumb.message) {
-    breadcrumb.message = breadcrumb.message.replace(ATTRIBUTE_VALUES, "[$1]");
+  const category = typeof breadcrumb.category === "string" ? breadcrumb.category.toLowerCase() : "";
+  if (category === "console") return null;
+  if (category.startsWith("ui")) {
+    breadcrumb.message = UI_DETAIL_REMOVED;
+    delete breadcrumb.data;
   }
   return breadcrumb;
 }

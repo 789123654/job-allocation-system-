@@ -59,9 +59,7 @@ def test_multi_host_dsn_with_second_host_remote_and_no_tls_is_rejected() -> None
     hosts()[0] would wrongly let this through — every listed host must be checked.
     """
     with pytest.raises(ValidationError, match="sslmode=verify-full"):
-        _settings(
-            "postgresql+psycopg://u:p@localhost,db.abcdefgh.supabase.co:5432/postgres"
-        )
+        _settings("postgresql+psycopg://u:p@localhost,db.abcdefgh.supabase.co:5432/postgres")
 
 
 def test_multi_host_dsn_with_second_host_remote_and_verify_full_is_accepted() -> None:

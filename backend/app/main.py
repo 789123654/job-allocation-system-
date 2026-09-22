@@ -1,5 +1,6 @@
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 
 import sentry_sdk
@@ -71,7 +72,24 @@ class _UTF8JSONResponse(JSONResponse):
     media_type = "application/json; charset=utf-8"
 
 
-app = FastAPI(title="CA Firm Practice Management API", default_response_class=_UTF8JSONResponse)
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncGenerator[None]:
+    """uvicorn applies its own logging config when the server STARTS, i.e. after this module ran
+    `configure_logging()` at import. That config re-enables its access logger (raw path and query
+    string) and keeps a private stderr handler on `uvicorn.error`, which prints a second, unredacted
+    traceback for every unhandled exception (Starlette re-raises after the 500 handler above).
+    The lifespan runs after uvicorn's config, so configuring again here has the last word.
+    fastapi skill: advanced/events.md (`lifespan=`; `on_event` is deprecated).
+    """
+    configure_logging()
+    yield
+
+
+app = FastAPI(
+    title="CA Firm Practice Management API",
+    default_response_class=_UTF8JSONResponse,
+    lifespan=_lifespan,
+)
 
 # Explicit allowlist only — never "*", never "*" + credentials (API_SPEC.md §1).
 app.add_middleware(

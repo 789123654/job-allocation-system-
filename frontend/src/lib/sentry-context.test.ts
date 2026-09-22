@@ -101,25 +101,27 @@ describe("buildSentryOptions", () => {
 describe("scrubBreadcrumb", () => {
   const click = (message: string): Breadcrumb => ({ category: "ui.click", message });
 
-  it("removes attribute VALUES (a task description in a title) but keeps what was clicked", () => {
+  // Contract changed on 2026-09-21 (docs/SECURITY_AUDIT_CHECKLIST.md req_16): a ui breadcrumb FAILS CLOSED,
+  // it no longer describes the clicked element at all. The hostile-input suite is sentry-context.hostile.test.ts.
+  it("removes the task description (a title value) from a click", () => {
     const description = "a making a legal will of the 100 cr property of the mr verma";
     const result = scrubBreadcrumb(click(`main > table > tr > td[title="${description}"]`));
-    expect(result?.message).toBe("main > table > tr > td[title]");
     expect(JSON.stringify(result)).not.toContain("verma");
+    expect(result?.message).toBe("[element detail removed]");
   });
 
-  it.each(["title", "aria-label", "alt", "name"])("scrubs the %s attribute value", (attribute) => {
+  it.each(["title", "aria-label", "alt", "name"])("does not carry the %s attribute value", (attribute) => {
     const result = scrubBreadcrumb(click(`button[${attribute}="SENSITIVE-TEXT"]`));
-    expect(result?.message).toBe(`button[${attribute}]`);
+    expect(JSON.stringify(result)).not.toContain("SENSITIVE-TEXT");
   });
 
-  it("scrubs every attribute in a multi-attribute path", () => {
+  it("gives every ui click the same fixed message, whatever the path was", () => {
     const result = scrubBreadcrumb(click('a.link[aria-label="one"] > img[alt="two"][title="three"]'));
-    expect(result?.message).toBe("a.link[aria-label] > img[alt][title]");
+    expect(result?.message).toBe("[element detail removed]");
   });
 
-  it("leaves a click with nothing sensitive in its path untouched", () => {
-    expect(scrubBreadcrumb(click("div#root > button.btn"))?.message).toBe("div#root > button.btn");
+  it("also blanks a click with nothing sensitive in its path: the accepted cost of failing closed", () => {
+    expect(scrubBreadcrumb(click("div#root > button.btn"))?.message).toBe("[element detail removed]");
   });
 
   it("drops console breadcrumbs, which carry raw console arguments", () => {
@@ -139,6 +141,6 @@ describe("scrubBreadcrumb", () => {
   });
 
   it("tolerates a ui breadcrumb with no message", () => {
-    expect(scrubBreadcrumb({ category: "ui.click" })).toEqual({ category: "ui.click" });
+    expect(scrubBreadcrumb({ category: "ui.click" })?.category).toBe("ui.click");
   });
 });
