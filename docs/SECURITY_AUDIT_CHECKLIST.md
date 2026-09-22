@@ -15,10 +15,10 @@ into "Completed Audits" below, and reset "Current Audit" to `status: idle` befor
 
 ```
 status: in-progress   <!-- idle | in-progress | complete -->
-phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2 (slice 1 of 3): Sentry query_string, breadcrumb.data, before_send_transaction
+phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2 (slice 1-2 of 3): Sentry query_string, breadcrumb.data, before_send_transaction (slice 1); chained AuthError exception value inside a Sentry event (slice 2)
 scope_files: backend/app/core/sentry_config.py; tests backend/tests/core/test_sentry_config_hostile.py (new)
 date: 2026-09-22
-commit: PENDING — not yet committed
+commit: slice 1 committed and pushed (7770e81, branch phase5/tenant-isolation-defense-in-depth); slice 2 PENDING — not yet committed
 ```
 
 Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20). Fill them while `in-progress`; the guard hook
@@ -186,6 +186,103 @@ evidence; write `PENDING — <what is missing>` until it exists. Add one `req_NN
   final run after round 2 (crash fix, url-path strip, extra fail-closed) 6,962 passed, 0 failed, 0 errors, 12
   skipped (204s, 2026-09-22). `ruff check`/`ruff format --check` and strict pyright clean on `sentry_config.py`
   and `test_sentry_config_hostile.py`.
+
+- `req_30`: BATCH 2 SLICE 2 — a chained Supabase Auth exception's raw message (can echo caller-supplied data,
+  e.g. an email address) must not reach Sentry via `raise HTTPException(...) from exc`, even though the log
+  line at the same call site already hides it (`describe_auth_error`) | ASVS 16.2.5 (owasp-asvs-5/chapters/
+  v16-security-logging-error-handling.md:27); WSTG-ERRH-01 ("raw exceptions from dependent services",
+  owasp-wstg/chapters/08-error-handling.md); named as a batch-2 item in req_23 above | applies | evidence:
+  runtime probe (session scratchpad `sentry_probe_authchain.py`) against this app's REAL `sentry_init_kwargs`
+  (not a raw/unscrubbed probe) proved the leak live BEFORE any fix: `create_employee`'s exact pattern
+  (`AuthApiError('Email address "x@y" is invalid')` chained via `from exc` into `HTTPException(500, ...)`)
+  produced a captured, SCRUBBED event that still contained the raw email — `redact_db_values` is
+  Postgres-shape-only and does nothing for this message shape. Fixed in `scrub_event`/`_scrub_exception_value`
+  (`sentry_config.py`): FAIL CLOSED by `module == "supabase_auth.errors"` (present on every real captured
+  entry, confirmed live — not a hardcoded class-name list, so it covers every `AuthError` subclass including
+  ones the library adds later), replacing `value` with a fixed placeholder while leaving `type`/`module`
+  visible for debugging (same level of detail `describe_auth_error` already gives the log line). Re-ran the
+  identical probe after the fix: `SECRET EMAIL present anywhere in scrubbed event? False`, `type='AuthApiError'`
+  still visible. The chained JWT path (`core/security.py`'s `InvalidTokenError(str(exc))`) was checked the same
+  way and found NOT to need this fix: PyJWT's `aud`/`iss` validators raise fixed-string messages only (grepped
+  `jwt/api_jwt.py`, no f-string embeds a claim value); its `DecodeError(f"...: {e}")` wraps a
+  `json.JSONDecodeError`, whose message is a position description, confirmed live (`json.loads` on a hostile
+  string) never to embed the attacker-supplied payload itself — recorded as checked-and-not-applicable, not
+  silently skipped.
+
+- `req_31`: root cause (B) two individually-correct subsystems, uncorrected interaction (CODE_REVIEW_FINDINGS
+  taxonomy) — the log-line scrub (`describe_auth_error`) and Python's own exception-chaining/Sentry's
+  automatic chain capture are each correct in isolation; nobody had checked what happens where they meet |
+  CODE_REVIEW_FINDINGS_2026-09-14.md taxonomy (B); same shape as batch 1's uvicorn-second-traceback finding |
+  applies | evidence: scoped the fix by first enumerating every `raise ... from exc`/`from e` call site in
+  `app/` (`grep -rn "from exc\b|from e\b" app/`, 15 matches across employees.py, job_types.py, tasks.py,
+  issues.py, crud.py, security.py) before writing any code, not fixing only the one call site the leak was
+  first found at — the fix lives in the shared `scrub_event` mechanism, so it automatically covers every
+  current and future `raise ... from <AuthError>` site in the app, not just `employees.py`'s two. The other
+  chained exceptions at those sites (SQLAlchemy `IntegrityError`/generic validation errors) already go through
+  `redact_db_values`'s Postgres-shape recognition (req_02/req_08, batch 1) or are plain internal messages with
+  no external-echo risk — checked, not assumed.
+
+- `req_32`: tests — 10 new tests in `test_sentry_config_hostile.py` (chained AuthApiError stripped;
+  `type`/`module` left visible; the outer non-auth exception in the chain untouched; a different AuthError
+  subclass also stripped, proving the match is by module not class name; ordinary non-auth exceptions still go
+  through `redact_db_values` unchanged — non-regression; a plain safe message like "division by zero" left
+  exactly alone — non-vacuity; `event["exception"]` as a non-dict, missing `values` key, a non-dict list entry,
+  and an auth-error entry with no `value` key, all must not crash). 100% line and branch coverage on
+  `sentry_config.py` (`pytest --cov`, confirmed by running it). Negative control (rule 10.1): `git stash push --
+  backend/app/core/sentry_config.py` to isolate the source fix from the new tests, re-ran the first 9 new tests
+  — 3 failed exactly as expected (both auth-leak assertions, plus the non-dict-`exception`-field crash test), 6
+  passed unaffected; `git stash pop` restored the fix. The 10th test (`test_auth_error_entry_with_no_value_key_
+  does_not_crash`, added afterward to close a coverage-branch gap) was separately checked against the pre-fix
+  code and correctly PASSES either way — it is a crash-safety/coverage test, not a fix-effect test, same
+  pattern as this file's other "does not crash" tests, so rule 10.1 doesn't require it to fail pre-fix. Full
+  34/34 pass on the final code (later 41/41 after req_34's mutation-testing fixes). `ruff check`, `ruff format
+  --check`, strict `pyright` clean on both files (0 errors). **Full-backend-suite parity run (matching req_29's
+  rigor for slice 1): DONE**, after the user asked to start Docker (see req_34) — `gpt.sh` with no path scope,
+  `obs-pg` up: 6,978 passed, 0 failed, 0 errors, 14 skipped, 226s.
+
+- `req_33`: failure mode 11 — independent-review decision asked, not assumed | docs/skill-verification-
+  discipline.md failure-mode-11 convention (SECURITY_AUDIT_CHECKLIST.md's own numbering, see req_11 above for
+  precedent) | applies | evidence: the user was explicitly asked, via AskUserQuestion, whether to run an
+  independent blind attacker-mindset test on this slice before considering it done (same as slice 1 got); the
+  user chose "Skip it for this slice" with the stated reasoning (narrow fix, already covered by slice 1's
+  broader mechanism which did get a blind test, leak proven live against production wiring, negative control
+  already run) — a decision made explicitly, not defaulted to by not asking.
+
+- `req_34`: mutation testing on `sentry_config.py` (the user explicitly asked to start Docker and run it, after
+  req_30-33 above were already closed) | verification-and-shipping-discipline (mutation testing as a check on
+  whether tests actually assert the right thing, not just execute the code) | applies | evidence: `mutmut`
+  doesn't run on native Windows, so this ran in a Linux container against a temporary `[tool.mutmut]` override
+  (`source_paths = ["app/core/sentry_config.py"]`, whole-file not diff-only, reverted via `git checkout` once
+  done — confirmed reverted, `git diff --stat backend/pyproject.toml` empty). First run (host bind-mounted,
+  `.venv` inside the mount): 154 mutants, 117 killed / 37 survived. Every survivor inspected via `mutmut show`,
+  not just counted — all were real assertion-strength gaps (tests checking "secret absent" via `in`/`str()`,
+  which also passes trivially against a mutant that replaces the field with `None`, or checking presence
+  without checking the exact key/value), the same lesson batch 1's own mutation pass already taught this
+  project (req_11). Closed with 7 new/strengthened tests (exact-type assertions on the auth-strip/fragment/
+  extra fields; a bare-host-with-only-a-query test and a bare-host-with-only-a-fragment test for the url
+  stripper; a `logentry.message`-alone test distinct from `formatted`; a comprehensive `sentry_init_kwargs`
+  dict-shape test; a breadcrumbs-after-a-non-dict-entry test proving `continue` not `break`). Re-run (properly
+  isolated this time, host mounted read-only + copied inside the container): **154/154 killed (100%)**,
+  `mutmut results` empty. Full local suite after all fixes: 41/41 pass, 100% line/branch coverage, ruff/pyright
+  clean.
+
+  **Incident, disclosed in full because the user directly asked "is anything corrupted/leaked" and the honest
+  answer was yes, twice:** the first container run bind-mounted the live `backend/` directory read-write with
+  no venv isolation, so `uv sync` inside the Linux container overwrote the host's Windows `.venv` with a Linux
+  one — caught when a subsequent local pytest run failed with a Windows/Linux path mismatch, fixed by deleting
+  and rebuilding via `uv sync` natively (verified working: `platform win32`, tests passed). A second attempt,
+  meant to fix this by setting `UV_PROJECT_ENVIRONMENT=/tmp/venv` while STILL bind-mounting `backend/` as
+  `/repo` read-write, corrupted `.venv` again *and* leaked a 205MB duplicate Linux venv into a stray directory
+  (`backend/C:/Users/VAIBHA~1/AppData/Local/Temp/venv/` — a Windows-style absolute path string that `uv`/mutmut
+  inside the container misresolved as a literal relative pathname once it crossed back into the Windows-hosted
+  bind mount). This was NOT caught by the author before the user asked — the author's own status update after
+  fixing incident #1 said venv corruption was resolved without re-checking for a second occurrence. Found and
+  fixed only because the user asked directly. Full sweep after the user's question: `find` for anything
+  modified since the incident window, `git status --short --ignored` across the whole repo, `ls` of `backend/`
+  top level — confirmed only the intended 4 tracked file changes plus the pre-existing untracked `scripts/`;
+  the stray `C:` directory and both corrupted `.venv` instances were the only leaks, both removed, `.venv`
+  rebuilt and functionally reverified (`pytest`, not just a file-layout check). All subsequent container runs
+  used a read-only host mount with an in-container copy, confirmed leak-free by the same sweep after each run.
 
 
 ## Completed Audits

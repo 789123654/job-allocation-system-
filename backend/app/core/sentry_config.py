@@ -48,6 +48,27 @@ dropped too, same as the query string; (3) `event["extra"]` (arbitrary keys to a
 fixed shape or depth) had its per-value `redact_db_values` pass miss a secret nested in a dict-of-
 list, a list-of-strings value, and a plain secret under an innocuous key name — now FAIL-CLOSED like
 query strings, since a shallow shape-based redact can't safely cover an unbounded structure.
+
+BATCH 2 SLICE 2 (2026-09-22): `employees.py`'s `create_employee`/`reset_password` deliberately never
+log `str(exc)` for a Supabase Auth failure (`describe_auth_error` — "Supabase's message can echo the
+email address being created... client PII") and instead `raise HTTPException(...) from exc`. A
+runtime probe using this app's REAL `sentry_init_kwargs` (not a raw/unscrubbed probe) proved that
+chain still reached Sentry unredacted: Python's exception chaining puts the original `AuthApiError`
+into `event["exception"]["values"]` as its own entry, and `redact_db_values` — Postgres-shape-only —
+does nothing for `Email address "x@y" is invalid`, so the same email the log line was built to hide
+came through anyway (`scrub_event`'s existing per-exception loop ran, found no Postgres shape,
+left it untouched). WSTG-ERRH-01 ("raw exceptions from dependent services"), ASVS 16.2.5.
+
+Scoped by `module` (`supabase_auth.errors`, present on every entry in that library's real captured
+events, confirmed live), not by a hardcoded class-name list — covers every current `AuthError`
+subclass and any the library adds later, without needing this file edited again per class. Ordinary
+internal exceptions are untouched; only this one dependent service's own exception classes are
+fail-closed, since only that library's messages are proven to echo caller-supplied data with no
+shape `redact_db_values` can catch. The chained JWT path (`core/security.py`'s `InvalidTokenError`)
+was checked the same way and found NOT to need this: PyJWT's own `aud`/`iss` messages are fixed
+strings (grepped the installed library's source), and its `DecodeError(f"...: {e}")` wraps a
+`json.JSONDecodeError`, whose message is a position description ("line 1 column 1 (char 0)"),
+confirmed live never to embed the attacker-supplied payload itself.
 """
 
 from typing import Any
@@ -56,6 +77,8 @@ from urllib.parse import urlsplit, urlunsplit
 from app.core.redaction import redact_db_values
 
 _STRIPPED_QUERY = "[stripped: ASVS 14.2.1, never sent to Sentry]"
+_STRIPPED_AUTH_MESSAGE = "[stripped: raw Supabase Auth message, ASVS 16.2.5]"
+_AUTH_ERROR_MODULE = "supabase_auth.errors"
 
 
 def _redact_in(container: Any, key: str) -> None:
@@ -113,6 +136,39 @@ def _strip_query_string(container: Any) -> None:
         entry["url"] = _strip_url_path_and_query(url)
 
 
+def _exception_entries(event: dict[str, Any]) -> list[Any]:
+    """`event["exception"]["values"]`, tolerant of a malformed/unexpected shape -- same reasoning as
+    `_breadcrumb_entries` (batch-2 blind-test finding): a crash inside before_send/
+    before_send_transaction is worse than a leak (ASVS 16.5.3, no fail-open on an internal error).
+    """
+    exception = event.get("exception")
+    if isinstance(exception, dict):
+        exc: dict[str, Any] = exception  # pyright: ignore[reportUnknownVariableType]
+        values = exc.get("values")
+        if isinstance(values, list):
+            result: list[Any] = values  # pyright: ignore[reportUnknownVariableType]
+            return result
+    return []
+
+
+def _scrub_exception_value(exc_entry: Any) -> None:
+    """Redact db-echoed text in an exception's message; FAIL CLOSED on Supabase Auth's own exception
+    classes (batch-2 slice 2), whose message can echo caller-supplied data (e.g. an email address a
+    client submitted) with no recognisable shape for `redact_db_values` to catch -- confirmed live:
+    an `AuthApiError` chained via `raise ... from exc` still carried the raw email through Sentry's
+    own exception-chain capture, bypassing the already-scrubbed log line `describe_auth_error`
+    exists for. Matched by `module`, not by a hardcoded class-name list -- see module docstring.
+    """
+    if not isinstance(exc_entry, dict):
+        return
+    entry: dict[str, Any] = exc_entry  # pyright: ignore[reportUnknownVariableType]
+    if entry.get("module") == _AUTH_ERROR_MODULE:
+        if isinstance(entry.get("value"), str):
+            entry["value"] = _STRIPPED_AUTH_MESSAGE
+        return
+    _redact_in(entry, "value")
+
+
 def _breadcrumb_entries(event: dict[str, Any]) -> list[Any]:
     """`event["breadcrumbs"]["values"]`, tolerant of a malformed/unexpected shape. A blind-test
     finding (2026-09-22): `event.get("breadcrumbs", {}).get("values", [])` raised AttributeError
@@ -136,8 +192,8 @@ def scrub_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] |
     both hooks — every access below is `.get()`-guarded, so it is safe against either event shape (a
     transaction event has no `exception`/`logentry`, an error event usually has no `spans`).
     """
-    for exception in event.get("exception", {}).get("values", []):
-        _redact_in(exception, "value")
+    for exception in _exception_entries(event):
+        _scrub_exception_value(exception)
     for key in ("message", "formatted"):
         _redact_in(event.get("logentry"), key)
     _redact_each_in(event.get("logentry"), "params")

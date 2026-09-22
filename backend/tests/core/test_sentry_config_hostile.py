@@ -81,6 +81,28 @@ def test_query_string_embedded_inline_in_the_url_is_also_stripped() -> None:
     assert out["request"]["url"] == "http://x"
 
 
+def test_a_query_string_on_a_bare_host_with_no_path_is_also_stripped() -> None:
+    """Mutation-testing finding (2026-09-22): every prior url-stripping test had a non-empty PATH,
+    so a mutant that only checked path+fragment (dropping the query check) still survived -- a bare
+    host with just a query string (no path segment at all) is a real, distinct shape."""
+    event = _error_event(request={"method": "GET", "url": f"http://x?token={_SECRET}"})
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in out["request"]["url"]
+    assert out["request"]["url"] == "http://x"
+
+
+def test_a_fragment_on_a_bare_host_with_no_path_or_query_is_also_stripped() -> None:
+    """Mutation-testing finding (2026-09-22): every prior test with a non-empty fragment also had a
+    non-empty path, so a mutant that inverted the fragment check alone still survived -- a bare host
+    with ONLY a fragment (no path, no query) is a real, distinct shape."""
+    event = _error_event(request={"method": "GET", "url": f"http://x#{_SECRET}"})
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in out["request"]["url"]
+    assert out["request"]["url"] == "http://x"
+
+
 def test_a_secret_path_segment_with_no_query_string_is_also_stripped() -> None:
     """Blind-test finding (2026-09-22), confirmed live: a parameterized route's event["transaction"]
     is safely templated (e.g. "/reset/{token}"), but request["url"] independently carries the
@@ -116,12 +138,15 @@ def test_missing_request_field_does_not_crash() -> None:
 
 
 def test_fragment_field_is_also_stripped_from_request() -> None:
-    """Coverage gap: only query_string/url were exercised, never fragment."""
+    """Coverage gap: only query_string/url were exercised, never fragment. Asserts the replacement
+    is a real string, not just "!= the original" -- a mutation-testing pass (2026-09-22) found
+    `!=` alone lets a `None` replacement survive undetected."""
     event = _error_event(
         request={"method": "GET", "url": "http://x/probe", "fragment": "section-name"}
     )
     out = scrub_event(event, {})
     assert out is not None
+    assert isinstance(out["request"]["fragment"], str)
     assert out["request"]["fragment"] != "section-name"
 
 
@@ -207,6 +232,19 @@ def test_breadcrumbs_non_dict_entry_in_the_list_does_not_crash() -> None:
     assert out is not None
 
 
+def test_breadcrumbs_after_a_non_dict_entry_are_still_scrubbed() -> None:
+    """Mutation-testing finding (2026-09-22): the non-dict entry must be SKIPPED (continue), not
+    treated as a reason to stop processing the rest of the list (break) -- the prior test's dict
+    entry after the bad one had nothing sensitive, so it couldn't tell the two apart."""
+    event = _error_event(
+        breadcrumbs={"values": ["not-a-dict", {"category": "custom", "message": _db_echo(_SECRET)}]}
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in out["breadcrumbs"]["values"][1]["message"]
+    assert "DETAIL:  [redacted]" in out["breadcrumbs"]["values"][1]["message"]
+
+
 def test_breadcrumbs_dict_with_no_values_key_does_not_crash() -> None:
     """Coverage gap: every prior dict-shaped breadcrumbs test had a values key."""
     event = _error_event(breadcrumbs={})
@@ -234,6 +272,46 @@ def test_logentry_params_with_a_db_echoed_value_are_redacted() -> None:
     assert out is not None
     assert _SECRET not in str(out["logentry"]["params"])
     assert out["logentry"]["params"][0] == "user-1"  # non-vacuity: a safe param is untouched
+
+
+def test_logentry_message_and_formatted_with_a_db_echoed_value_are_redacted() -> None:
+    """Mutation-testing finding (2026-09-22): no test previously put a redactable value directly in
+    logentry.message/formatted -- only in params -- so a mutant that stopped touching either key
+    (or looked it up under the wrong dict, or on the wrong container) survived undetected.
+    `redact_db_values` only recognises Postgres-shaped text (batch-1 finding), so a plain bare
+    secret is not enough here -- must use the same real Postgres-echo shape as the params test."""
+    event = _error_event(
+        logentry={
+            "message": "Query failed: %s",
+            "formatted": f"Query failed: {_db_echo(_SECRET)}",
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in out["logentry"]["formatted"]
+    assert "DETAIL:  [redacted]" in out["logentry"]["formatted"]
+    assert out["logentry"]["message"] == "Query failed: %s"  # non-vacuity: no DB shape here
+
+
+def test_logentry_message_alone_with_a_db_echoed_value_is_redacted() -> None:
+    """Mutation-testing finding (2026-09-22): the test above only ever put a redactable value in
+    `formatted` -- a mutant that broke the "message" key specifically (wrong literal, wrong dict)
+    still survived because `formatted`'s own lookup was untouched by that mutation."""
+    event = _error_event(logentry={"message": _db_echo(_SECRET), "formatted": "unrelated"})
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in out["logentry"]["message"]
+    assert "DETAIL:  [redacted]" in out["logentry"]["message"]
+
+
+def test_top_level_event_message_with_a_db_echoed_value_is_redacted() -> None:
+    """Mutation-testing finding (2026-09-22): event["message"] (distinct from logentry.message) had
+    no test that put a redactable value there at all."""
+    event = _error_event(message=_db_echo(_SECRET))
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in out["message"]
+    assert "DETAIL:  [redacted]" in out["message"]
 
 
 def test_logentry_params_non_string_element_is_left_alone() -> None:
@@ -278,6 +356,11 @@ def test_extra_is_fail_closed_not_selectively_redacted() -> None:
     )
     out = scrub_event(event, {})
     assert out is not None
+    # Exact shape, not just "secret absent" -- a mutation-testing pass (2026-09-22) found
+    # `_SECRET not in str(...)` also passes trivially if the field were replaced with None, and the
+    # exact key name ("_stripped") was never checked either.
+    assert isinstance(out["extra"], dict)
+    assert "_stripped" in out["extra"]
     assert _SECRET not in str(out["extra"])
 
 
@@ -307,3 +390,179 @@ def test_scrub_event_is_wired_as_both_before_send_and_before_send_transaction() 
     )
     assert kwargs["before_send"] is scrub_event
     assert kwargs["before_send_transaction"] is scrub_event
+
+
+def test_sentry_init_kwargs_returns_every_expected_option_with_its_correct_value() -> None:
+    """Mutation-testing finding (2026-09-22): the wiring test above only ever checked before_send/
+    before_send_transaction -- every other returned key (dsn, release, environment, the two PII-
+    adjacent options, before_send_transaction's own key name) had zero assertions, so a mutant
+    swapping any of them to a wrong literal or a wrong dict key survived undetected."""
+    from app.core.sentry_config import sentry_init_kwargs
+
+    kwargs = sentry_init_kwargs(
+        dsn="https://public@example.invalid/1", release="v1.2.3", environment="staging"
+    )
+    assert kwargs["dsn"] == "https://public@example.invalid/1"
+    assert kwargs["release"] == "v1.2.3"
+    assert kwargs["environment"] == "staging"
+    assert kwargs["traces_sample_rate"] == 1.0
+    assert kwargs["include_local_variables"] is False
+    assert kwargs["max_request_body_size"] == "never"
+    assert set(kwargs.keys()) == {
+        "dsn",
+        "release",
+        "environment",
+        "traces_sample_rate",
+        "include_local_variables",
+        "max_request_body_size",
+        "before_send",
+        "before_send_transaction",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: chained Supabase Auth exceptions (employees.py's `raise ... from exc`)
+# ---------------------------------------------------------------------------
+# Payload shapes confirmed live against this app's REAL sentry_init_kwargs (session scratchpad
+# `sentry_probe_authchain.py`): a chained `AuthApiError` put its own entry, with a real `module`
+# field, into event["exception"]["values"] -- not derived from scrub_event's own code shape.
+
+_AUTH_EMAIL_MESSAGE = 'Email address "victim-reveal-me@example.com" is invalid'
+
+
+def test_auth_error_chain_message_is_stripped() -> None:
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "AuthApiError",
+                    "module": "supabase_auth.errors",
+                    "value": _AUTH_EMAIL_MESSAGE,
+                },
+                {
+                    "type": "HTTPException",
+                    "module": "fastapi.exceptions",
+                    "value": "safe app message",
+                },
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    # Exact replacement, not just "secret absent" -- a mutation-testing pass (2026-09-22) found
+    # `not in str(...)` also passes trivially if the field were replaced with None.
+    assert isinstance(out["exception"]["values"][0]["value"], str)
+    assert "victim-reveal-me@example.com" not in str(out["exception"])
+
+
+def test_auth_error_chain_type_field_is_left_visible_for_debugging() -> None:
+    """Non-vacuity: only `value` is replaced -- `type`/`module` stay so the class is still visible
+    in Sentry, matching the level of detail describe_auth_error already gives the log line."""
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "AuthApiError",
+                    "module": "supabase_auth.errors",
+                    "value": _AUTH_EMAIL_MESSAGE,
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert out["exception"]["values"][0]["type"] == "AuthApiError"
+    assert out["exception"]["values"][0]["module"] == "supabase_auth.errors"
+
+
+def test_the_outer_non_auth_exception_in_the_chain_is_left_alone() -> None:
+    """Non-vacuity: the app's own safe top-level message (HTTPException) is never touched, only the
+    chained AuthApiError cause."""
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "AuthApiError",
+                    "module": "supabase_auth.errors",
+                    "value": _AUTH_EMAIL_MESSAGE,
+                },
+                {
+                    "type": "HTTPException",
+                    "module": "fastapi.exceptions",
+                    "value": "safe app message",
+                },
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert out["exception"]["values"][1]["value"] == "safe app message"
+
+
+def test_a_different_auth_error_subclass_is_also_stripped_by_module_not_class_name() -> None:
+    """Matched by module, not a hardcoded class-name list -- covers every AuthError subclass."""
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "AuthWeakPasswordError",
+                    "module": "supabase_auth.errors",
+                    "value": f"Password too similar to {_SECRET}",
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert isinstance(out["exception"]["values"][0]["value"], str)
+    assert _SECRET not in str(out["exception"])
+
+
+def test_ordinary_exceptions_are_still_redacted_by_shape_not_fail_closed() -> None:
+    """Non-regression: an unrelated exception (any module) still goes through redact_db_values, not
+    the auth fail-closed path -- this slice must not weaken the original DB-echo redaction."""
+    event = _error_event(
+        exception={"values": [{"type": "RuntimeError", "value": _db_echo(_SECRET)}]}
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in out["exception"]["values"][0]["value"]
+    assert "DETAIL:  [redacted]" in out["exception"]["values"][0]["value"]
+
+
+def test_a_plain_safe_exception_message_is_left_exactly_alone() -> None:
+    """Non-vacuity: this slice must not turn into a blanket strip of every exception message."""
+    event = _error_event(
+        exception={"values": [{"type": "ZeroDivisionError", "value": "division by zero"}]}
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert out["exception"]["values"][0]["value"] == "division by zero"
+
+
+def test_exception_field_as_a_non_dict_does_not_crash() -> None:
+    event = _error_event(exception="boom")
+    out = scrub_event(event, {})
+    assert out is not None
+
+
+def test_exception_dict_with_no_values_key_does_not_crash() -> None:
+    event = _error_event(exception={})
+    out = scrub_event(event, {})
+    assert out is not None
+
+
+def test_exception_values_containing_a_non_dict_entry_does_not_crash() -> None:
+    event = _error_event(exception={"values": ["not-a-dict", {"type": "X", "value": "boom"}]})
+    out = scrub_event(event, {})
+    assert out is not None
+
+
+def test_auth_error_entry_with_no_value_key_does_not_crash() -> None:
+    """Coverage gap: every prior auth-error entry had a value key."""
+    event = _error_event(
+        exception={"values": [{"type": "AuthApiError", "module": "supabase_auth.errors"}]}
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert "value" not in out["exception"]["values"][0]
