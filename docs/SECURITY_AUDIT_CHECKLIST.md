@@ -14,17 +14,178 @@ into "Completed Audits" below, and reset "Current Audit" to `status: idle` befor
 ## Current Audit
 
 ```
-status: idle   <!-- idle | in-progress | complete -->
-phase: <!-- none started -->
-scope_files: <!-- none -->
-date: <!-- none -->
-commit: <!-- none -->
+status: in-progress   <!-- idle | in-progress | complete -->
+phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2 (slice 1 of 3): Sentry query_string, breadcrumb.data, before_send_transaction
+scope_files: backend/app/core/sentry_config.py; tests backend/tests/core/test_sentry_config_hostile.py (new)
+date: 2026-09-22
+commit: PENDING — not yet committed
 ```
 
 Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20). Fill them while `in-progress`; the guard hook
 blocks a blank one. Placeholders are HTML comments on purpose: the hook treats a comment as blank, so an unfilled
 row can't pass. Evidence = a test name, a command's output or a rule that ran — "I believe it is done" is not
 evidence; write `PENDING — <what is missing>` until it exists. Add one `req_NN` line per requirement.
+
+- `trigger`: boundary `backend/app/core/sentry_config.py` (third-party data egress); mechanism: which Sentry
+  SDK event fields carry app/client data and are not yet scrubbed. Independent keyword pass: a fresh
+  general-purpose agent (no view of any plan), asked only for search keywords given the 6 mechanism names —
+  produced log injection/parameterized logging, credentials-in-URL, distributed-tracing/span, exception-chaining
+  terms; combined with my own list and run through `scripts/skill_sweep.sh` (whole-directory, ranked by match
+  count, not just familiar titles). Top hit (`Transaction_Authorization_Cheat_Sheet.md`, 23 matches) checked and
+  rejected as a false positive (banking transactions, not Sentry performance transactions) — ranking alone is
+  not relevance, confirmed by opening the file. Real hits: `Logging_Cheat_Sheet.md` "Data to exclude" (access
+  tokens, session ids — already partly cited in batch 1), ASVS 16.4.1 (log injection), 16.5.1 (generic error to
+  consumer), 14.2.1 (sensitive data never in URL/query string). TCASVS 6.1.2 (telemetry endpoints need TLS) —
+  applies, already satisfied (Sentry DSN is `https://`, no code change). WSTG: no new hit for this slice beyond
+  08-error-handling.md already used in batch 1. No dedicated Sentry/observability skill exists in this project
+  (checked `~/.claude/skills/` listing directly).
+- `blind_test`: SPLIT by mechanism, decided per the 2026-09-22 workflow resolution (`verification-workflow-
+  proposal.md`) — re-fixing/extending the ALREADY-EXISTING `scrub_event` mechanism (query_string, breadcrumb.data,
+  logentry.params, extra) uses author-written attack tests + 3-pass pilot on close, same as batch 1's fallback.
+  `before_send_transaction` is a GENUINELY NEW mechanism (doesn't exist in this codebase yet, zero tests) — this
+  one requires a blind-authored test per the resolution, scoped to that one hook only. DONE: a fresh
+  general-purpose agent, explicitly instructed not to read `sentry_config.py` or any Sentry-named file (worktree
+  isolation was unavailable in this environment — no git repo at the session's primary working directory — so
+  blinding relied on the prompt instruction alone, weaker than filesystem isolation, stated as such), given only
+  the field contract (confirmed real shapes from the req_01-05 probes), the two treatment strategies, and OWASP
+  WSTG-07/08 + ASVS 14.2.1 + Logging_Cheat_Sheet.md citations. Delivered 24 pytest functions attacking
+  request/breadcrumbs/extra/tags/measurements/spans/transaction-name/message-shape. Every finding reproduced by
+  the author against the real implementation before trusting it (rule 10.2) — see req_26-29 below for what was
+  real vs. false-positive vs. genuinely unreachable, each with its own live-verification evidence.
+- `hostile_inputs_tested`: the 20-case author catalogue in `test_sentry_config_hostile.py` (req_01-05) plus the
+  24-case blind-agent catalogue (triaged into req_26-29 below); run output under each req row.
+- `req_01`: HTTP query string must not reach Sentry as an unredacted value in either error or transaction
+  events | ASVS 14.2.1 (owasp-asvs-5/chapters/v14-data-protection.md:22); Logging_Cheat_Sheet.md "Data to
+  exclude" | applies | evidence (runtime probe, sentry-sdk 2.68.1, real FastAPI app + TestClient, custom
+  no-network Transport — not read from docs, which don't state the exact field path): a request to
+  `/probe?token=QUERYSECRET123&other=1` produces `event["request"]["query_string"] ==
+  "token=QUERYSECRET123&other=1"` verbatim, on BOTH the error event and the transaction event (transaction
+  events share the same `request` shape). `scrub_event` never touches `event["request"]` today — confirmed by
+  reading `sentry_config.py` directly (only `exception[].value`, `logentry.message/formatted`, `event.message`,
+  `breadcrumb.message` are touched). Fix: `_strip_query_string`/`_strip_url_path_and_query` in `sentry_config.py`
+  — FAIL CLOSED (whole field replaced/dropped), not selectively redacted (`redact_db_values` only recognises
+  Postgres shapes, does nothing for an arbitrary token). Test: `test_query_string_is_stripped_from_error_event_
+  request`, `..._from_transaction_event_request`, `..._embedded_inline_in_the_url_is_also_stripped`,
+  `test_a_clean_scheme_and_host_only_url_is_left_exactly_alone` (non-vacuity), `test_missing_request_field_does_
+  not_crash` — all pass on final code; the first 3 confirmed to FAIL on the pre-fix code (rule 10.1) in the
+  original round-1 reproduction for this slice.
+- `req_02`: breadcrumb `data` dict (e.g. an `http`-type breadcrumb's `url`/`query_string`) must not carry an
+  unredacted client value | same sources as req_01 | applies | evidence (same probe): a manually-added `http`
+  breadcrumb with `data={"url": "https://x/y", "query_string": "tok=BCSECRET"}` appears verbatim in
+  `event["breadcrumbs"]["values"][i]["data"]`; `scrub_event`'s breadcrumb loop only touches `crumb["message"]`,
+  never `crumb["data"]`, confirmed by reading the code. Fix: `_strip_query_string` reused on `crumb.get("data")`,
+  same fail-closed treatment as req_01. Test: `test_breadcrumb_data_query_string_is_stripped`,
+  `test_breadcrumb_data_url_with_inline_query_is_stripped`, `test_breadcrumb_message_still_redacted_alongside_
+  data` (non-regression: batch-1's message scrub still runs), `test_breadcrumb_with_no_data_field_does_not_
+  crash` — all pass; proven to fail on pre-fix code.
+- `req_03`: log-record interpolation args must not carry an unredacted client value | Logging_Cheat_Sheet.md
+  "Data to exclude"; ASVS 16.4.1 | applies — confirmed REACHABLE, not theoretical: grepped every `logger.*(`
+  call in `app/` first (`deps.py:62`, `deps.py:127`, `employees.py:78/151`, `health.py:41`, `main.py:175`) —
+  this project uses `%`-style logging exclusively (0 f-string logger calls; ruff's `LOG` rule enforces it) —
+  the exact shape that populates `logentry.params`. Evidence (same probe, real logging call `_probe_logger.
+  error("Auth failed for user %s with secret %s", "user-1", "LOGPARAMSECRET456")`):
+  `event["logentry"]["params"] == ["user-1", "LOGPARAMSECRET456"]`, raw, unredacted; `scrub_event` only touches
+  `logentry["message"]`/`["formatted"]`, never `["params"]`. Fix: `_redact_each_in` — each list element run
+  through `redact_db_values` individually, same choke point as `message`/`formatted` (this field IS a plausible
+  carrier of a real DB-echoed value, unlike query_string, so selective redaction is the right treatment here,
+  not fail-closed). Test: `test_logentry_params_with_a_db_echoed_value_are_redacted` (also asserts a safe param
+  survives — non-vacuity), `test_logentry_params_non_string_element_is_left_alone`, `test_missing_logentry_does_
+  not_crash` — all pass; proven to fail on pre-fix code.
+- `req_04`: performance/transaction events need their own scrub hook — `before_send` does NOT cover them |
+  verified live against Sentry's own docs (docs.sentry.io/platforms/python/configuration/filtering/,
+  2026-09-22, WebFetch, not assumed): "before_send_transaction hook, that does the same thing for
+  transactions" — a separate, currently-absent hook | applies | evidence: `sentry_config.py` grepped directly,
+  no `before_send_transaction` key anywhere; `sentry_init_kwargs` sets `traces_sample_rate: 1.0` (100% of
+  requests), confirmed by reading `main.py`'s comment and `sentry_config.py` together — every transaction has
+  been leaving unscrubbed (req_01's query_string leak applies to every one of them) since Sentry was wired up,
+  not a hypothetical. Root cause (D-adjacent, but not a stated trade-off — an unstated gap): batch 1's `req_23`
+  disposition already named this as BATCH 2 and did not silently drop it. This is the item requiring a
+  blind-authored test (new mechanism, no prior tests) per `blind_test` above. Fix: `sentry_init_kwargs` now sets
+  `before_send_transaction: scrub_event` (same function reused, not duplicated — every field access inside it is
+  `.get()`-guarded, confirmed safe against a transaction event's shape, which has no `exception`/`logentry`).
+  Test: `test_scrub_event_is_wired_as_both_before_send_and_before_send_transaction`, plus every req_01/req_26-27
+  test parametrized through `_transaction_event()` — pass; the wiring assertion fails on pre-fix code
+  (`KeyError: 'before_send_transaction'`). The blind agent's attack suite (24 tests, see `blind_test` row) also
+  exercised this hook's real shapes (request/breadcrumbs/extra/tags/measurements/spans) directly.
+- `req_05`: `event["extra"]` has zero scrubbing and zero enforcement against a future call site populating it
+  with app data | CODE_REVIEW_FINDINGS taxonomy (E), same shape as batch 1's `req_13` | applies as defense in
+  depth, not a currently-active leak | evidence: the probe's own `extra` was only the SDK's own default
+  (`{"sys.argv": [...]}` — not app data); no code in `app/` currently calls `sentry_sdk.set_extra`/
+  `scope.set_extra` (grepped, zero matches) — stated as a structural gap to close, not a proven live leak, same
+  honesty standard as batch 1's `req_17` known-limit framing. Fix REVISED after the blind-test pass (see req_28):
+  originally implemented as selective `redact_db_values` per string value; the blind agent's tests proved that
+  shallow, shape-based redaction misses a secret nested in a dict-of-list, a list-of-strings value, and a plain
+  secret under an innocuous key name. Changed to FAIL CLOSED — the whole `extra` dict is replaced if non-empty,
+  same reasoning as req_01's query_string (arbitrary shape, can't be safely pattern-matched). Test:
+  `test_extra_is_fail_closed_not_selectively_redacted` (nested/list/innocuous-key payloads combined in one
+  case), `test_extra_empty_dict_is_left_as_empty` (non-vacuity), `test_extra_missing_entirely_does_not_crash` —
+  all pass; proven to fail on the selective-redaction version.
+- `req_06`: multi-tenancy — this slice touches no tenant query, RLS policy or tenant context; the only rule
+  that applies is "do not send sensitive tenant data to a third party in plain text" | Multi_Tenant_Security_
+  Cheat_Sheet.md:979 | N/A for RLS/tenant queries, applies for the Sentry egress (covered by req_01-05) | same
+  reasoning as batch 1's `req_15`, re-confirmed for this slice's actual diff once written.
+- `req_07`: TCASVS 6.1.2 (telemetry endpoints enforce TLS 1.2+) | applies, already satisfied | evidence: Sentry
+  DSN is `https://` (checked `settings.SENTRY_DSN`'s expected format and `sentry_init_kwargs`); no code change
+  needed, stated so this isn't silently skipped.
+- BLIND-TEST FINDINGS (2026-09-22) — a fresh, attacker-mindset agent given only the contract in `blind_test`
+  above (not the implementation) delivered 24 pytest attack functions. Every one reproduced by the author
+  against the real implementation before being trusted (rule 10.2), not accepted on the agent's word:
+- `req_26`: `scrub_event` crashed with `AttributeError` when `event["breadcrumbs"]` was a bare list rather than
+  `{"values": [...]}` | ASVS 16.5.3 (owasp-asvs-5/chapters/v16-security-logging-error-handling.md:57, "no
+  fail-open... never process despite errors" — a crash inside `before_send`/`before_send_transaction` is a worse
+  failure than a leak) | applies | evidence: reproduced directly — `event.get("breadcrumbs", {}).get("values",
+  [])` on a bare list raises `AttributeError: 'list' object has no attribute 'get'` at the old call site. Fix:
+  `_breadcrumb_entries()` — type-checks the container at each level, degrades to "scrub nothing this round"
+  instead of raising; also guards each individual crumb entry being a non-dict. Test:
+  `test_breadcrumbs_as_a_bare_list_does_not_crash`, `test_breadcrumbs_non_dict_entry_in_the_list_does_not_crash`
+  — both pass; both confirmed to crash (not just fail an assertion) on the pre-fix code.
+- `req_27`: a parameterized route's raw matched PATH (not just the query string) can carry a literal client
+  value into `request["url"]`, even though `event["transaction"]` (the route name) is already safely templated
+  | ASVS 14.2.1 (URL/query string, not scoped to just the query component) | applies | evidence: live-verified
+  against the real FastAPI app + Sentry SDK (not the agent's guess, which hypothesized `event["transaction"]`
+  itself might be unparameterized — checked and found FALSE: `event["transaction"] == "/reset/{token}"`,
+  correctly templated, on BOTH error and transaction events). The real mechanism: `request["url"] ==
+  "http://testserver/reset/RESETTOKENSECRET999"`, the literal matched path, independent of the transaction
+  name. This app's current routes only ever put a UUID in a path segment (grepped every `@router.*` path in
+  `app/api/routes/` — `employee_id`, `issue_id`, `job_type_id`, `notification_id`, `task_id`, none are
+  token-shaped), so not a currently-active leak, but the mechanism is general and the route template is already
+  available for debugging via `event["transaction"]`, so nothing is lost by closing it now. Fix:
+  `_strip_url_path_and_query` — drops the URL down to scheme+host only. Test:
+  `test_a_secret_path_segment_with_no_query_string_is_also_stripped`,
+  `test_the_safe_route_template_in_transaction_field_is_never_touched` (non-vacuity: the safe field this fix
+  relies on isn't itself touched) — both pass; the first confirmed to fail on the pre-fix code.
+- `req_28`: disposition of the blind agent's other findings, none silently dropped — checked live, confirmed NOT
+  reachable in this app's real configuration, so no code change made:
+  - `request.headers["Authorization"/"Cookie"]`: Sentry's SDK already filters these to `"[Filtered]"` BEFORE
+    `before_send` is ever called (confirmed live: a real request with `Authorization`/`Cookie` headers produces
+    `headers: {"authorization": "[Filtered]", "cookie": "[Filtered]"}` in the actual event, on both hooks). The
+    blind test's hand-built dict bypassed this upstream SDK filtering entirely, which is why it failed against
+    `scrub_event` called directly — not representative of what a real event contains.
+  - `request.cookies` (a separate field from `headers.cookie`): confirmed live NOT populated at all by this
+    app's real SDK config (`send_default_pii=False` gates it) — the real `request` dict has no `"cookies"` key.
+  - `span.data["db.statement"]`/`http.url` (DB/HTTP auto-instrumentation spans): verified live against the real
+    engine — a query through `app.core.db.engine` (which has `hide_parameters=True`) produces a span
+    `description` of `"SELECT %(v)s AS x"` (parameterized, not literal) and a `data` dict with only connection
+    metadata (`db.system`, `db.driver.name`, `db.name`, `server.address/port`) — no `db.statement` key at all,
+    confirmed the planted secret is absent from the whole transaction JSON. Outbound HTTP span query-string
+    leakage checked separately: grepped `supabase_admin.py`, zero uses of query-string params in any outbound
+    call — unreachable today either way.
+  - `tags`/`measurements` free-text: grepped `app/` for `set_tag`/`set_measurement` — the only real call site is
+    `deps.py:100`'s `set_tag("tenant_id", str(firm_id))`, a UUID, matching this project's existing UUID-only-is-
+    acceptable pattern (same as batch 1's `employees.py:182` treatment); `set_measurement` has zero call sites.
+  - `event["message"]` as a structured object (`{"message":..., "params":[...]}`): the app's own probe (req_01)
+    already confirmed `event["message"]` is always a plain string for this SDK/integration; the object-interface
+    shape the agent hypothesized applies to `event["logentry"]` (already fully handled, req_03), not to
+    `event["message"]` as a separate top-level key.
+  - `request["query_string"]`/breadcrumb `data["query_string"]` as a list-of-tuples (not a plain string): the
+    app's own probe (req_01/req_02) already confirmed this SDK/integration always produces a plain string for
+    both fields; the agent flagged this shape as unverified general Sentry-SDK knowledge, not skill- or
+    probe-verified, consistent with that.
+- `req_29`: full backend suite after all batch-2 slice-1 fixes (rounds 1+2 combined), guarded, `obs-pg` up:
+  first run after round 1 (query_string/breadcrumb.data/logentry.params/before_send_transaction) 6,957 passed;
+  final run after round 2 (crash fix, url-path strip, extra fail-closed) 6,962 passed, 0 failed, 0 errors, 12
+  skipped (204s, 2026-09-22). `ruff check`/`ruff format --check` and strict pyright clean on `sentry_config.py`
+  and `test_sentry_config_hostile.py`.
 
 
 ## Completed Audits
