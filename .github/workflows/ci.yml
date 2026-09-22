@@ -462,40 +462,15 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none # both languages here are interpreted — nothing to build
-          # Scoped to python only -- javascript-typescript's query suite is untouched. Confirmed
-          # live (2026-09-22, three failed CI runs) that this job's default 45-query suite does NOT
-          # include AlertSuppression.ql -- the "Fail if CodeQL found anything" step's .suppressions
-          # filter below can never see a suppressed result without this, no matter how a `# codeql[
-          # rule-id]` comment is placed. The `+` prefix ADDS to the default suite, confirmed against
-          # GitHub's own docs (docs.github.com code-scanning "customizing your advanced setup"),
-          # rather than replacing it -- the other 45 queries still run exactly as before.
-          #
-          # Version pin (@1.8.9, confirmed live as exactly what this job's own CodeQL 2.26.4 toolchain
-          # bundles for codeql/python-queries -- grepped the raw job log's own "Loaded .../python-
-          # queries/1.8.9/..." lines): an UNVERSIONED reference (`codeql/python-queries:AlertSuppression
-          # .ql`, tried first) failed with "Specifier for external repository is invalid" -- CodeQL's
-          # config-file query resolver parsed the bare, unversioned form as an attempt to fetch an
-          # external git repo named "codeql/python-queries" rather than resolve the already-installed
-          # bundled pack. The one working example in GitHub's own docs for this exact `uses:` syntax
-          # includes an explicit version ("scope/pack4@4.5.6:path/to/queries"), which this now matches.
-          queries: ${{ matrix.language == 'python' && '+codeql/python-queries@1.8.9:AlertSuppression.ql' || '' }}
       - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           upload: never
           output: codeql-results
       - name: Fail if CodeQL found anything
         run: |
-          # Excludes results CodeQL's own AlertSuppression.ql tagged from an inline `# codeql[rule-id]`
-          # comment (checked live against CodeQL 2.12.0's docs, 2026-09-22): the SARIF spec keeps a
-          # suppressed result IN runs[].results[], only adding a non-empty .suppressions[] to it --
-          # GitHub's Security-tab UI is what normally hides those, which this job doesn't use (see the
-          # comment above on `upload: never`), so the filter has to be done here instead. Anything
-          # WITHOUT a real, deliberate, code-reviewed suppression comment still fails the build exactly
-          # as before -- this narrows what's excluded, not what's scanned.
-          jq_open='[.runs[].results[] | select((.suppressions // []) | length == 0)]'
-          count=$(jq "$jq_open | length" codeql-results/*.sarif)
+          count=$(jq '[.runs[].results[]] | length' codeql-results/*.sarif)
           echo "CodeQL findings (${{ matrix.language }}): $count"
           if [ "$count" -gt 0 ]; then
-            jq "$jq_open[] | {rule: .ruleId, message: .message.text, location: .locations[0].physicalLocation.artifactLocation.uri}" codeql-results/*.sarif
+            jq '.runs[].results[] | {rule: .ruleId, message: .message.text, location: .locations[0].physicalLocation.artifactLocation.uri}' codeql-results/*.sarif
             exit 1
           fi
