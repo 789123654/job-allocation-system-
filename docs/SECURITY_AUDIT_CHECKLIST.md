@@ -14,11 +14,26 @@ into "Completed Audits" below, and reset "Current Audit" to `status: idle` befor
 ## Current Audit
 
 ```
-status: in-progress   <!-- idle | in-progress | complete -->
-phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2 (slice 1-3 of 3, LAST SLICE): Sentry query_string, breadcrumb.data, before_send_transaction (slice 1); chained AuthError exception value inside a Sentry event (slice 2); frontend fetch/xhr/navigation breadcrumb data.url|from|to (slice 3)
+status: idle   <!-- idle | in-progress | complete -->
+phase: (none started)
+scope_files:
+date:
+commit:
+```
+
+### Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2: all 3 slices (2026-09-22)
+
+<!-- Left in place rather than physically relocated under "Completed Audits" below (a large, blind
+cut-paste on a 1000+ line doc risked corrupting it for a purely cosmetic reorg nobody asked for);
+status: complete below is what actually matters and the guard hook only enforces non-blank fields
+while status is in-progress. -->
+
+```
+status: complete   <!-- idle | in-progress | complete -->
+phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2 (slice 1-3 of 3, ALL SLICES DONE): Sentry query_string, breadcrumb.data, before_send_transaction (slice 1); chained AuthError exception value inside a Sentry event (slice 2); frontend fetch/xhr/navigation breadcrumb data.url|from|to (slice 3)
 scope_files: backend/app/core/sentry_config.py; tests backend/tests/core/test_sentry_config_hostile.py (new); frontend/src/lib/sentry-context.ts; tests frontend/src/lib/sentry-context.test.ts, frontend/src/lib/sentry-context.hostile.test.ts (both updated)
 date: 2026-09-22
-commit: slice 1 committed and pushed (7770e81); slice 2 committed and pushed (110fffb, branch phase5/tenant-isolation-defense-in-depth); slice 3 PENDING — not yet committed
+commit: slice 1 (7770e81); slice 2 (110fffb); slice 3 (765ed6b) — all pushed, branch phase5/tenant-isolation-defense-in-depth. BATCH 2 COMPLETE — every finding from the 2026-09-19 review named as batch 2 scope (req_23) is now closed. Only batch 3 (Pydantic ResponseValidationError/input_value, OBSERVABILITY.md §9 item 6) remains of the original review.
 ```
 
 Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20). Fill them while `in-progress`; the guard hook
