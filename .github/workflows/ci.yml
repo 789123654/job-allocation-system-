@@ -468,9 +468,17 @@ jobs:
           output: codeql-results
       - name: Fail if CodeQL found anything
         run: |
-          count=$(jq '[.runs[].results[]] | length' codeql-results/*.sarif)
+          # Excludes results CodeQL's own AlertSuppression.ql tagged from an inline `# codeql[rule-id]`
+          # comment (checked live against CodeQL 2.12.0's docs, 2026-09-22): the SARIF spec keeps a
+          # suppressed result IN runs[].results[], only adding a non-empty .suppressions[] to it --
+          # GitHub's Security-tab UI is what normally hides those, which this job doesn't use (see the
+          # comment above on `upload: never`), so the filter has to be done here instead. Anything
+          # WITHOUT a real, deliberate, code-reviewed suppression comment still fails the build exactly
+          # as before -- this narrows what's excluded, not what's scanned.
+          jq_open='[.runs[].results[] | select((.suppressions // []) | length == 0)]'
+          count=$(jq "$jq_open | length" codeql-results/*.sarif)
           echo "CodeQL findings (${{ matrix.language }}): $count"
           if [ "$count" -gt 0 ]; then
-            jq '.runs[].results[] | {rule: .ruleId, message: .message.text, location: .locations[0].physicalLocation.artifactLocation.uri}' codeql-results/*.sarif
+            jq "$jq_open[] | {rule: .ruleId, message: .message.text, location: .locations[0].physicalLocation.artifactLocation.uri}" codeql-results/*.sarif
             exit 1
           fi
