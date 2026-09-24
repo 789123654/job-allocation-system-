@@ -305,24 +305,17 @@ export default function vuIteration() {
   const identity = identities[Math.floor(Math.random() * identities.length)];
   const headers = { Authorization: `Bearer ${identity.token}` };
 
+  // TEMPORARY — write-only (POST + PATCH) stress variant, re-run at 250 VUs to bisect where the
+  // pool-exhaustion cliff sits between the clean 100-VU run and the hard-failing 300-VU run. Revert
+  // right after this run — not the new baseline. Same isolation:critical checks, same thresholds.
   const roll = Math.random();
-  if (roll < 0.35) {
-    pollNotifications(headers);
-  } else if (roll < 0.45) {
-    pollTasks(identity, headers);
-  } else if (roll < 0.52) {
-    pollJobTypes(headers);
-  } else if (roll < 0.59) {
-    crossTenantTaskProbe(identity, headers);
-  } else if (roll < 0.66) {
-    tamperedTokenProbe(identity);
-  } else if (roll < 0.72) {
+  if (roll < 0.2) {
     wrongRoleTaskCreateProbe(identity, headers);
-  } else if (roll < 0.77) {
+  } else if (roll < 0.4) {
     ownerTaskCreateProbe(identity, headers);
-  } else if (roll < 0.85) {
+  } else if (roll < 0.6) {
     notificationReadProbe(identity, headers);
-  } else if (roll < 0.93) {
+  } else if (roll < 0.8) {
     jobTypeUpdateProbe(identity, headers);
   } else {
     taskDeadlineProbe(identity, headers);
