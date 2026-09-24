@@ -69,6 +69,39 @@ was checked the same way and found NOT to need this: PyJWT's own `aud`/`iss` mes
 strings (grepped the installed library's source), and its `DecodeError(f"...: {e}")` wraps a
 `json.JSONDecodeError`, whose message is a position description ("line 1 column 1 (char 0)"),
 confirmed live never to embed the attacker-supplied payload itself.
+
+BATCH 3 (2026-09-22): FastAPI's `ResponseValidationError` -- raised by `serialize_response()` when a
+route's return value doesn't match its declared `response_model` -- embeds the raw offending
+value(s) in its own `__str__` via Pydantic's error dicts (`{'type': ..., 'loc': ..., 'msg': ...,
+'input': <the actual value>}`). A runtime probe (real app, real sentry_init_kwargs, a route whose
+handler returns a value that fails response-model validation) proved this reaches Sentry live: even
+though the app's own `@app.exception_handler(Exception)` catches and converts this to a generic 500
+(never echoed to the client), Sentry's Starlette/FastAPI integration independently auto-captures the
+exception at the ASGI middleware layer (`sentry_sdk/integrations/starlette.py`
+`_sentry_exceptionmiddleware_call`, confirmed by reading the installed SDK, not assumed) -- so
+`event["exception"]["values"]` still carries `str(exc)`, `input` value and all, and the existing
+`redact_db_values` pass (Postgres-shape-only) does nothing for it, same gap shape as slice 2's
+AuthError chain. For a top-level type mismatch (the whole returned object, not one field), `input`
+is the ENTIRE offending value, confirmed live with a route returning a non-dict object against a
+dict-shaped response_model. ASVS 16.2.5, WSTG-APIT-03 (owasp-wstg/chapters/12-api-testing.md,
+"Excessive Data Exposure" -- "check ... verbose error/debug output for leaked structure"), TCASVS
+4.6.1 ("no leaking sensitive system info, stack traces").
+
+Scoped by `module == "fastapi.exceptions"` AND `type` in a fixed set of the three
+`ValidationException` subclasses (`ResponseValidationError`, `RequestValidationError`,
+`WebSocketRequestValidationError`) -- NOT by module alone, unlike the AuthError fix: that same
+module also defines `HTTPException`, whose `detail` is developer-written, intentionally
+client-safe text this app relies on for real error messages (`raise HTTPException(404, "Task not
+found")`), and stripping it would be a real regression for no security benefit (failure mode 7 --
+checked what's different about this call site before reusing the module-matching pattern). Because
+Sentry's event only carries `type`/`module` strings (not the live exception object), this can't be
+an `isinstance` check the way the log-formatter side (`logging_setup.py`) can do it -- a stated,
+narrower boundary than the AuthError match: a future FastAPI-added `ValidationException` subclass
+would need this set updated by hand. `RequestValidationError` was checked live and found NOT to
+reach Sentry in this app's real routing (it's fully resolved inside FastAPI's dependency-injection
+step, before the ASGI exception-middleware boundary Sentry hooks) -- included in the match set
+anyway as defense in depth, since matching it costs nothing (it never fires today) and protects
+against it reaching this path if FastAPI's internals ever change.
 """
 
 from typing import Any
@@ -79,6 +112,22 @@ from app.core.redaction import redact_db_values
 _STRIPPED_QUERY = "[stripped: ASVS 14.2.1, never sent to Sentry]"
 _STRIPPED_AUTH_MESSAGE = "[stripped: raw Supabase Auth message, ASVS 16.2.5]"
 _AUTH_ERROR_MODULE = "supabase_auth.errors"
+_STRIPPED_VALIDATION_MESSAGE = "[stripped: Pydantic validation-error input values, ASVS 16.2.5]"
+_VALIDATION_ERROR_MODULE = "fastapi.exceptions"
+_VALIDATION_ERROR_TYPES = frozenset(
+    {
+        "ResponseValidationError",
+        "RequestValidationError",
+        "WebSocketRequestValidationError",
+        # The shared base class itself -- a blind-test pass (2026-09-22) found it wasn't matched:
+        # no current fastapi version (0.141.1, grepped) ever raises it directly, only the three
+        # subclasses above, but the log-formatter side's isinstance() check already covers it for
+        # free, and this file's own docstring already named "a future FastAPI-added subclass" as
+        # this string-set match's stated boundary -- the base class is exactly that same boundary,
+        # not a hypothetical future one, so it costs nothing to close now.
+        "ValidationException",
+    }
+)
 
 
 def _redact_in(container: Any, key: str) -> None:
@@ -165,6 +214,13 @@ def _scrub_exception_value(exc_entry: Any) -> None:
     if entry.get("module") == _AUTH_ERROR_MODULE:
         if isinstance(entry.get("value"), str):
             entry["value"] = _STRIPPED_AUTH_MESSAGE
+        return
+    if (
+        entry.get("module") == _VALIDATION_ERROR_MODULE
+        and entry.get("type") in _VALIDATION_ERROR_TYPES
+    ):
+        if isinstance(entry.get("value"), str):
+            entry["value"] = _STRIPPED_VALIDATION_MESSAGE
         return
     _redact_in(entry, "value")
 

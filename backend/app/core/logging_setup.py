@@ -11,8 +11,11 @@ import json
 import logging
 import math
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import TextIO
+
+from fastapi.exceptions import ValidationException
 
 from app.core import request_context
 from app.core.redaction import redact_db_values
@@ -20,6 +23,57 @@ from app.core.redaction import redact_db_values
 _MAX_MESSAGE = 8_192
 _MAX_EXC = 16_384
 _MAX_FIELD = 256
+
+# BATCH 3 (2026-09-22): FastAPI's ResponseValidationError/RequestValidationError/
+# WebSocketRequestValidationError (all ValidationException) embed the raw offending value(s) in
+# their own __str__ via Pydantic error dicts ({'type': ..., 'loc': ..., 'msg': ..., 'input': <the
+# actual value>}) -- confirmed live (session probe): a route returning a value that fails its
+# response_model produces a traceback whose LAST line is `str(exc)` verbatim, and redact_db_values
+# (Postgres-shape-only) does not recognise this shape at all, so it passed through unredacted.
+# This does an EXACT string replacement of str(exc) for each such exception in the real chain object
+# we already have (record.exc_info[1]) -- not a text pattern over the formatted traceback, which is
+# exactly the "KNOWN LIMIT" redaction.py's own docstring already names as the real fix ("render
+# exceptions from the exception object instead of from text"). Runs BEFORE redact_db_values, which
+# still runs afterward for defense in depth on anything else in the same chain.
+_STRIPPED_VALIDATION_TEXT = "[stripped: Pydantic validation-error input values, ASVS 16.2.5]"
+
+
+def _validation_errors_in_chain(exc: BaseException | None) -> Iterator[ValidationException]:
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ValidationException):
+            yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
+def _redact_validation_errors(formatted: str, exc: BaseException | None) -> str:
+    for validation_exc in _validation_errors_in_chain(exc):
+        raw = str(validation_exc)
+        if raw:
+            formatted = formatted.replace(raw, _STRIPPED_VALIDATION_TEXT)
+    return formatted
+
+
+# A blind-test pass (2026-09-22) found the fix above only protects the `exc` field (built from
+# `record.exc_info`): a call site that logs a ValidationException's str() as the plain MESSAGE
+# instead -- `logger.error(f"...: {exc}")`, no `exc_info` -- has no live exception object attached
+# to the record for `_redact_validation_errors` to match against, only text. Reproduced live: this
+# app's one current real call site (main.py's catch-all handler) always uses `logger.exception(...)`
+# and is unaffected, but nothing stops a future one-liner from reopening this. Pydantic's error-dict
+# repr is a FIXED, library-controlled literal format (the key names, not the values, are what's
+# attacker-proof) -- recognising its signature is the same kind of safe, non-parsing match
+# `_PG_TEMPLATES` already relies on for Postgres's own fixed message templates, not a new attempt to
+# parse arbitrary text. Whole-message fail-closed on match, same reasoning as `extra`/query_string:
+# there is no way to selectively redact just the `input` values from repr'd text without parsing it.
+_VALIDATION_ERROR_MESSAGE_SIGNATURE = ("'type': ", "'loc': ", "'input': ")
+
+
+def _redact_validation_error_message(message: str) -> str:
+    if all(marker in message for marker in _VALIDATION_ERROR_MESSAGE_SIGNATURE):
+        return _STRIPPED_VALIDATION_TEXT
+    return message
+
 
 # Structural allowlist (code-review root cause E: a rule that only exists as a comment gets
 # skipped). A caller's `extra={...}` key that isn't listed here is silently dropped, so a future
@@ -62,7 +116,10 @@ class JsonFormatter(logging.Formatter):
             "ts": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "logger": record.name,
-            "message": _clip(redact_db_values(record.getMessage()), _MAX_MESSAGE),
+            "message": _clip(
+                redact_db_values(_redact_validation_error_message(record.getMessage())),
+                _MAX_MESSAGE,
+            ),
             "request_id": ctx["request_id"] if ctx else None,
             "tenant_id": ctx["tenant_id"] if ctx else None,
             "actor_id": ctx["actor_id"] if ctx else None,
@@ -72,9 +129,10 @@ class JsonFormatter(logging.Formatter):
             if key in record.__dict__:
                 payload[key] = _field(record.__dict__[key])
         if record.exc_info:
-            payload["exc"] = _clip(
-                redact_db_values(self.formatException(record.exc_info)), _MAX_EXC
+            formatted = _redact_validation_errors(
+                self.formatException(record.exc_info), record.exc_info[1]
             )
+            payload["exc"] = _clip(redact_db_values(formatted), _MAX_EXC)
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str)
 
 

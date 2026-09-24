@@ -124,6 +124,86 @@ def test_exception_info_goes_in_exc() -> None:
     assert "boom-detail" in payload["exc"]
 
 
+# BATCH 3 (SECURITY_AUDIT_CHECKLIST.md req_41+): FastAPI's ResponseValidationError embeds the raw
+# offending value in its own __str__ via a Pydantic error dict. Shape confirmed live (session
+# scratchpad probe_batch3_response_validation.py) against the real app: `str(exc)` appears verbatim
+# as the traceback's last line(s), exactly reproduced here without importing fastapi's routing
+# (keeps this a unit test of JsonFormatter's redaction, not an integration test of FastAPI routing).
+def test_response_validation_error_message_is_stripped_from_exc() -> None:
+    from fastapi.exceptions import ResponseValidationError
+
+    secret = "SSN-REVEAL-ME-123456789"
+    try:
+        raise ResponseValidationError(
+            errors=[{"type": "int_parsing", "loc": ("response", "ssn"), "input": secret}]
+        )
+    except ResponseValidationError:
+        record = logging.LogRecord(
+            "app.test", logging.ERROR, __file__, 1, "failed", None, sys.exc_info()
+        )
+    payload = json.loads(JsonFormatter().format(record))
+    assert secret not in payload["exc"]
+    assert "ResponseValidationError" in payload["exc"]  # exception class stays visible
+
+
+def test_a_chained_response_validation_error_is_also_stripped() -> None:
+    """The real path (main.py's unhandled_exception_handler) re-raises via a chain (`raise app_exc
+    from app_exc.__cause__ or app_exc.__context__`), not a bare top-level exception -- this proves
+    the __cause__/__context__ walk actually finds it, not just a top-level exc_info[1]."""
+    from fastapi.exceptions import ResponseValidationError
+
+    secret = "CHAINED-SECRET-VALUE"
+    try:
+        try:
+            raise ResponseValidationError(errors=[{"type": "string_type", "input": secret}])
+        except ResponseValidationError as inner:
+            raise RuntimeError("outer safe message") from inner
+    except RuntimeError:
+        record = logging.LogRecord(
+            "app.test", logging.ERROR, __file__, 1, "failed", None, sys.exc_info()
+        )
+    payload = json.loads(JsonFormatter().format(record))
+    assert secret not in payload["exc"]
+    assert "outer safe message" in payload["exc"]  # the safe outer message is untouched
+
+
+def test_a_plain_exception_with_no_validation_error_in_its_chain_is_unaffected() -> None:
+    """Non-vacuity: this must not turn into a blanket strip of every traceback."""
+    try:
+        raise ValueError("ordinary error, nothing to strip")
+    except ValueError:
+        record = logging.LogRecord(
+            "app.test", logging.ERROR, __file__, 1, "failed", None, sys.exc_info()
+        )
+    payload = json.loads(JsonFormatter().format(record))
+    assert "ordinary error, nothing to strip" in payload["exc"]
+
+
+# Blind-test finding (2026-09-22): the exc_info-based fix above only protects a call site using
+# `logger.exception(...)`/`exc_info=True`. A call site that logs str(exc) as the plain MESSAGE
+# instead -- no exc_info attached -- has no live exception object for that fix to match against.
+# This app's one real call site (main.py's catch-all handler) always uses logger.exception and is
+# unaffected, but nothing stops a future `logger.error(f"...: {exc}")` one-liner from reopening
+# this, so it's closed by recognising Pydantic's fixed error-dict repr signature in the text itself.
+def test_a_validation_error_logged_as_the_plain_message_with_no_exc_info_is_also_stripped() -> None:
+    from fastapi.exceptions import ResponseValidationError
+
+    secret = "SSN-REVEAL-ME-123456789"
+    exc = ResponseValidationError(
+        errors=[{"type": "string_type", "loc": ("response", "x"), "msg": "bad", "input": secret}]
+    )
+    record = logging.LogRecord("app.test", logging.ERROR, __file__, 1, str(exc), None, None)
+    payload = json.loads(JsonFormatter().format(record))
+    assert secret not in payload["message"]
+    assert record.exc_info is None  # confirms this really is the no-exc_info path, not req_41's
+
+
+def test_an_ordinary_message_that_happens_to_mention_input_is_not_stripped() -> None:
+    """Non-vacuity: the signature match needs all three markers together, not just one common word."""
+    payload = json.loads(_format("please check the input field on the form"))
+    assert payload["message"] == "please check the input field on the form"
+
+
 def test_configure_logging_is_idempotent_and_writes_json_to_the_live_stdout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

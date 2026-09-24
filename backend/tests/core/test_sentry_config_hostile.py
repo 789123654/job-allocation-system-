@@ -566,3 +566,163 @@ def test_auth_error_entry_with_no_value_key_does_not_crash() -> None:
     out = scrub_event(event, {})
     assert out is not None
     assert "value" not in out["exception"]["values"][0]
+
+
+# ---------------------------------------------------------------------------
+# BATCH 3: FastAPI ResponseValidationError/RequestValidationError/
+# WebSocketRequestValidationError embed the raw offending value(s) in their own __str__ via
+# Pydantic error dicts. Shape confirmed live against this app's REAL sentry_init_kwargs (session
+# scratchpad `probe_batch3_response_validation.py`): a route whose return value fails its
+# response_model produces exactly this event["exception"]["values"] entry, `module` and all -- not
+# derived from scrub_event's own code shape.
+# ---------------------------------------------------------------------------
+
+_VALIDATION_ERROR_MESSAGE = (
+    "1 validation error:\n  {'type': 'int_parsing', 'loc': ('response', 'ssn'), "
+    "'msg': 'Input should be a valid integer, unable to parse string as an integer', "
+    f"'input': '{_SECRET}'}}"
+)
+
+
+def test_response_validation_error_message_is_stripped() -> None:
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "ResponseValidationError",
+                    "module": "fastapi.exceptions",
+                    "value": _VALIDATION_ERROR_MESSAGE,
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert isinstance(out["exception"]["values"][0]["value"], str)
+    assert _SECRET not in str(out["exception"])
+
+
+def test_response_validation_error_type_field_is_left_visible_for_debugging() -> None:
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "ResponseValidationError",
+                    "module": "fastapi.exceptions",
+                    "value": _VALIDATION_ERROR_MESSAGE,
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert out["exception"]["values"][0]["type"] == "ResponseValidationError"
+    assert out["exception"]["values"][0]["module"] == "fastapi.exceptions"
+
+
+def test_request_validation_error_is_also_stripped() -> None:
+    """Defense in depth: checked live and found NOT to reach Sentry today (FastAPI resolves it
+    inside dependency injection, before the ASGI boundary Sentry hooks), but matched anyway in
+    case FastAPI's internals change -- see sentry_config.py's module docstring."""
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "RequestValidationError",
+                    "module": "fastapi.exceptions",
+                    "value": f"1 validation error:\n  {{'input': '{_SECRET}'}}",
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in str(out["exception"])
+
+
+def test_websocket_request_validation_error_is_also_stripped() -> None:
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "WebSocketRequestValidationError",
+                    "module": "fastapi.exceptions",
+                    "value": f"1 validation error:\n  {{'input': '{_SECRET}'}}",
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in str(out["exception"])
+
+
+def test_http_exception_in_the_same_module_is_not_stripped() -> None:
+    """The crux of this slice's design decision: fastapi.exceptions ALSO defines HTTPException,
+    whose `detail` is developer-written, safe text this app relies on for real error messages
+    (`raise HTTPException(404, "Task not found")`). Matching by module alone (like the AuthError
+    fix) would wrongly strip it too -- this must match by module AND a specific type set."""
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "HTTPException",
+                    "module": "fastapi.exceptions",
+                    "value": "Task not found",
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert out["exception"]["values"][0]["value"] == "Task not found"
+
+
+def test_a_different_fastapi_exceptions_class_not_in_the_validation_set_is_left_alone() -> None:
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "FastAPIError",
+                    "module": "fastapi.exceptions",
+                    "value": "some internal FastAPI error, not a validation error",
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert out["exception"]["values"][0]["value"] == (
+        "some internal FastAPI error, not a validation error"
+    )
+
+
+def test_the_shared_validation_exception_base_class_is_also_stripped() -> None:
+    """Blind-test finding (2026-09-22): the first version only matched the three named subclasses,
+    missing the shared `ValidationException` base itself -- grepped, no current fastapi version
+    raises it directly, but the log-formatter side already covers it via isinstance(), and this
+    file's own docstring already named a future subclass as this match's stated boundary. Costs
+    nothing to close."""
+    event = _error_event(
+        exception={
+            "values": [
+                {
+                    "type": "ValidationException",
+                    "module": "fastapi.exceptions",
+                    "value": f"raw errors: {_SECRET}",
+                }
+            ]
+        }
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert _SECRET not in str(out["exception"])
+
+
+def test_validation_error_entry_with_no_value_key_does_not_crash() -> None:
+    event = _error_event(
+        exception={"values": [{"type": "ResponseValidationError", "module": "fastapi.exceptions"}]}
+    )
+    out = scrub_event(event, {})
+    assert out is not None
+    assert "value" not in out["exception"]["values"][0]
