@@ -14,12 +14,296 @@ into "Completed Audits" below, and reset "Current Audit" to `status: idle` befor
 ## Current Audit
 
 ```
-status: idle   <!-- idle | in-progress | complete -->
-phase: (none started)
-scope_files:
-date:
-commit:
+status: complete   <!-- idle | in-progress | complete -->
+phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 3 (last item of the 2026-09-19 review): Pydantic ResponseValidationError/RequestValidationError/WebSocketRequestValidationError input_value leak. PLUS, discovered during batch 3's own full-suite verification and fixed in this same pass at the user's explicit request: unbounded DB connect timeout (core/db.py) — see req_49-53. BATCH 3 CLOSES the entire 2026-09-19 review (batches 1-3 all now done).
+scope_files: backend/app/core/sentry_config.py, backend/app/core/logging_setup.py; tests backend/tests/core/test_sentry_config_hostile.py, backend/tests/core/test_logging_setup.py (both updated). PLUS: backend/app/core/db.py, backend/app/core/config.py; tests backend/tests/core/test_db.py (updated)
+date: 2026-09-22 (batch 3 work) / 2026-09-24 (connect-timeout fix, investigation, and closeout)
+commit: batch 3 fix (eb7c627); connect-timeout fix (905efb5) — both on branch phase5/tenant-isolation-defense-in-depth, not yet pushed. Open follow-up NOT closed by this commit: req_45 (mutation testing, deferred fast-follow) and req_53's pool-capacity-under-burst problem (separate, larger, tracked task).
 ```
+
+<!-- Left in place rather than moved to "Completed Audits" below (same reasoning as batch 2's closeout comment
+above it in this file): a large cut-paste on a 2000+ line doc risks corrupting it for a purely cosmetic reorg. -->
+
+Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20). Fill them while `in-progress`; the guard hook
+blocks a blank one. Evidence = a test name, a command's output or a rule that ran — "I believe it is done" is
+not evidence; write `PENDING — <what is missing>` until it exists. Add one `req_NN` line per requirement.
+
+- `trigger`: OBSERVABILITY.md §9 item 6's last open item from the 2026-09-19 review, and
+  `CODE_REVIEW_FINDINGS`'s original `security_review_run` entry ("`ResponseValidationError` carries the whole
+  returned row"). Mode 6 sweep (2026-09-22, whole-directory grep, not just familiar filenames): `owasp-cheatsheets`
+  for "validation error"/"stack trace"/"information disclosure"/"verbose error" (hit `Error_Handling_Cheat_Sheet.md`,
+  already-cited ASVS 16.5.1 territory), `owasp-wstg` (new hit: `12-api-testing.md` WSTG-APIT-03 "Excessive Data
+  Exposure" — "check ... verbose error/debug output for leaked structure", not previously cited in this project's
+  Sentry work), `owasp-asvs-5` (16.2.5, already used for slice 2, re-confirmed applicable), `owasp-tcasvs` (new hit:
+  4.6.1 "no leaking sensitive system info, stack traces, internal paths" — v4-code-quality-exploit-mitigation.md).
+- `blind_test`: yes — run per failure-mode-11 decision (AskUserQuestion, user chose "Run a blind-test pass"). A
+  fresh general-purpose agent, worktree isolation attempted first and found UNAVAILABLE in this environment (same
+  limitation batch 1 hit — no git repo at the session's primary working directory), so blinding relied on explicit
+  instruction instead: forbidden from `git status`/`git diff`/reading the two fixed files or their test files
+  directly, required to view the pre-fix version via `git show HEAD:<path>` only. **Result: found 2 real gaps**,
+  both reproduced by the author before any fix (rule 10.2), then fixed and given their own regression tests — see
+  req_46/req_47 below. The agent's own 547-line, 26-test delivered file (`test_blind_validation_error_pass.py`)
+  is NOT committed: its findings are fully captured by req_46/47's hand-written tests, and the file itself needed
+  substantial lint/pyright cleanup (22 ruff errors, 36 pyright errors — mostly missing type hints on a fixture
+  parameter and FastAPI's known pyright false-positive on inline route handlers) that wasn't worth carrying for a
+  file whose unique value was already extracted; kept in the session scratchpad for reference, not lost.
+- `hostile_inputs_tested`: PENDING — filled once req rows below are written up with the actual test names.
+
+- `req_41`: BATCH 3 — `ResponseValidationError`/`RequestValidationError`/`WebSocketRequestValidationError`
+  (`fastapi.exceptions.ValidationException`) embed the raw offending value(s) in their own `__str__` via Pydantic
+  error dicts (`{'type': ..., 'loc': ..., 'msg': ..., 'input': <the actual value>}`) | ASVS 16.2.5; WSTG-APIT-03
+  (owasp-wstg/chapters/12-api-testing.md, "Excessive Data Exposure"); TCASVS 4.6.1
+  (owasp-tcasvs/chapters/v4-code-quality-exploit-mitigation.md); OBSERVABILITY.md §9 item 6 | applies | evidence:
+  runtime probe (session scratchpad `probe_batch3_response_validation.py`) against this app's REAL `app.main.app`
+  + real `configure_logging()` + real `sentry_init_kwargs` (not a raw/unscrubbed probe) — a throwaway route
+  returning a string where `response_model` declared `int` produced, BEFORE any fix: (a) the app's own JSON stdout
+  log line's `exc` field containing the raw secret verbatim (`redact_db_values` is Postgres-shape-only, does
+  nothing for this shape); (b) a captured Sentry event with `type='ResponseValidationError'
+  module='fastapi.exceptions'` whose `value` also contained the raw secret, CONFIRMING Sentry's Starlette/FastAPI
+  integration auto-captures this exception at the ASGI middleware layer even though the app's own
+  `@app.exception_handler(Exception)` already converts it to a generic 500 (verified live, not assumed — the
+  handler catching an exception does not stop Sentry's own hook from seeing it, via
+  `sentry_sdk/integrations/starlette.py`'s `_sentry_exceptionmiddleware_call`). A top-level type mismatch (the
+  whole returned object, not one field) was checked separately and confirmed live: `input` becomes the ENTIRE
+  offending value in that case, matching the original review's "whole row" description precisely, not just the
+  single-field case. `RequestValidationError` was checked live and found NOT to reach either channel in this
+  app's real routing (resolved inside FastAPI's dependency-injection step, before the ASGI boundary both Sentry
+  and the app's own logging touch) — not a live leak today, but matched in the fix anyway as free defense in
+  depth (see req_42).
+
+- `req_42`: root cause (B) two individually-correct subsystems, uncorrected interaction (CODE_REVIEW_FINDINGS
+  taxonomy), same shape as slice 2's AuthError-chain finding and batch 1's uvicorn-second-traceback finding —
+  `redact_db_values`'s Postgres-shape scrubbing is correct for its own scope, Sentry's automatic exception capture
+  is correct/expected framework behavior, and nobody had checked their combination against FastAPI's OWN
+  validation-error shape | applies | evidence: fixed in TWO places, one per leak channel, both centralized at
+  their existing choke points (not per-call-site): (1) `sentry_config.py`'s `_scrub_exception_value` — matched by
+  `module == "fastapi.exceptions"` AND `type` in a fixed set of the three `ValidationException` subclasses, NOT by
+  module alone like the AuthError fix (failure mode 7 — checked what's different about this call site before
+  reusing that pattern: `fastapi.exceptions` ALSO defines `HTTPException`, whose `detail` is developer-written,
+  intentionally safe text this app relies on for real error messages; module-only matching would have wrongly
+  stripped it, confirmed by the pre-existing test `test_the_outer_non_auth_exception_in_the_chain_is_left_alone`
+  which already asserts an `HTTPException` in that same module is left untouched). Because Sentry's event only
+  carries `type`/`module` strings (no live object), this can't be an `isinstance` check the way the log-formatter
+  side can — a stated, narrower boundary than the AuthError match, documented in the module docstring: a future
+  FastAPI-added `ValidationException` subclass needs this set updated by hand. (2) `logging_setup.py`'s
+  `JsonFormatter` — a NEW mechanism, not reused from `redact_db_values`: walks `record.exc_info[1]`'s real
+  `__cause__`/`__context__` chain, `isinstance`-checks each against `ValidationException` (can, unlike the Sentry
+  side, since this has the live object), and does an EXACT string replacement of `str(exc)` within the formatted
+  traceback — not a new regex pattern over arbitrary text, which is exactly the "KNOWN LIMIT" `redaction.py`'s own
+  docstring already named as the real fix ("render exceptions from the exception object instead of from text").
+  Runs BEFORE `redact_db_values`, which still runs after for defense in depth on anything else in the same chain.
+
+- `req_43`: tests — 7 new tests in `test_sentry_config_hostile.py` (message stripped with exact-type assertion;
+  `type`/`module` left visible; `RequestValidationError` and `WebSocketRequestValidationError` also stripped,
+  defense in depth; `HTTPException` in the same module explicitly NOT stripped — the crux of req_42's design
+  decision; a different `fastapi.exceptions` class not in the validation set left alone; missing-`value`-key
+  crash safety) and 3 new tests in `test_logging_setup.py` (message stripped from `exc`, class name stays
+  visible; a CHAINED `ResponseValidationError` reached via `__cause__` — matching the real call site's `raise
+  app_exc from app_exc.__cause__ or app_exc.__context__` — also stripped, proving the chain-walk works, not just
+  a top-level check; a plain unrelated exception left untouched, non-vacuity). 100% coverage on
+  `sentry_config.py`; `logging_setup.py` at 97% (1 pre-existing line + 1 new branch uncovered — confirmed
+  PRE-EXISTING by checking the same file on the parent commit before this slice's changes, same 97%/same single
+  line, not a regression this slice introduced; the new uncovered branch is `_redact_validation_errors`'s
+  `if raw:` guard, defensively unreachable because `ValidationException.__str__` is confirmed live — `str(ResponseValidationError(errors=[]))`
+  — to never return an empty string even with zero errors, so the guard exists for a shape that cannot occur via
+  any real instance, same category as other stated-not-forced boundaries in this codebase). Negative control
+  (rule 10.1): `git stash push -- backend/app/core/sentry_config.py backend/app/core/logging_setup.py` to isolate
+  both source fixes from the new tests, reran both test files — 5 of 10 new tests failed exactly as expected
+  (both Sentry-side stripping tests plus `RequestValidationError`/`WebSocketRequestValidationError`, both
+  logging-side stripping tests — the crash-safety and non-regression tests correctly still passed, since they
+  don't depend on the fix); `git stash pop` restored both fixes. After req_46/47's two additional fixes below,
+  final counts: 65 tests in these two files, 100% coverage on `sentry_config.py`, 97% on `logging_setup.py` (see
+  req_43 continuation below for why). `ruff check`, `ruff format --check`, strict `pyright` clean on all 4 files
+  (0 errors). **Full-backend-suite parity run**: complete (2026-09-24) — `pytest -v -m "not e2e and not authz"
+  --ignore=tests/api/test_schema_fuzz.py` against the local `obs-pg` Postgres container:
+  **6903 passed, 2 failed, 9 skipped, 41 deselected, 1 xfailed, in 371.78s**. Both failures verified NOT a
+  regression from either this batch or req_49-52's connect-timeout fix — both are
+  `test_db_parameter_hiding.py::test_a_failed_statement_error_message_has_no_parameter_dump` and
+  `test_redaction.py::test_the_live_unique_violation_really_has_the_detail_this_module_redacts`, and both failed
+  with the exact same `psycopg.errors.ConnectionTimeout` (the req_49-52 mechanism, intermittent, environmental —
+  see req_53) rather than any assertion this batch's code is responsible for. `tests/api/test_schema_fuzz.py`
+  (the file req_51/req_52's known, already-diagnosed connect-timeout findings live in) deliberately excluded from
+  this specific run to keep it fast — its own findings are independently evidenced in req_51/52/53 below, not
+  re-litigated here.
+
+- `req_44`: failure mode 11 — independent-review decision asked, not assumed | docs/skill-verification-
+  discipline.md failure-mode-11 convention | applies | evidence: asked via `AskUserQuestion` whether this, the
+  LAST item of the entire 2026-09-19 review, should get an independent blind-test pass before being considered
+  done; user chose "Run a blind-test pass" (a change from slices 2/3's "skip it" answers — mode 11 requires
+  asking every time, not carrying forward a prior answer, and this time the answer differed) — vindicated: see
+  req_46/47, it found 2 real gaps self-authored tests missed.
+
+- `req_46`: BLIND-TEST FINDING 1 — the Sentry-side fix matched only the three named `ValidationException`
+  subclasses by string (`ResponseValidationError`/`RequestValidationError`/`WebSocketRequestValidationError`),
+  missing the shared base class itself | applies | evidence: reproduced by the author first (rule 10.2) —
+  `scrub_event` on an event with `type='ValidationException', module='fastapi.exceptions'` left the secret in
+  place, confirmed live before any fix. Checked reachability: grepped the installed fastapi 0.141.1 package for
+  `raise ValidationException(` — zero matches, only the three named subclasses are ever raised internally by
+  this version, so not a live leak today, but a real, demonstrable asymmetry with the logging-side fix (which
+  already covers the base class via `isinstance`) and exactly the boundary this file's own docstring already
+  named as the string-set match's limitation ("a future FastAPI-added subclass would need this set updated by
+  hand" — the base class IS that same boundary, not a hypothetical one). Fixed: added `"ValidationException"` to
+  `_VALIDATION_ERROR_TYPES`. Test: `test_the_shared_validation_exception_base_class_is_also_stripped` — fails on
+  pre-fix code (confirmed via negative control), passes after.
+
+- `req_47`: BLIND-TEST FINDING 2 — the logging-side fix only protects `record.exc_info` (a call site using
+  `logger.exception(...)`/`exc_info=True`); a call site logging `str(exc)` as the plain MESSAGE instead has no
+  live exception object attached to the record for the chain-walking fix to match against | ASVS 16.2.5 | applies
+  | evidence: reproduced by the author first — a bare `LogRecord` built with `str(ResponseValidationError(...))`
+  as its message and `exc_info=None` produced a JSON log line with the raw secret in `payload["message"]`,
+  confirmed live before any fix. Checked reachability: this app's one real call site (`main.py`'s catch-all
+  handler) always uses `logger.exception(...)` and is unaffected today — not a live leak — but a real,
+  easily-triggered regression path (a future `logger.error(f"...: {exc}")` one-liner) with zero protection,
+  matching this project's own established pattern of closing "not live today, natural regression path" gaps
+  (`extra`'s fail-closed treatment, `RequestValidationError`'s defense-in-depth match, both already reasoned this
+  way earlier in this same file). Fixed WITHOUT falling back to free-text pattern matching over arbitrary
+  content: Pydantic's error-dict repr (`'type':`, `'loc':`, `'input':` together) is a FIXED, library-controlled
+  literal format — the key names, not the values, are what's attacker-proof — so recognising that signature is
+  the same class of safe match `_PG_TEMPLATES` already relies on for Postgres's own fixed templates, not a new
+  attempt to parse arbitrary text. Whole-message fail-closed on match (same reasoning as `extra`/query_string:
+  no way to selectively redact just `input` from repr'd text without parsing it). Test:
+  `test_a_validation_error_logged_as_the_plain_message_with_no_exc_info_is_also_stripped` (fails pre-fix, passes
+  after) plus `test_an_ordinary_message_that_happens_to_mention_input_is_not_stripped` (non-vacuity: all three
+  signature markers must co-occur, not just one common word). This is also why `logging_setup.py` still shows
+  97% not 100% coverage (req_43): the new `_redact_validation_error_message`'s signature-match is fully covered,
+  the ONE remaining gap is `_redact_validation_errors`' pre-existing, unrelated `if raw:` guard (confirmed
+  unreachable: `str(ResponseValidationError(errors=[]))` still returns `'0 validation errors:'`, never empty, so
+  no real `ValidationException` instance can hit the falsy branch) plus the one line already uncovered on the
+  parent commit before this slice touched the file at all (checked directly, not assumed).
+
+- `req_48`: independent blind-test agent's own delivered file — kept out of the tracked test suite, not
+  discarded | applies | evidence: `test_blind_validation_error_pass.py` (547 lines, 26 tests, all pass against
+  the final fixed code) moved to the session scratchpad rather than committed. Reasoning stated plainly: both of
+  its real findings (req_46/47) are already covered by dedicated, clean, hand-written regression tests that meet
+  this project's normal bar; the file itself needed substantial cleanup to meet that same bar (22 ruff errors —
+  mostly line-length and one unused variable; 36 pyright errors — mostly missing type hints on a `sentry_capture`
+  fixture parameter and FastAPI's well-known pyright false-positive on inline route handlers that are only
+  "used" via decorator registration, which pyright can't see) that wasn't worth spending given its unique value
+  was already extracted. Not silently dropped: this row states exactly what happened and why, matching this
+  project's "no evidence gets left unstated" convention.
+
+- `req_45`: mutation testing — explicitly deferred, not silently skipped (mode 11: asked, not assumed) | asked
+  the user directly (2026-09-24) whether to run it now (matching batch 2's slices) or commit today's already-
+  verified work first and run it as a fast-follow; user chose the latter, citing that `sentry_config.py`/
+  `logging_setup.py` already carry strong evidence from hostile tests (req_43), a rule-10.1 negative control
+  (req_43), and real before/after mode-9 proof reproduced on two separate live databases (req_51/req_53) —
+  stronger coverage than most already-committed slices had before their own mutation pass ran. Tracked as a real
+  open item, not closed: mutation testing for `sentry_config.py`/`logging_setup.py` still needs to run before
+  this phase can be considered fully complete by this project's own workflow standard.
+
+- `req_49`: unbounded DB connect-timeout — root cause and fix | applies | trigger: during batch 3's own
+  full-backend-suite parity run, `tests/api/test_schema_fuzz.py::test_api_contract[POST /auth/confirm-password-changed]`
+  hung for `duration_ms: 260075.79` (~4m20s) before returning a 500. Confirmed NOT a batch-3 regression (identical
+  failure reproduced on stashed pre-batch-3 code). User asked me to investigate ("what was the reason ... look into
+  it" / "yes continue it"). Root cause found via a live `faulthandler.dump_traceback_later(20)` thread-stack dump
+  (mode 9 — runtime proof, not inference from CPU/DB-activity signals): the hung thread sat inside
+  `get_current_profile` (api/deps.py:76) → `session.execute` → SQLAlchemy pool `_do_get`/`_create_connection` →
+  `psycopg.connection.connect` → `selectors.select`, i.e. blocked opening a brand-new physical Postgres connection,
+  with no application-level bound — Windows' own ~260s TCP-handshake give-up is what eventually ended it, not
+  anything this app configured. Mode 6 sweep (whole-directory grep, not just familiar files):
+  `owasp-cheatsheets/cheatsheets/Denial_of_Service_Cheat_Sheet.md` line 110 ("Define an absolute connection
+  timeout"); `owasp-asvs-5/chapters/v13-configuration.md` V13.1.3 ("mandate short timeouts ... for sync HTTP
+  request-response ops") and V13.2.6 ("connections to separate services follow documented config: max parallel
+  connections, behavior at max, timeouts, retry strategy") — both name this exact gap. Checked code-review/prior-art
+  first (failure mode 7 — a shared mechanism's prior vetting doesn't cover a new call site): `ops/db_check.py`
+  already sets `connect_timeout=10` for its OWN separate diagnostic connection (`_CONNECT_TIMEOUT_SECONDS = 10`,
+  line 32) — but the main app's `core/db.py` `engine` (used by every request via `get_session`) never had it; not a
+  previously-documented/repeated finding, a genuinely new gap in a sibling call site. Fix: `DB_CONNECT_TIMEOUT_SECONDS:
+  int = Field(default=10, ge=1)` added to `Settings` (core/config.py), same default as `ops/db_check.py` — kept in
+  sync, not independently chosen — wired via a small `_connect_args()` helper into `create_engine(..., connect_args=
+  _connect_args())` (core/db.py). Postgres/psycopg-only parameter (`connect_timeout`, libpq's own name); covers only
+  connection establishment, not query execution time.
+
+- `req_50`: tests, negative control, lint/type-check | applies | `tests/core/test_db.py` — two new tests:
+  `test_connect_args_wires_the_configured_connect_timeout` (plumbing: pins `db._connect_args()`'s literal output
+  against `settings.DB_CONNECT_TIMEOUT_SECONDS`) and `test_a_new_physical_connection_attempt_is_bounded_not_indefinite`
+  (behavioral: a local TCP listener accepts the connection but never answers Postgres's startup packet — reproducing
+  the exact "connect() looks fine, then nothing happens" shape from the real thread dump, deterministically, unlike
+  an unreachable IP which can fail fast for unrelated reasons — asserts the connect attempt raises `OperationalError`
+  within 5s, not indefinitely, with `connect_args={"connect_timeout": 1}`). Negative control (rule 10.1): `git stash
+  push -- backend/app/core/db.py backend/app/core/config.py`, reran both new tests —
+  `test_connect_args_wires_the_configured_connect_timeout` FAILED (`AttributeError: module 'app.core.db' has no
+  attribute '_connect_args'`) confirming it's tied to the fix; `test_a_new_physical_connection_attempt_is_bounded_not_indefinite`
+  still PASSED on stashed code (expected and stated honestly — it validates psycopg's own `connect_timeout` library
+  behavior in isolation with its own inline engine, not this app's wiring; `req_50`'s plumbing test is what's
+  actually falsifiable by this change). Stash popped, fix restored. `ruff check`/`ruff format --check` clean on all
+  3 changed files after fixing 2 self-found lint issues (unused `noqa`, a `try`/`except`/`pass` → `contextlib.suppress`).
+  `uv run pyright` clean after adding the established inline `# pyright: ignore[reportPrivateUsage]` convention
+  (matches `security._jwks_client` and 6+ other existing test call sites in this codebase, not a new pattern).
+  Mutation testing skipped for `_connect_args()` specifically (stated judgment, not silent): it's a single
+  no-branch, no-loop `return {...}` statement whose exact output the plumbing test already pins 1:1 — no mutant
+  survives that isn't already killed by that one assertion.
+
+- `req_51`: mode-9 real-world proof, before vs. after | applies | reran the actual originally-failing
+  reproduction (`tests/api/test_schema_fuzz.py::test_api_contract -k "confirm-password-changed"`, isolated) against
+  the fixed code: server-side `duration_ms` dropped from **260075.79 (268.51s total run)** to **20019.68 (26.03s
+  total run)** — a ~13x reduction, from open-ended to bounded. The endpoint still ultimately returns a 500 (the
+  fuzzer's own 10s client-side read-timeout aborts first either way) and the ~20s figure (≈2× the 10s
+  `DB_CONNECT_TIMEOUT_SECONDS`) suggests two fresh-connection attempts still fail in sequence before the request
+  gives up — a separate, now much smaller, still-open issue (why does this specific fuzzed request need 2 new
+  connections that both fail to connect locally?), explicitly NOT investigated further here: the agreed scope for
+  this pass was "bound the hang," not "make this fuzzer-found 500 disappear," and the user chose "fix it now, as
+  its own small slice" for exactly that bounded scope. Flagged here as a known follow-up, not silently dropped.
+
+- `req_52`: 2026-09-24 follow-up — second endpoint hits the same pattern, sibling-mechanism sweep, and a real
+  local-environment red herring | applies | While running the full-suite parity check, a mid-suite gap (Docker
+  Desktop not running after a machine restart — confirmed via `docker info` failing to reach the daemon and
+  `localhost:55432` refusing connections) caused a burst of unrelated `ERROR`s across `test_schema_fuzz.py`; restarted
+  Docker Desktop + `docker start obs-pg`, confirmed `pg_isready`, reran — this eliminated those, isolating the real
+  signal. With Postgres genuinely up, `test_api_contract[POST /employees]` (and `GET`/`PATCH /employees...`) also
+  FAILED with a `ReadTimeoutError`, `duration_ms≈20214` — the same ~20s (2×`DB_CONNECT_TIMEOUT_SECONDS`) signature as
+  req_51's confirm-password-changed finding, not a distinct new failure mode. Code-level confirmation:
+  `crud.create_employee` runs behind the same `get_current_profile` → `app.core.db.engine` path req_49's fix already
+  covers, so this is very likely the same shared root cause surfacing on a second fuzzed endpoint, not a new bug.
+  Attempted a rule-10.1-style negative control (rerun on stashed pre-fix `db.py`/`config.py`) — inconclusive: still
+  running with near-zero CPU after the user's agreed 50-minute cutoff, stopped there (`TaskStop`), stash popped, fix
+  restored. Treated honestly as suggestive, not proof (near-zero CPU for 50 min on code with NO bound is consistent
+  with, but doesn't prove, the same unbounded-wait mechanism). Sibling-mechanism sweep (user's explicit ask, "look
+  for this bug in all the other points") — every other external call in `backend/app/` checked directly against the
+  installed library/runtime, not memory: `PyJWKClient(settings.JWKS_URL)` (`security.py`) → `timeout: float = 30`
+  confirmed via `inspect.signature`; `SyncGoTrueAdminAPI` (`supabase_admin.py`, wraps the Supabase Admin API used by
+  `POST /employees` and reset-password) → no explicit timeout, but its base class (`SyncGoTrueBaseAPI.__init__`,
+  read via `inspect.getsource`) builds a bare `httpx.Client(...)` when none is passed, and `httpx.Client()`'s own
+  default is `Timeout(timeout=5.0)`, confirmed directly; Sentry SDK's `HttpTransport` → has its own explicit
+  `TIMEOUT` constant, confirmed via `inspect.getsource`. `grep create_engine backend/app` confirms `core/db.py` is
+  the only production engine construction — no sibling instance missed. Conclusion: `req_49`'s fix was already the
+  complete fix for this whole class of bug across the app; no second code change needed. Root-cause research (mode
+  6, user's explicit ask) on *why* the connection stalls in the first place, not just that it's unbounded: our
+  `postgres-official`/`postgres-multitenant`/`owasp-cheatsheets` skills were swept but don't cover this — the one
+  relevant fact found (`postgres-official/server-administration/user-manag.md` doesn't directly state it, but
+  Postgres's own behavior at a real `max_connections` limit is a fast, clean rejection, not a silent hang — ruling
+  out "Postgres is simply full" as the mechanism) pointed the question toward the local Docker Desktop/Windows
+  networking layer instead. `docs.docker.com`'s own networking page (fetched directly, WebFetch) confirms Windows
+  port-forwarding goes through an extra hop (`com.docker.backend` → a shared-memory channel → the WSL2 Linux VM →
+  the container) but states nothing about behavior under a connection burst — stated honestly as an educated guess
+  from architecture, not a documented, confirmed cause. Scope decision (discussed directly with the user, not
+  unilateral): not pursued further — no production deployment exists yet, and production's real database is
+  Supabase-managed Postgres, not a local Docker Desktop container, so this specific local-networking-layer question
+  has no production relevance regardless of its answer. Logged here as a known, deliberately-not-chased loose end.
+
+- `req_53`: 2026-09-24 — req_52's "local Docker/Windows networking" theory tested directly against the real
+  Supabase dev project and DISPROVEN, plus the connection to a prior, already-documented incident | applies |
+  At the user's request, reran the identical isolated reproduction (`test_api_contract[POST /employees]`) against
+  the real Supabase dev database (`swdfcijgexezkuhkfbcx.supabase.co`, via its connection pooler at
+  `aws-0-ap-south-1.pooler.supabase.com` — no Docker, no local machine, no Windows networking layer involved at
+  all) instead of the local `obs-pg` container. Result: **the identical failure, at nearly the identical
+  timing** — 511.82s (8m31s) real-Supabase vs. 513.99s (8m33s) local-Docker for the same test. This directly
+  disproves req_52's "likely Docker Desktop/Windows networking" hypothesis, stated there as an educated guess,
+  not a confirmed cause — correcting it here rather than leaving the disproven guess as the last word. The
+  behavior is real and reproducible on production-shaped infrastructure, not a local-machine artifact.
+  Re-examined `docs/OBSERVABILITY.md` §6 (mode 6 — should have been checked before req_52's guess, not after;
+  named here so it isn't missed again) and found this is NOT actually a new discovery: the 2026-09-18 k6 PATCH-mix
+  run (`OBSERVABILITY.md` line 190, 300 VUs) already recorded **15.47% failed, p95 60s,
+  `QueuePool limit of size 5 overflow 10 reached`** — the same family of failure (the connection pool unable to
+  keep up with a burst of near-simultaneous requests), on the real production-shaped network path, months before
+  today's fuzz-testing found a second instance of it. `OBSERVABILITY.md`'s own Phase 1 (the structured logging,
+  `/ready` check, and `install_pool_monitor` warning in `core/db.py` this project already has) was built BECAUSE
+  of that same 2026-09-18 finding — today's req_49 fix (bounding an unbounded hang to a fast, predictable
+  failure) is a real, additive improvement to that already-known problem, not a full fix for it. The full fix
+  (the pool not running dry under a burst in the first place — larger pool budget within Supabase's real limit,
+  smarter retry/backoff, or understanding why writes specifically drain it faster than reads) is explicitly
+  out of scope for this pass, discussed directly with the user, and left as a real, named, tracked follow-up —
+  not silently folded into "fixed" status.
 
 ### Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2: all 3 slices (2026-09-22)
 

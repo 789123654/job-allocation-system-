@@ -281,11 +281,14 @@ for writes at expected load; `/ready` 99.5%; zero isolation violations (canary).
 6. **Redaction covers Postgres/psycopg/SQLAlchemy message shapes only** (the list and its boundary are
    in §3 item 2), plus one stated limit (a value that reproduces a whole genuine terminator). The two
    Supabase admin sinks are fixed (§3 item 4), as are uvicorn's second traceback and the stdlib's
-   `handleError` print (§3 items 5 and 6). Still open, from the 2026-09-19 review (batches 2 and 3): Pydantic
-   `ResponseValidationError` / `input_value` text, the `logentry.params`, `extra` and breadcrumb `data`
-   fields of a Sentry event, chained `AuthError` values inside a Sentry exception, and
-   `before_send_transaction`. Any other library's exception text is unredacted unless it reaches the
-   redactor's choke point, which is what the structural test in §3 item 4 is there to watch.
+   `handleError` print (§3 items 5 and 6). The 2026-09-19 review's remaining items (batches 2 and 3) are
+   now CLOSED (2026-09-24, `SECURITY_AUDIT_CHECKLIST.md`): Sentry `logentry.params`/`extra`/breadcrumb
+   `data`, a chained Supabase `AuthError` value in a Sentry event, frontend fetch/xhr/navigation
+   breadcrumb URLs (batch 2, all 3 slices), and the Pydantic `ResponseValidationError`/
+   `RequestValidationError`/`WebSocketRequestValidationError` `input_value` leak — both at the Sentry
+   event layer and in JSON stdout logs, chained-exception-aware (batch 3). Any other library's exception
+   text is still unredacted unless it reaches the redactor's choke point, which is what the structural
+   test in §3 item 4 is there to watch — this is a stated boundary, not a closed list.
 7. **`ops_monitor` can read query text** in `pg_stat_activity` (`pg_monitor`); mitigated by code and
    tests, not by the database. `default_transaction_read_only` on the role is defense in depth (a
    session may override it); the boundary is that the role has **no** table privileges — a test asserts
