@@ -55,6 +55,12 @@ jobs:
       SUPABASE_URL: http://localhost:9999 # loadtest/generate_keys.py's JWKS stub, step below
       SUPABASE_SECRET_KEY: sb_secret_loadtest_placeholder
       CORS_ORIGINS: '["http://localhost"]'
+      # TEMPORARY — total pool bumped 15 -> 20 (DB_POOL_SIZE stays 5) to test whether the 250-300 VU
+      # write-only collapse (2026-09-24 finding) is purely connection-count-bound or a deeper
+      # architecture issue. Override here only, not core/config.py's real default — that default is a
+      # deliberate, documented production capacity decision, not something to change for one test.
+      # Revert right after this run.
+      DB_MAX_OVERFLOW: "15"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
