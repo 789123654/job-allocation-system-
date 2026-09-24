@@ -66,6 +66,17 @@ jobs:
       # against uv's own docs) rather than `uvx pip-audit`'s isolated throwaway env, which would
       # never see this project's actual locked dependency versions at all.
       - run: uv run --with pip-audit pip-audit
+      # SBOM generation (OWASP CycloneDX, Apache 2.0) — one of 3 tools recommended by the OWASP
+      # project survey this session, cheapest/highest-leverage first. `uv`'s own manifest/lockfile
+      # aren't natively supported by cyclonedx-py (confirmed against its docs directly, not
+      # assumed) — only its `environment` subcommand scanning an actual venv is, hence pointing it
+      # at `.venv`'s own interpreter rather than `uv.lock`. Isolated via `uvx --from` (own throwaway
+      # env), not added to this project's own dependency tree for a one-off report generator.
+      - run: uvx --from cyclonedx-bom cyclonedx-py environment .venv/bin/python -o sbom-python.cdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-python
+          path: backend/sbom-python.cdx.json
       - name: Stub Supabase's auth.users and auth-admin roles (CI-only — the real project already has these)
         run: |
           uv run python -c "
@@ -267,6 +278,29 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
+      # SBOM generation (OWASP CycloneDX) — Rust/Tauri counterpart of the backend/frontend
+      # cyclonedx-py/cyclonedx-npm steps. No prebuilt binary release exists for this tool (confirmed
+      # against its own repo before wiring this in) so it's compiled via cargo install, cached by
+      # actions/cache below keyed on the pinned version so it isn't rebuilt from source every run
+      # (~6 min compile, confirmed by a real local install this session). Real output filename
+      # (`app.cdx.json`, from Cargo.toml's package name) confirmed by an actual local run against
+      # this exact crate, not assumed from the tool's own (flag-only) --help text.
+      - name: Cache cargo-cyclonedx binary
+        id: cache-cyclonedx
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-cyclonedx
+          key: cargo-cyclonedx-0.5.9-${{ runner.os }}
+      - name: Install cargo-cyclonedx
+        if: steps.cache-cyclonedx.outputs.cache-hit != 'true'
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Generate Rust/Tauri SBOM
+        working-directory: frontend/src-tauri
+        run: cargo cyclonedx --format json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-rust
+          path: frontend/src-tauri/app.cdx.json
       # Exact package list per v2.tauri.app/start/prerequisites/ (fetched live this session, not
       # guessed) — webkit2gtk-driver deliberately omitted: that's only needed for the 'external'
       # driverProvider; the embedded provider (tauri-plugin-wdio-webdriver) needs no driver binary.
@@ -335,6 +369,14 @@ jobs:
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      # SBOM generation (OWASP CycloneDX) — npm counterpart of the backend's cyclonedx-py step
+      # above. `--output-file` and `--output-format` confirmed directly against the tool's own
+      # --help output before wiring this in, not assumed.
+      - run: npx --yes @cyclonedx/cyclonedx-npm --output-file sbom-npm.cdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-npm
+          path: frontend/sbom-npm.cdx.json
       - run: npm run lint
       - run: npm run typecheck
       # test:coverage (not plain test) so the coverage % shows in the CI log every run. No
