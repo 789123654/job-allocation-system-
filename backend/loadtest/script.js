@@ -305,24 +305,19 @@ export default function vuIteration() {
   const identity = identities[Math.floor(Math.random() * identities.length)];
   const headers = { Authorization: `Bearer ${identity.token}` };
 
+  // TEMPORARY — write-only (POST + PATCH) stress variant, re-run at 300 VUs specifically to test
+  // whether VU count (not just write-heavy traffic) is what reproduces the 2026-09-18 QueuePool-
+  // exhaustion failure (that run was 300 VUs; the first write-only retest here was only 100 VUs and
+  // passed clean). Revert right after this run — not the new baseline. Same isolation:critical
+  // security checks, same thresholds.
   const roll = Math.random();
-  if (roll < 0.35) {
-    pollNotifications(headers);
-  } else if (roll < 0.45) {
-    pollTasks(identity, headers);
-  } else if (roll < 0.52) {
-    pollJobTypes(headers);
-  } else if (roll < 0.59) {
-    crossTenantTaskProbe(identity, headers);
-  } else if (roll < 0.66) {
-    tamperedTokenProbe(identity);
-  } else if (roll < 0.72) {
+  if (roll < 0.2) {
     wrongRoleTaskCreateProbe(identity, headers);
-  } else if (roll < 0.77) {
+  } else if (roll < 0.4) {
     ownerTaskCreateProbe(identity, headers);
-  } else if (roll < 0.85) {
+  } else if (roll < 0.6) {
     notificationReadProbe(identity, headers);
-  } else if (roll < 0.93) {
+  } else if (roll < 0.8) {
     jobTypeUpdateProbe(identity, headers);
   } else {
     taskDeadlineProbe(identity, headers);
