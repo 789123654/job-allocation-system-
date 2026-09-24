@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = Field(default=10, ge=0)
     # Warn (app.pool log) when checked-out / capacity reaches this — leading indicator, not failure.
     DB_POOL_WARN_RATIO: float = Field(default=0.7, gt=0, le=1)
+    # Bounds how long opening a NEW physical connection (pool exhausted, or a stale one recycled)
+    # may block, in libpq's own units (seconds). Without this, psycopg's connect() has no
+    # application-level bound at all — confirmed live (2026-09-22) via a faulthandler thread-stack
+    # dump during a schemathesis fuzz run: `get_current_profile` (api/deps.py) sat inside
+    # `psycopg.connection.connect` -> `selectors.select`, blocked for the full ~260s Windows took to
+    # give up the TCP handshake on its own, not any timeout this app set. Denial_of_Service_Cheat_
+    # Sheet.md ("Define an absolute connection timeout") and ASVS 13.1.3/13.2.6 (short timeouts,
+    # documented behavior at the connection limit, on every external sync connection) both name this
+    # exact gap. Same value `ops/db_check.py` already uses for its own separate diagnostic
+    # connection (_CONNECT_TIMEOUT_SECONDS = 10) — kept in sync, not independently chosen.
+    DB_CONNECT_TIMEOUT_SECONDS: int = Field(default=10, ge=1)
 
     @field_validator("DATABASE_URL", "MIGRATIONS_DATABASE_URL")
     @classmethod

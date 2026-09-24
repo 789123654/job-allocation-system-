@@ -14,6 +14,13 @@ from sqlmodel import text as sql_text
 from app.core.config import settings
 from app.models import Profile
 
+
+def _connect_args() -> dict[str, int]:
+    """Isolated for direct unit testing (tests/core/test_db.py) — psycopg's own libpq parameter
+    name, not a SQLAlchemy-level setting, so it only takes effect via connect_args."""
+    return {"connect_timeout": settings.DB_CONNECT_TIMEOUT_SECONDS}
+
+
 # Migrations (Alembic) own schema creation, not create_all() (fastapi/sql-databases.md).
 engine = create_engine(
     str(settings.DATABASE_URL),
@@ -24,6 +31,13 @@ engine = create_engine(
     # test_db_parameter_hiding.py). The SQL text is kept. Postgres's OWN message can still echo a
     # value; core/redaction.py handles that at the log/Sentry sinks.
     hide_parameters=True,
+    # Bounds a brand-new physical connection attempt (Denial_of_Service_Cheat_Sheet.md, ASVS
+    # 13.1.3/13.2.6) — see DB_CONNECT_TIMEOUT_SECONDS's own docstring in core/config.py for the
+    # live-probed evidence this closes. `connect_timeout` is a libpq/psycopg parameter, so it only
+    # covers opening the TCP/auth handshake for THIS Postgres connection — not query execution
+    # time, and not any other engine (this project's tests also run against real Postgres, per
+    # TEST_DATABASE_URL, not a separate SQLite engine).
+    connect_args=_connect_args(),
 )
 
 _pool_logger = logging.getLogger("app.pool")
