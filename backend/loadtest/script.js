@@ -305,19 +305,24 @@ export default function vuIteration() {
   const identity = identities[Math.floor(Math.random() * identities.length)];
   const headers = { Authorization: `Bearer ${identity.token}` };
 
-  // TEMPORARY — write-only (POST + PATCH) stress variant, deliberately requested to re-probe the
-  // 2026-09-18 QueuePool-exhaustion failure mode under only mutating traffic, not the realistic
-  // read-heavy mix this file normally runs. The commit that introduces this is immediately followed
-  // by a revert commit restoring the mixed-traffic dispatch — this is not the new baseline. Same
-  // isolation:critical security checks, same thresholds, just a different roll distribution.
   const roll = Math.random();
-  if (roll < 0.2) {
+  if (roll < 0.35) {
+    pollNotifications(headers);
+  } else if (roll < 0.45) {
+    pollTasks(identity, headers);
+  } else if (roll < 0.52) {
+    pollJobTypes(headers);
+  } else if (roll < 0.59) {
+    crossTenantTaskProbe(identity, headers);
+  } else if (roll < 0.66) {
+    tamperedTokenProbe(identity);
+  } else if (roll < 0.72) {
     wrongRoleTaskCreateProbe(identity, headers);
-  } else if (roll < 0.4) {
+  } else if (roll < 0.77) {
     ownerTaskCreateProbe(identity, headers);
-  } else if (roll < 0.6) {
+  } else if (roll < 0.85) {
     notificationReadProbe(identity, headers);
-  } else if (roll < 0.8) {
+  } else if (roll < 0.93) {
     jobTypeUpdateProbe(identity, headers);
   } else {
     taskDeadlineProbe(identity, headers);
