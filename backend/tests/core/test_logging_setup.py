@@ -199,7 +199,7 @@ def test_a_validation_error_logged_as_the_plain_message_with_no_exc_info_is_also
 
 
 def test_an_ordinary_message_that_happens_to_mention_input_is_not_stripped() -> None:
-    """Non-vacuity: the signature match needs all three markers together, not just one common word."""
+    """Non-vacuity: the signature match needs all three markers together, not one common word."""
     payload = json.loads(_format("please check the input field on the form"))
     assert payload["message"] == "please check the input field on the form"
 
