@@ -305,18 +305,24 @@ export default function vuIteration() {
   const identity = identities[Math.floor(Math.random() * identities.length)];
   const headers = { Authorization: `Bearer ${identity.token}` };
 
-  // TEMPORARY — write-only (POST + PATCH) stress variant, re-run at 300 VUs with the pool bumped to
-  // 20 (loadtest.yml's DB_MAX_OVERFLOW override) to test whether the 300-VU collapse is purely
-  // connection-count-bound or a deeper architecture issue. Revert right after this run — not the
-  // new baseline. Same isolation:critical checks, same thresholds.
   const roll = Math.random();
-  if (roll < 0.2) {
+  if (roll < 0.35) {
+    pollNotifications(headers);
+  } else if (roll < 0.45) {
+    pollTasks(identity, headers);
+  } else if (roll < 0.52) {
+    pollJobTypes(headers);
+  } else if (roll < 0.59) {
+    crossTenantTaskProbe(identity, headers);
+  } else if (roll < 0.66) {
+    tamperedTokenProbe(identity);
+  } else if (roll < 0.72) {
     wrongRoleTaskCreateProbe(identity, headers);
-  } else if (roll < 0.4) {
+  } else if (roll < 0.77) {
     ownerTaskCreateProbe(identity, headers);
-  } else if (roll < 0.6) {
+  } else if (roll < 0.85) {
     notificationReadProbe(identity, headers);
-  } else if (roll < 0.8) {
+  } else if (roll < 0.93) {
     jobTypeUpdateProbe(identity, headers);
   } else {
     taskDeadlineProbe(identity, headers);
