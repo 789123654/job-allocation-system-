@@ -14,7 +14,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app import crud
 from app.api.deps import require_owner
-from app.models import AccessDenial, Notification, Profile, Task
+from app.models import AccessDenial, Issue, Notification, Profile, Task
 
 # Authorization_Regression_Testing_Cheat_Sheet.md — part of the `authz` gate (`pytest -m authz`).
 pytestmark = pytest.mark.authz
@@ -29,6 +29,7 @@ def session() -> Generator[Session]:
         Profile.__table__,  # pyright: ignore[reportAttributeAccessIssue]
         Task.__table__,  # pyright: ignore[reportAttributeAccessIssue]
         Notification.__table__,  # pyright: ignore[reportAttributeAccessIssue]
+        Issue.__table__,  # pyright: ignore[reportAttributeAccessIssue]
         AccessDenial.__table__,  # pyright: ignore[reportAttributeAccessIssue]
     ]
     SQLModel.metadata.create_all(engine, tables=tables)  # pyright: ignore[reportUnknownArgumentType]
@@ -112,6 +113,77 @@ def test_get_notification_wrong_recipient_writes_denial(session: Session) -> Non
     assert rows[0].resource_type == "notification"
     assert rows[0].resource_id == notification.id
     assert rows[0].reason == "wrong_owner"
+
+
+def test_get_issue_wrong_raiser_writes_denial(session: Session) -> None:
+    """Reported gap, 2026-09-18: GET /issues/{id} widened from Owner-only to any authenticated
+    actor so the raiser could read their own resolved issue — this proves the widening didn't
+    become a blanket one. Same 404-not-403 shape as test_get_task_wrong_owner_writes_denial.
+    """
+    other_employee_issue_raiser = uuid4()
+    actor = _profile(role="employee")
+    issue = Issue(
+        firm_id=_FIRM_ID,
+        task_id=uuid4(),
+        raised_by=other_employee_issue_raiser,
+        description="Blocked",
+        status="open",
+        created_at=datetime.now(UTC),
+    )
+    session.add(issue)
+    session.commit()
+    session.refresh(issue)
+
+    result = crud.get_issue(session, actor, issue.id)
+
+    assert result is None
+    rows = _denials(session)
+    assert len(rows) == 1
+    assert rows[0].actor_id == actor.id
+    assert rows[0].resource_type == "issue"
+    assert rows[0].resource_id == issue.id
+    assert rows[0].reason == "wrong_owner"
+
+
+def test_get_issue_raiser_can_access_own(session: Session) -> None:
+    actor = _profile(role="employee")
+    issue = Issue(
+        firm_id=_FIRM_ID,
+        task_id=uuid4(),
+        raised_by=actor.id,
+        description="Blocked",
+        status="open",
+        created_at=datetime.now(UTC),
+    )
+    session.add(issue)
+    session.commit()
+    session.refresh(issue)
+
+    result = crud.get_issue(session, actor, issue.id)
+
+    assert result is not None
+    assert result.id == issue.id
+    assert _denials(session) == []
+
+
+def test_get_issue_owner_bypasses_raised_by_check(session: Session) -> None:
+    actor = _profile(role="owner")
+    issue = Issue(
+        firm_id=_FIRM_ID,
+        task_id=uuid4(),
+        raised_by=uuid4(),  # some employee, not the owner
+        description="Blocked",
+        status="open",
+        created_at=datetime.now(UTC),
+    )
+    session.add(issue)
+    session.commit()
+    session.refresh(issue)
+
+    result = crud.get_issue(session, actor, issue.id)
+
+    assert result is not None
+    assert _denials(session) == []
 
 
 def test_require_owner_wrong_role_writes_denial(session: Session) -> None:

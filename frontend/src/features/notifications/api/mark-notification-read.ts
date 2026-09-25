@@ -8,6 +8,7 @@ interface NotificationOutDto {
   type: NotificationType;
   task_id: string | null;
   issue_id: string | null;
+  task_title: string | null;
   is_read: boolean;
   created_at: string;
 }
@@ -18,6 +19,7 @@ function toNotification(dto: NotificationOutDto): Notification {
     type: dto.type,
     taskId: dto.task_id,
     issueId: dto.issue_id,
+    taskTitle: dto.task_title,
     isRead: dto.is_read,
     createdAt: dto.created_at,
   };

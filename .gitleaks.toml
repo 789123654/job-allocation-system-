@@ -1,0 +1,28 @@
+# Extends (not replaces) gitleaks' built-in default ruleset — verified directly against
+# gitleaks' own README (extend.useDefault), not assumed. Without this file, gitleaks-action falls
+# back to its bundled default config with no allowlist at all, per the CI security job's own log
+# ("no gitleaks config found in path .gitleaks.toml, using default gitleaks config").
+[extend]
+useDefault = true
+
+# Real false positive, confirmed 2026-09-15: gitleaks' generic-api-key rule matched
+# ".github/workflows/ci.yml"'s Stryker actions/cache `restore-keys:` value
+# (stryker-incremental-v2-2026-09-15-main) — a cache key string, not a secret. Scoped narrowly to
+# that exact literal and that one file, not a blanket disable of generic-api-key repo-wide, so a
+# genuine future leak in the same file (or a different generic-api-key match elsewhere) still gets
+# caught.
+#
+# `[[allowlists]]` (plural array-of-tables) is documented on gitleaks' `master` branch README but
+# does NOT exist in the pinned CI version, v8.24.3 — confirmed directly against that exact tag's
+# own default config (github.com/gitleaks/gitleaks/blob/v8.24.3/config/gitleaks.toml), which uses
+# a single `[allowlist]` table. The first two fix attempts silently had no effect for exactly this
+# reason (an unrecognized TOML key, not a regex-matching problem) — verified locally against the
+# same v8.24.3 binary CI uses before writing this, not guessed a third time.
+[allowlist]
+description = "ci.yml Stryker cache restore-keys literal — not a secret, false-positive generic-api-key match"
+# No `paths` field deliberately — with `paths` set, gitleaks skips the ENTIRE matching file
+# (confirmed via the local test above: "Skipping file due to global allowlist"), which is broader
+# than intended. `regexTarget = "line"` + the exact literal alone allowlists only this one known
+# line's content, wherever it appears — tighter, and still verified to clear the finding locally.
+regexTarget = "line"
+regexes = ['''restore-keys:\s*stryker-incremental-v2-2026-09-15-main''']

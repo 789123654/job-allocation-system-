@@ -43,24 +43,42 @@ export function EmployeeList() {
 
   return (
     <>
-      <table className="w-full border-collapse text-sm">
+      <table className="w-full table-fixed border-collapse border border-(--color-ledger-border) text-sm">
+        <colgroup>
+          <col className="w-[25%]" />
+          <col className="w-[30%]" />
+          <col className="w-[15%]" />
+          <col className="w-[30%]" />
+        </colgroup>
         <thead>
-          <tr className="border-b border-(--color-ledger-border) text-left text-(--color-ledger-text-muted)">
-            <th className="py-2 font-medium">Name</th>
-            <th className="py-2 font-medium">Email</th>
-            <th className="py-2 font-medium">Status</th>
-            <th className="py-2 font-medium">
+          <tr className="text-left text-(--color-ledger-text-muted)">
+            <th className="border border-(--color-ledger-border) px-3 py-2 font-normal">Name</th>
+            <th className="border border-(--color-ledger-border) px-3 py-2 font-normal">Email</th>
+            <th className="border border-(--color-ledger-border) px-3 py-2 font-normal">Status</th>
+            <th className="border border-(--color-ledger-border) px-3 py-2 font-normal">
               <span className="sr-only">Actions</span>
             </th>
           </tr>
         </thead>
         <tbody>
           {employees.map((employee) => (
-            <tr key={employee.id} className="border-b border-(--color-ledger-border)">
-              <td className="py-2">{employee.fullName}</td>
-              <td className="py-2">{employee.email}</td>
-              <td className="py-2">{employee.isActive ? "Active" : "Deactivated"}</td>
-              <td className="py-2">
+            <tr key={employee.id} className="hover:bg-(--color-ledger-border)/40">
+              <td
+                className="truncate border border-(--color-ledger-border) px-3 py-2"
+                title={employee.fullName}
+              >
+                {employee.fullName}
+              </td>
+              <td
+                className="truncate border border-(--color-ledger-border) px-3 py-2"
+                title={employee.email}
+              >
+                {employee.email}
+              </td>
+              <td className="border border-(--color-ledger-border) px-3 py-2">
+                {employee.isActive ? "Active" : "Deactivated"}
+              </td>
+              <td className="border border-(--color-ledger-border) px-3 py-2">
                 <div className="flex justify-end gap-2">
                   <Button type="button" variant="ghost" onClick={() => setResetTarget(employee)}>
                     Reset password

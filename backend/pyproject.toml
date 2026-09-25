@@ -36,7 +36,11 @@ source_paths = ["app/crud.py", "app/core/idempotency.py"]
 # `from app.core.db import commit_or_recover`) failed with ModuleNotFoundError. also_copy runs
 # before mutation (__main__.py's _run: copy_src_dir -> copy_also_copy_files -> create_mutants), so
 # copying the whole app/ package here can't overwrite/undo the mutated files created afterward.
-also_copy = ["app"]
+# "ops" added 2026-09-22: the exact same bug, a different missing package — tests/ops/
+# test_canary_blind.py imports `from ops.canary import ...`, which wasn't copied either, so the
+# whole mutmut baseline collection failed (every mutant left "not checked") until this line was
+# added; caught by reading the raw CI log, not by the step's own (deliberately advisory) exit code.
+also_copy = ["app", "ops"]
 # Must be a list, not a single string — mutmut's harness.py does `["--rootdir=.", "--tb=native"]
 # + params + self._pytest_add_cli_args` internally, and list + str raises TypeError (caught live in
 # CI, 2026-09-14: the "advisory" mutmut step was silently crashing on every mutant before this fix,
@@ -84,7 +88,7 @@ max-complexity = 10 # C901 threshold — the default, stated so a bump is a deli
 "loadtest/**" = ["S311", "T201", "C901", "PTH123"]
 
 [tool.pyright]
-include = ["app", "tests"]
+include = ["app", "ops", "tests"]
 typeCheckingMode = "strict"
 
 # httpx's TestClient doesn't ship complete type stubs (every .get/.post/.json call resolves to

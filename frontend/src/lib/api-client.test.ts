@@ -1,9 +1,9 @@
 import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "@/config/env";
-import { apiRequest } from "@/lib/api-client";
+import { apiRequest, ApiError } from "@/lib/api-client";
 import { supabase } from "@/lib/supabase-client";
-import { server } from "@/testing/mocks/handlers";
+import { fakeSession, server } from "@/testing/mocks/handlers";
 
 describe("apiRequest", () => {
   beforeEach(async () => {
@@ -27,7 +27,7 @@ describe("apiRequest", () => {
 
     await apiRequest("/ping");
 
-    expect(capturedAuth).toBe("Bearer fake-access-token");
+    expect(capturedAuth).toBe(`Bearer ${fakeSession.access_token}`);
   });
 
   it("attaches the Idempotency-Key exactly as given, only when one is passed", async () => {
@@ -76,5 +76,33 @@ describe("apiRequest", () => {
     await apiRequest("/ping");
 
     expect(capturedKey).toBeNull();
+  });
+
+  it("signs the client out on a 401 (code-review finding #19) — ordinary regression test, not blind: the server-side boundary (api/deps.py's get_current_profile) is what actually rejects a deactivated/deleted-firm token; this only verifies the client follows that rejection instead of sitting on a dead session, per owasp-wstg's Session Management chapter (WSTG-SESS-06, adapted — no WSTG procedure targets a mid-session server-issued rejection directly, the closest named one is logout termination actually propagating)", async () => {
+    server.use(
+      http.get(`${env.API_BASE_URL}/ping`, () =>
+        HttpResponse.json(
+          {
+            type: "about:blank",
+            title: "Unauthorized",
+            status: 401,
+            detail: "Account inactive or not found",
+            instance: "",
+          },
+          { status: 401 },
+        ),
+      ),
+      // supabase-js's signOut() call — unmocked, MSW's onUnhandledRequest: "error" (setup-tests.ts)
+      // would otherwise fail the test on this request rather than on a real assertion.
+      http.post(`${env.SUPABASE_URL}/auth/v1/logout`, () => new HttpResponse(null, { status: 204 })),
+    );
+
+    await expect(apiRequest("/ping")).rejects.toBeInstanceOf(ApiError);
+
+    // signOut() is fire-and-forget inside apiRequest (doesn't block the throw above) — wait for
+    // the session to actually clear rather than asserting immediately after the await above.
+    await expect
+      .poll(async () => (await supabase.auth.getSession()).data.session)
+      .toBeNull();
   });
 });

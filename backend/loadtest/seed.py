@@ -12,6 +12,15 @@ must_change_password=false is set explicitly on every seeded profile, same as ow
 column defaults to true (models.py), and require_password_set (api/deps.py) 403s every other
 request while it's true; leaving it at the default would make every load-test request fail at the
 auth gate before reaching any of the code actually under test.
+
+Each identity also gets a `foreign_task_id` (2026-09-17 addition) — a real task id belonging to a
+DIFFERENT firm, so script.js can assert cross-tenant access actually 404s under real concurrency,
+not just measure latency on each caller's own data.
+
+2026-09-18 addition: one `job_types` row and one `notifications` row seeded per firm — PATCH
+/job-types/{id} and PATCH /notifications/{id}/read need a real write target, unlike the read-only
+endpoints above. `foreign_job_type_id`/`foreign_notification_id` per identity, same
+rejection-sampling pattern as `foreign_task_id`.
 """
 
 import argparse
@@ -40,6 +49,16 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
     firm_rows: list[dict] = []
     profile_rows: list[dict] = []
     task_rows: list[dict] = []
+    job_type_rows: list[dict] = []
+    notification_rows: list[dict] = []
+    # firm_id -> [task_id, ...], client-generated below (not DB-returned) so script.js's
+    # cross-tenant probe (2026-09-17 addition) has a real task id it KNOWS belongs to a different
+    # firm than the requester, without an extra round-trip or RETURNING clause.
+    tasks_by_firm: dict[object, list[object]] = {}
+    # One-per-firm (not lists — PATCH /job-types/{id} and PATCH /notifications/{id}/read only need
+    # a single real write target each, unlike tasks_by_firm above).
+    job_type_by_firm: dict[object, object] = {}
+    notification_by_firm: dict[object, object] = {}
     now = datetime.now(UTC)
 
     for _ in range(firms):
@@ -75,6 +94,7 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
                 {"firm_id": str(firm_id), "profile_id": str(emp_id), "role": "employee"}
             )
 
+        firm_task_ids: list[object] = []
         for _ in range(tasks_per_firm):
             # Mixed spread so _ensure_owner_deadline_notifications/_ensure_employee_deadline_
             # notifications (crud.py) have real overdue/urgent/approaching/far-future/none cases to
@@ -95,8 +115,11 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
             assigned_to = (
                 random.choice(employee_ids) if employee_ids and status != "created" else None
             )
+            task_id = uuid4()
+            firm_task_ids.append(task_id)
             task_rows.append(
                 {
+                    "id": task_id,
                     "fid": firm_id,
                     "title": "Load test task",
                     "assigned_to": assigned_to,
@@ -105,6 +128,24 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
                     "created_by": owner_id,
                 }
             )
+        tasks_by_firm[firm_id] = firm_task_ids
+
+        job_type_id = uuid4()
+        job_type_rows.append(
+            {
+                "id": job_type_id,
+                "fid": firm_id,
+                "name": "Load test job type",
+                "created_by": owner_id,
+            }
+        )
+        job_type_by_firm[firm_id] = job_type_id
+
+        notification_id = uuid4()
+        notification_rows.append(
+            {"id": notification_id, "fid": firm_id, "recipient": owner_id}
+        )
+        notification_by_firm[firm_id] = notification_id
 
     if firm_rows:
         conn.execute(
@@ -127,13 +168,71 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
         conn.execute(
             text(
                 "INSERT INTO tasks "
-                "(firm_id, title, assigned_to, deadline, status, created_by, "
+                "(id, firm_id, title, assigned_to, deadline, status, created_by, "
                 "created_at, updated_at) "
-                "VALUES (:fid, :title, :assigned_to, :deadline, :status, :created_by, "
+                "VALUES (:id, :fid, :title, :assigned_to, :deadline, :status, :created_by, "
                 "now(), now())"
             ),
             task_rows,
         )
+    if job_type_rows:
+        conn.execute(
+            text(
+                "INSERT INTO job_types (id, firm_id, name, is_active, created_by, created_at) "
+                "VALUES (:id, :fid, :name, true, :created_by, now())"
+            ),
+            job_type_rows,
+        )
+    if notification_rows:
+        conn.execute(
+            text(
+                "INSERT INTO notifications "
+                "(id, firm_id, recipient_id, type, task_id, is_read, created_at) "
+                "VALUES (:id, :fid, :recipient, 'task_deadline_approaching', NULL, false, now())"
+            ),
+            notification_rows,
+        )
+
+    # Cross-tenant probe target (script.js, 2026-09-17): each identity gets one real task id known
+    # to belong to a DIFFERENT firm, so the load test can assert GET /tasks/{id} 404s for it under
+    # real concurrency — not just check status codes on the caller's own data. Rejection sampling,
+    # not a filtered list comprehension per identity: at the real target scale (2,000 firms /
+    # ~10,000 identities) an O(firms) filter per identity is O(firms x identities); picking a
+    # random firm and retrying only on the (1/firms) chance of a self-match is O(1) amortized.
+    firm_ids = [fid for fid, tids in tasks_by_firm.items() if tids]
+    for identity in identities:
+        if len(firm_ids) < 2:
+            identity["foreign_task_id"] = None  # nothing foreign exists to pick
+            continue
+        while True:
+            other_firm = random.choice(firm_ids)
+            if str(other_firm) != identity["firm_id"]:
+                break
+        identity["foreign_task_id"] = str(random.choice(tasks_by_firm[other_firm]))
+
+    # Same rejection-sampling pattern, one per firm this time so no random.choice over a list is
+    # needed (job_type_by_firm/notification_by_firm each map firm_id -> a single id already).
+    job_type_firm_ids = list(job_type_by_firm.keys())
+    notification_firm_ids = list(notification_by_firm.keys())
+    for identity in identities:
+        if len(job_type_firm_ids) < 2:
+            identity["foreign_job_type_id"] = None
+        else:
+            while True:
+                other = random.choice(job_type_firm_ids)
+                if str(other) != identity["firm_id"]:
+                    break
+            identity["foreign_job_type_id"] = str(job_type_by_firm[other])
+
+        if len(notification_firm_ids) < 2:
+            identity["foreign_notification_id"] = None
+        else:
+            while True:
+                other = random.choice(notification_firm_ids)
+                if str(other) != identity["firm_id"]:
+                    break
+            identity["foreign_notification_id"] = str(notification_by_firm[other])
+
     return identities
 
 

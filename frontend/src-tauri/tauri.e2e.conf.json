@@ -1,0 +1,27 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:8000 http://127.0.0.1:54321 https://*.supabase.co https://*.ingest.sentry.io",
+        "font-src": "https://fonts.gstatic.com",
+        "style-src": "'self' https://fonts.googleapis.com",
+        "img-src": "'self' asset: http://asset.localhost data:",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "frame-ancestors": "'none'"
+      },
+      "capabilities": [
+        "default",
+        {
+          "identifier": "e2e-testing",
+          "description": "Build-manifest bookkeeping only, not a security gate — corrected 2026-09-15 per independent review. tauri-plugin-wdio-webdriver's HTTP automation server starts purely from Cargo.toml's `e2e-testing` feature flag being compiled in (src/lib.rs's #[cfg(feature = \"e2e-testing\")]); this capability entry authorizes nothing at runtime, it exists only so Tauri's build-time validation of every capabilities/ file against the compiled plugin set doesn't fail once the plugin exists (confirmed empirically: a standalone e2e-testing.json file broke the plain `cargo check` with 'Permission wdio-webdriver:default not found' even with tauri.conf.json's capabilities restricted to [\"default\"]). Inlining it here, read only via --config, is bookkeeping convenience, not the thing that keeps this out of a release build — Cargo.toml's own comment on this dependency is the real control.",
+          "windows": ["main"],
+          "permissions": ["wdio-webdriver:default"]
+        }
+      ]
+    }
+  }
+}

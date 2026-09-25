@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
-from app.core.db import commit_or_recover
+from app.core.db import as_aware_utc, commit_or_recover
 from app.models import IdempotencyKey, Profile
 
 _TTL = timedelta(hours=24)  # Rule 230's own example duration; not prescribed, just a sane default
@@ -102,21 +102,37 @@ def with_idempotency(
     actor_id = actor.id
     request_hash = _hash_request(endpoint, request_body)
     cutoff = datetime.now(UTC) - _TTL
+    # No TTL filter in this lookup — need to see an EXPIRED row too, not just a live one, so it can
+    # be cleared before the insert below (code-review finding #13, 2026-09-14). The table has no
+    # cleanup job (an expired row just sits there — a lookup filtering by `created_at` was assumed
+    # to be the whole story), so its PK slot stays physically occupied until something deletes it.
     existing = session.exec(
         select(IdempotencyKey).where(
             IdempotencyKey.firm_id == actor.firm_id,
             IdempotencyKey.actor_id == actor.id,
             IdempotencyKey.idempotency_key == idempotency_key,
             IdempotencyKey.endpoint == endpoint,
-            IdempotencyKey.created_at > cutoff,
         )
     ).first()
-    if existing is not None:
+    if existing is not None and as_aware_utc(existing.created_at) > cutoff:
         if existing.request_hash != request_hash:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST, "Idempotency-Key reused with a different request"
             )
         return existing.response_status, existing.response_body
+    if existing is not None:
+        # Reused after the TTL: this module's own contract says that must be treated as a brand
+        # new request. The old bug returned this stale row's response instead of ever reaching
+        # here — silently discarding whatever `handler()` below actually does.
+        # Business_Logic_Security_Cheat_Sheet.md's "Use Database Transactions and Locks" /
+        # conditional-update pattern is the closest named guidance (checked, not assumed — no ASVS
+        # 5 chapter or TCASVS chapter covers idempotency-key TTL reuse directly). Clear it now (an
+        # explicit `flush()`, not just `add()`-and-hope: SQLAlchemy's default flush order runs
+        # inserts/updates before deletes within one flush, so without this the insert below would
+        # still collide with this row) so the insert below lands cleanly instead of needing
+        # conflict recovery for a case that was never a real concurrent duplicate.
+        session.delete(existing)
+        session.flush()
 
     status_code, response_body = handler()
     session.add(
@@ -132,15 +148,25 @@ def with_idempotency(
         )
     )
 
-    firm_id_str = str(actor.firm_id)
+    # A UUID value, not `str(actor.firm_id)` — the column is UUID-typed, and comparing it to a
+    # plain string only works on Postgres (implicit cast); SQLite's Uuid type processor rejects it
+    # outright, a latent bug this function's own SQLite tests never exercised before (only the
+    # real-Postgres concurrency test reached `_recover_winner`'s query, until the finding-#13 test
+    # below did too). Captured before the commit below, same as the original code's intent — never
+    # read `actor.firm_id` fresh from inside `_recover_winner` itself: `commit_or_recover`'s own
+    # docstring warns that a `rollback()` expires every object in the session, so a later read
+    # would fire a lazy-refresh SELECT with no RLS tenant context.
+    firm_id = actor.firm_id
 
     def _recover_winner() -> tuple[int, dict[str, Any]]:
         # Called by commit_or_recover (core/db.py) only after it has already rolled back and
         # re-established tenant context — safe to query the session again here for that reason.
         # A concurrent identical retry won the insert race first — not a real error, refetch it.
+        # The row this finds is always fresh (created just now, by the request that won): the
+        # expired-row case is handled above, before this ever gets a chance to conflict on that.
         winner = session.exec(
             select(IdempotencyKey).where(
-                IdempotencyKey.firm_id == firm_id_str,
+                IdempotencyKey.firm_id == firm_id,
                 IdempotencyKey.actor_id == actor_id,
                 IdempotencyKey.idempotency_key == idempotency_key,
                 IdempotencyKey.endpoint == endpoint,

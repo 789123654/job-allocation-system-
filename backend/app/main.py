@@ -1,5 +1,6 @@
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 
 import sentry_sdk
@@ -10,9 +11,15 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.main import api_router
+from app.core import request_context
 from app.core.config import settings
+from app.core.health import readiness_probe
+from app.core.logging_setup import configure_logging
+from app.core.request_logging import RequestLoggingMiddleware
+from app.core.sentry_config import sentry_init_kwargs
 
 logger = logging.getLogger("app")
+configure_logging()
 
 if settings.SENTRY_DSN:
     # Must run before FastAPI(...) below — Sentry's FastAPI integration auto-instruments on
@@ -36,7 +43,22 @@ if settings.SENTRY_DSN:
     # profiling requires a paid add-on even on the free Developer plan (verified live against
     # Sentry's own pricing page, 2026-09-08); tracing alone already answers "how long did this
     # request take," which is all this was built for.
-    sentry_sdk.init(dsn=settings.SENTRY_DSN, traces_sample_rate=1.0)
+    #
+    # release/environment (2026-09-19): so an error can be tied to a build and told apart from a
+    # dev/CI run. Plain strings, not user data — nothing new is collected about anyone.
+    #
+    # Correction, 2026-09-19: leaving send_default_pii off was NOT enough. A captured real event
+    # still carried the request body, every frame's local variables (including the raw Bearer
+    # token inside the ASGI scope) and Postgres-echoed values. The options and the before_send
+    # scrubber that close that live in core/sentry_config.py, with tests.
+    sentry_sdk.init(
+        **sentry_init_kwargs(
+            dsn=settings.SENTRY_DSN,
+            release=settings.SENTRY_RELEASE,
+            environment=settings.SENTRY_ENVIRONMENT,
+        )
+    )
+
 
 class _UTF8JSONResponse(JSONResponse):
     """Starlette's JSONResponse never appends `charset` to Content-Type — it only does that for
@@ -50,7 +72,24 @@ class _UTF8JSONResponse(JSONResponse):
     media_type = "application/json; charset=utf-8"
 
 
-app = FastAPI(title="CA Firm Practice Management API", default_response_class=_UTF8JSONResponse)
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncGenerator[None]:
+    """uvicorn applies its own logging config when the server STARTS, i.e. after this module ran
+    `configure_logging()` at import. That config re-enables its access logger (raw path and query
+    string) and keeps a private stderr handler on `uvicorn.error`, which prints a second, unredacted
+    traceback for every unhandled exception (Starlette re-raises after the 500 handler above).
+    The lifespan runs after uvicorn's config, so configuring again here has the last word.
+    fastapi skill: advanced/events.md (`lifespan=`; `on_event` is deprecated).
+    """
+    configure_logging()
+    yield
+
+
+app = FastAPI(
+    title="CA Firm Practice Management API",
+    default_response_class=_UTF8JSONResponse,
+    lifespan=_lifespan,
+)
 
 # Explicit allowlist only — never "*", never "*" + credentials (API_SPEC.md §1).
 app.add_middleware(
@@ -83,6 +122,12 @@ async def add_security_headers(
     response = await call_next(request)
     response.headers.update(_SECURITY_HEADERS)
     return response
+
+
+# Added AFTER the decorator-registered middleware above: Starlette makes the last-added middleware
+# the outermost one, so this sees (and stamps X-Request-ID on) every response, CORS and
+# security-headers included. Pure ASGI, not @app.middleware("http") — see request_logging.py.
+app.add_middleware(RequestLoggingMiddleware)
 
 
 def _problem(status_code: int, detail: str, instance: str) -> JSONResponse:
@@ -123,8 +168,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     # Starlette invokes this handler from inside its own `except` block, so sys.exc_info() is live
     # and .exception() captures the real traceback. Ruff's LOG004 is purely syntactic and can't see
     # that the @app.exception_handler decorator establishes that context.
-    logger.exception("Unhandled exception on %s", request.url.path)  # noqa: LOG004
-    return _problem(500, "An unexpected error occurred", str(request.url.path))
+    # Route template, not request.url.path: the raw path is attacker-controlled text and never
+    # belongs in a log line (ASVS 14.2.1, Logging_Cheat_Sheet.md "Data to exclude") — found by the
+    # blind-authored tests (Rule 10.2), which sent hostile paths to a route that raises.
+    route = getattr(request.scope.get("route"), "path", None) or "<unmatched>"
+    logger.exception("Unhandled exception on %s", route)  # noqa: LOG004
+    response = _problem(500, "An unexpected error occurred", str(request.url.path))
+    # This response is produced by Starlette's outermost error middleware, i.e. OUTSIDE
+    # RequestLoggingMiddleware, whose send-wrapper therefore never sees it — stamp the id here so a
+    # 500 can be correlated with its log lines like every other response.
+    ctx = request_context.current()
+    if ctx is not None:
+        response.headers["X-Request-ID"] = ctx["request_id"]
+    return response
 
 
 app.include_router(api_router)
@@ -132,4 +188,16 @@ app.include_router(api_router)
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    """Liveness only — the process is up. Deliberately never touches the database."""
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    """Readiness — can this instance serve a request right now (DB reachable, pool not exhausted).
+    Point the uptime monitor here, not at /health. Fixed bodies, no detail: see core/health.py.
+    """
+    ok = await readiness_probe.check()
+    return JSONResponse(
+        status_code=200 if ok else 503, content={"status": "ok" if ok else "unavailable"}
+    )

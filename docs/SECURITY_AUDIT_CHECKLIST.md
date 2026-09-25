@@ -14,16 +14,1071 @@ into "Completed Audits" below, and reset "Current Audit" to `status: idle` befor
 ## Current Audit
 
 ```
-status: idle   <!-- idle | in-progress | complete -->
-phase:
-scope_files:
-date:
-commit:
+status: complete   <!-- idle | in-progress | complete -->
+phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 3 (last item of the 2026-09-19 review): Pydantic ResponseValidationError/RequestValidationError/WebSocketRequestValidationError input_value leak. PLUS, discovered during batch 3's own full-suite verification and fixed in this same pass at the user's explicit request: unbounded DB connect timeout (core/db.py) — see req_49-53. BATCH 3 CLOSES the entire 2026-09-19 review (batches 1-3 all now done).
+scope_files: backend/app/core/sentry_config.py, backend/app/core/logging_setup.py; tests backend/tests/core/test_sentry_config_hostile.py, backend/tests/core/test_logging_setup.py (both updated). PLUS: backend/app/core/db.py, backend/app/core/config.py; tests backend/tests/core/test_db.py (updated)
+date: 2026-09-22 (batch 3 work) / 2026-09-24 (connect-timeout fix, investigation, and closeout)
+commit: batch 3 fix (eb7c627); connect-timeout fix (905efb5) — both on branch phase5/tenant-isolation-defense-in-depth, not yet pushed. Open follow-up NOT closed by this commit: req_45 (mutation testing, deferred fast-follow) and req_53's pool-capacity-under-burst problem (separate, larger, tracked task).
 ```
 
-## Completed Audits
+<!-- Left in place rather than moved to "Completed Audits" below (same reasoning as batch 2's closeout comment
+above it in this file): a large cut-paste on a 2000+ line doc risks corrupting it for a purely cosmetic reorg. -->
 
-### Phase 5 (Hardening) follow-up — Mutation Testing in CI (2026-09-14)
+Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20). Fill them while `in-progress`; the guard hook
+blocks a blank one. Evidence = a test name, a command's output or a rule that ran — "I believe it is done" is
+not evidence; write `PENDING — <what is missing>` until it exists. Add one `req_NN` line per requirement.
+
+- `trigger`: OBSERVABILITY.md §9 item 6's last open item from the 2026-09-19 review, and
+  `CODE_REVIEW_FINDINGS`'s original `security_review_run` entry ("`ResponseValidationError` carries the whole
+  returned row"). Mode 6 sweep (2026-09-22, whole-directory grep, not just familiar filenames): `owasp-cheatsheets`
+  for "validation error"/"stack trace"/"information disclosure"/"verbose error" (hit `Error_Handling_Cheat_Sheet.md`,
+  already-cited ASVS 16.5.1 territory), `owasp-wstg` (new hit: `12-api-testing.md` WSTG-APIT-03 "Excessive Data
+  Exposure" — "check ... verbose error/debug output for leaked structure", not previously cited in this project's
+  Sentry work), `owasp-asvs-5` (16.2.5, already used for slice 2, re-confirmed applicable), `owasp-tcasvs` (new hit:
+  4.6.1 "no leaking sensitive system info, stack traces, internal paths" — v4-code-quality-exploit-mitigation.md).
+- `blind_test`: yes — run per failure-mode-11 decision (AskUserQuestion, user chose "Run a blind-test pass"). A
+  fresh general-purpose agent, worktree isolation attempted first and found UNAVAILABLE in this environment (same
+  limitation batch 1 hit — no git repo at the session's primary working directory), so blinding relied on explicit
+  instruction instead: forbidden from `git status`/`git diff`/reading the two fixed files or their test files
+  directly, required to view the pre-fix version via `git show HEAD:<path>` only. **Result: found 2 real gaps**,
+  both reproduced by the author before any fix (rule 10.2), then fixed and given their own regression tests — see
+  req_46/req_47 below. The agent's own 547-line, 26-test delivered file (`test_blind_validation_error_pass.py`)
+  is NOT committed: its findings are fully captured by req_46/47's hand-written tests, and the file itself needed
+  substantial lint/pyright cleanup (22 ruff errors, 36 pyright errors — mostly missing type hints on a fixture
+  parameter and FastAPI's known pyright false-positive on inline route handlers) that wasn't worth carrying for a
+  file whose unique value was already extracted; kept in the session scratchpad for reference, not lost.
+- `hostile_inputs_tested`: PENDING — filled once req rows below are written up with the actual test names.
+
+- `req_41`: BATCH 3 — `ResponseValidationError`/`RequestValidationError`/`WebSocketRequestValidationError`
+  (`fastapi.exceptions.ValidationException`) embed the raw offending value(s) in their own `__str__` via Pydantic
+  error dicts (`{'type': ..., 'loc': ..., 'msg': ..., 'input': <the actual value>}`) | ASVS 16.2.5; WSTG-APIT-03
+  (owasp-wstg/chapters/12-api-testing.md, "Excessive Data Exposure"); TCASVS 4.6.1
+  (owasp-tcasvs/chapters/v4-code-quality-exploit-mitigation.md); OBSERVABILITY.md §9 item 6 | applies | evidence:
+  runtime probe (session scratchpad `probe_batch3_response_validation.py`) against this app's REAL `app.main.app`
+  + real `configure_logging()` + real `sentry_init_kwargs` (not a raw/unscrubbed probe) — a throwaway route
+  returning a string where `response_model` declared `int` produced, BEFORE any fix: (a) the app's own JSON stdout
+  log line's `exc` field containing the raw secret verbatim (`redact_db_values` is Postgres-shape-only, does
+  nothing for this shape); (b) a captured Sentry event with `type='ResponseValidationError'
+  module='fastapi.exceptions'` whose `value` also contained the raw secret, CONFIRMING Sentry's Starlette/FastAPI
+  integration auto-captures this exception at the ASGI middleware layer even though the app's own
+  `@app.exception_handler(Exception)` already converts it to a generic 500 (verified live, not assumed — the
+  handler catching an exception does not stop Sentry's own hook from seeing it, via
+  `sentry_sdk/integrations/starlette.py`'s `_sentry_exceptionmiddleware_call`). A top-level type mismatch (the
+  whole returned object, not one field) was checked separately and confirmed live: `input` becomes the ENTIRE
+  offending value in that case, matching the original review's "whole row" description precisely, not just the
+  single-field case. `RequestValidationError` was checked live and found NOT to reach either channel in this
+  app's real routing (resolved inside FastAPI's dependency-injection step, before the ASGI boundary both Sentry
+  and the app's own logging touch) — not a live leak today, but matched in the fix anyway as free defense in
+  depth (see req_42).
+
+- `req_42`: root cause (B) two individually-correct subsystems, uncorrected interaction (CODE_REVIEW_FINDINGS
+  taxonomy), same shape as slice 2's AuthError-chain finding and batch 1's uvicorn-second-traceback finding —
+  `redact_db_values`'s Postgres-shape scrubbing is correct for its own scope, Sentry's automatic exception capture
+  is correct/expected framework behavior, and nobody had checked their combination against FastAPI's OWN
+  validation-error shape | applies | evidence: fixed in TWO places, one per leak channel, both centralized at
+  their existing choke points (not per-call-site): (1) `sentry_config.py`'s `_scrub_exception_value` — matched by
+  `module == "fastapi.exceptions"` AND `type` in a fixed set of the three `ValidationException` subclasses, NOT by
+  module alone like the AuthError fix (failure mode 7 — checked what's different about this call site before
+  reusing that pattern: `fastapi.exceptions` ALSO defines `HTTPException`, whose `detail` is developer-written,
+  intentionally safe text this app relies on for real error messages; module-only matching would have wrongly
+  stripped it, confirmed by the pre-existing test `test_the_outer_non_auth_exception_in_the_chain_is_left_alone`
+  which already asserts an `HTTPException` in that same module is left untouched). Because Sentry's event only
+  carries `type`/`module` strings (no live object), this can't be an `isinstance` check the way the log-formatter
+  side can — a stated, narrower boundary than the AuthError match, documented in the module docstring: a future
+  FastAPI-added `ValidationException` subclass needs this set updated by hand. (2) `logging_setup.py`'s
+  `JsonFormatter` — a NEW mechanism, not reused from `redact_db_values`: walks `record.exc_info[1]`'s real
+  `__cause__`/`__context__` chain, `isinstance`-checks each against `ValidationException` (can, unlike the Sentry
+  side, since this has the live object), and does an EXACT string replacement of `str(exc)` within the formatted
+  traceback — not a new regex pattern over arbitrary text, which is exactly the "KNOWN LIMIT" `redaction.py`'s own
+  docstring already named as the real fix ("render exceptions from the exception object instead of from text").
+  Runs BEFORE `redact_db_values`, which still runs after for defense in depth on anything else in the same chain.
+
+- `req_43`: tests — 7 new tests in `test_sentry_config_hostile.py` (message stripped with exact-type assertion;
+  `type`/`module` left visible; `RequestValidationError` and `WebSocketRequestValidationError` also stripped,
+  defense in depth; `HTTPException` in the same module explicitly NOT stripped — the crux of req_42's design
+  decision; a different `fastapi.exceptions` class not in the validation set left alone; missing-`value`-key
+  crash safety) and 3 new tests in `test_logging_setup.py` (message stripped from `exc`, class name stays
+  visible; a CHAINED `ResponseValidationError` reached via `__cause__` — matching the real call site's `raise
+  app_exc from app_exc.__cause__ or app_exc.__context__` — also stripped, proving the chain-walk works, not just
+  a top-level check; a plain unrelated exception left untouched, non-vacuity). 100% coverage on
+  `sentry_config.py`; `logging_setup.py` at 97% (1 pre-existing line + 1 new branch uncovered — confirmed
+  PRE-EXISTING by checking the same file on the parent commit before this slice's changes, same 97%/same single
+  line, not a regression this slice introduced; the new uncovered branch is `_redact_validation_errors`'s
+  `if raw:` guard, defensively unreachable because `ValidationException.__str__` is confirmed live — `str(ResponseValidationError(errors=[]))`
+  — to never return an empty string even with zero errors, so the guard exists for a shape that cannot occur via
+  any real instance, same category as other stated-not-forced boundaries in this codebase). Negative control
+  (rule 10.1): `git stash push -- backend/app/core/sentry_config.py backend/app/core/logging_setup.py` to isolate
+  both source fixes from the new tests, reran both test files — 5 of 10 new tests failed exactly as expected
+  (both Sentry-side stripping tests plus `RequestValidationError`/`WebSocketRequestValidationError`, both
+  logging-side stripping tests — the crash-safety and non-regression tests correctly still passed, since they
+  don't depend on the fix); `git stash pop` restored both fixes. After req_46/47's two additional fixes below,
+  final counts: 65 tests in these two files, 100% coverage on `sentry_config.py`, 97% on `logging_setup.py` (see
+  req_43 continuation below for why). `ruff check`, `ruff format --check`, strict `pyright` clean on all 4 files
+  (0 errors). **Full-backend-suite parity run**: complete (2026-09-24) — `pytest -v -m "not e2e and not authz"
+  --ignore=tests/api/test_schema_fuzz.py` against the local `obs-pg` Postgres container:
+  **6903 passed, 2 failed, 9 skipped, 41 deselected, 1 xfailed, in 371.78s**. Both failures verified NOT a
+  regression from either this batch or req_49-52's connect-timeout fix — both are
+  `test_db_parameter_hiding.py::test_a_failed_statement_error_message_has_no_parameter_dump` and
+  `test_redaction.py::test_the_live_unique_violation_really_has_the_detail_this_module_redacts`, and both failed
+  with the exact same `psycopg.errors.ConnectionTimeout` (the req_49-52 mechanism, intermittent, environmental —
+  see req_53) rather than any assertion this batch's code is responsible for. `tests/api/test_schema_fuzz.py`
+  (the file req_51/req_52's known, already-diagnosed connect-timeout findings live in) deliberately excluded from
+  this specific run to keep it fast — its own findings are independently evidenced in req_51/52/53 below, not
+  re-litigated here.
+
+- `req_44`: failure mode 11 — independent-review decision asked, not assumed | docs/skill-verification-
+  discipline.md failure-mode-11 convention | applies | evidence: asked via `AskUserQuestion` whether this, the
+  LAST item of the entire 2026-09-19 review, should get an independent blind-test pass before being considered
+  done; user chose "Run a blind-test pass" (a change from slices 2/3's "skip it" answers — mode 11 requires
+  asking every time, not carrying forward a prior answer, and this time the answer differed) — vindicated: see
+  req_46/47, it found 2 real gaps self-authored tests missed.
+
+- `req_46`: BLIND-TEST FINDING 1 — the Sentry-side fix matched only the three named `ValidationException`
+  subclasses by string (`ResponseValidationError`/`RequestValidationError`/`WebSocketRequestValidationError`),
+  missing the shared base class itself | applies | evidence: reproduced by the author first (rule 10.2) —
+  `scrub_event` on an event with `type='ValidationException', module='fastapi.exceptions'` left the secret in
+  place, confirmed live before any fix. Checked reachability: grepped the installed fastapi 0.141.1 package for
+  `raise ValidationException(` — zero matches, only the three named subclasses are ever raised internally by
+  this version, so not a live leak today, but a real, demonstrable asymmetry with the logging-side fix (which
+  already covers the base class via `isinstance`) and exactly the boundary this file's own docstring already
+  named as the string-set match's limitation ("a future FastAPI-added subclass would need this set updated by
+  hand" — the base class IS that same boundary, not a hypothetical one). Fixed: added `"ValidationException"` to
+  `_VALIDATION_ERROR_TYPES`. Test: `test_the_shared_validation_exception_base_class_is_also_stripped` — fails on
+  pre-fix code (confirmed via negative control), passes after.
+
+- `req_47`: BLIND-TEST FINDING 2 — the logging-side fix only protects `record.exc_info` (a call site using
+  `logger.exception(...)`/`exc_info=True`); a call site logging `str(exc)` as the plain MESSAGE instead has no
+  live exception object attached to the record for the chain-walking fix to match against | ASVS 16.2.5 | applies
+  | evidence: reproduced by the author first — a bare `LogRecord` built with `str(ResponseValidationError(...))`
+  as its message and `exc_info=None` produced a JSON log line with the raw secret in `payload["message"]`,
+  confirmed live before any fix. Checked reachability: this app's one real call site (`main.py`'s catch-all
+  handler) always uses `logger.exception(...)` and is unaffected today — not a live leak — but a real,
+  easily-triggered regression path (a future `logger.error(f"...: {exc}")` one-liner) with zero protection,
+  matching this project's own established pattern of closing "not live today, natural regression path" gaps
+  (`extra`'s fail-closed treatment, `RequestValidationError`'s defense-in-depth match, both already reasoned this
+  way earlier in this same file). Fixed WITHOUT falling back to free-text pattern matching over arbitrary
+  content: Pydantic's error-dict repr (`'type':`, `'loc':`, `'input':` together) is a FIXED, library-controlled
+  literal format — the key names, not the values, are what's attacker-proof — so recognising that signature is
+  the same class of safe match `_PG_TEMPLATES` already relies on for Postgres's own fixed templates, not a new
+  attempt to parse arbitrary text. Whole-message fail-closed on match (same reasoning as `extra`/query_string:
+  no way to selectively redact just `input` from repr'd text without parsing it). Test:
+  `test_a_validation_error_logged_as_the_plain_message_with_no_exc_info_is_also_stripped` (fails pre-fix, passes
+  after) plus `test_an_ordinary_message_that_happens_to_mention_input_is_not_stripped` (non-vacuity: all three
+  signature markers must co-occur, not just one common word). This is also why `logging_setup.py` still shows
+  97% not 100% coverage (req_43): the new `_redact_validation_error_message`'s signature-match is fully covered,
+  the ONE remaining gap is `_redact_validation_errors`' pre-existing, unrelated `if raw:` guard (confirmed
+  unreachable: `str(ResponseValidationError(errors=[]))` still returns `'0 validation errors:'`, never empty, so
+  no real `ValidationException` instance can hit the falsy branch) plus the one line already uncovered on the
+  parent commit before this slice touched the file at all (checked directly, not assumed).
+
+- `req_48`: independent blind-test agent's own delivered file — kept out of the tracked test suite, not
+  discarded | applies | evidence: `test_blind_validation_error_pass.py` (547 lines, 26 tests, all pass against
+  the final fixed code) moved to the session scratchpad rather than committed. Reasoning stated plainly: both of
+  its real findings (req_46/47) are already covered by dedicated, clean, hand-written regression tests that meet
+  this project's normal bar; the file itself needed substantial cleanup to meet that same bar (22 ruff errors —
+  mostly line-length and one unused variable; 36 pyright errors — mostly missing type hints on a `sentry_capture`
+  fixture parameter and FastAPI's well-known pyright false-positive on inline route handlers that are only
+  "used" via decorator registration, which pyright can't see) that wasn't worth spending given its unique value
+  was already extracted. Not silently dropped: this row states exactly what happened and why, matching this
+  project's "no evidence gets left unstated" convention.
+
+- `req_45`: mutation testing — explicitly deferred, not silently skipped (mode 11: asked, not assumed) | asked
+  the user directly (2026-09-24) whether to run it now (matching batch 2's slices) or commit today's already-
+  verified work first and run it as a fast-follow; user chose the latter, citing that `sentry_config.py`/
+  `logging_setup.py` already carry strong evidence from hostile tests (req_43), a rule-10.1 negative control
+  (req_43), and real before/after mode-9 proof reproduced on two separate live databases (req_51/req_53) —
+  stronger coverage than most already-committed slices had before their own mutation pass ran. Tracked as a real
+  open item, not closed: mutation testing for `sentry_config.py`/`logging_setup.py` still needs to run before
+  this phase can be considered fully complete by this project's own workflow standard.
+
+- `req_49`: unbounded DB connect-timeout — root cause and fix | applies | trigger: during batch 3's own
+  full-backend-suite parity run, `tests/api/test_schema_fuzz.py::test_api_contract[POST /auth/confirm-password-changed]`
+  hung for `duration_ms: 260075.79` (~4m20s) before returning a 500. Confirmed NOT a batch-3 regression (identical
+  failure reproduced on stashed pre-batch-3 code). User asked me to investigate ("what was the reason ... look into
+  it" / "yes continue it"). Root cause found via a live `faulthandler.dump_traceback_later(20)` thread-stack dump
+  (mode 9 — runtime proof, not inference from CPU/DB-activity signals): the hung thread sat inside
+  `get_current_profile` (api/deps.py:76) → `session.execute` → SQLAlchemy pool `_do_get`/`_create_connection` →
+  `psycopg.connection.connect` → `selectors.select`, i.e. blocked opening a brand-new physical Postgres connection,
+  with no application-level bound — Windows' own ~260s TCP-handshake give-up is what eventually ended it, not
+  anything this app configured. Mode 6 sweep (whole-directory grep, not just familiar files):
+  `owasp-cheatsheets/cheatsheets/Denial_of_Service_Cheat_Sheet.md` line 110 ("Define an absolute connection
+  timeout"); `owasp-asvs-5/chapters/v13-configuration.md` V13.1.3 ("mandate short timeouts ... for sync HTTP
+  request-response ops") and V13.2.6 ("connections to separate services follow documented config: max parallel
+  connections, behavior at max, timeouts, retry strategy") — both name this exact gap. Checked code-review/prior-art
+  first (failure mode 7 — a shared mechanism's prior vetting doesn't cover a new call site): `ops/db_check.py`
+  already sets `connect_timeout=10` for its OWN separate diagnostic connection (`_CONNECT_TIMEOUT_SECONDS = 10`,
+  line 32) — but the main app's `core/db.py` `engine` (used by every request via `get_session`) never had it; not a
+  previously-documented/repeated finding, a genuinely new gap in a sibling call site. Fix: `DB_CONNECT_TIMEOUT_SECONDS:
+  int = Field(default=10, ge=1)` added to `Settings` (core/config.py), same default as `ops/db_check.py` — kept in
+  sync, not independently chosen — wired via a small `_connect_args()` helper into `create_engine(..., connect_args=
+  _connect_args())` (core/db.py). Postgres/psycopg-only parameter (`connect_timeout`, libpq's own name); covers only
+  connection establishment, not query execution time.
+
+- `req_50`: tests, negative control, lint/type-check | applies | `tests/core/test_db.py` — two new tests:
+  `test_connect_args_wires_the_configured_connect_timeout` (plumbing: pins `db._connect_args()`'s literal output
+  against `settings.DB_CONNECT_TIMEOUT_SECONDS`) and `test_a_new_physical_connection_attempt_is_bounded_not_indefinite`
+  (behavioral: a local TCP listener accepts the connection but never answers Postgres's startup packet — reproducing
+  the exact "connect() looks fine, then nothing happens" shape from the real thread dump, deterministically, unlike
+  an unreachable IP which can fail fast for unrelated reasons — asserts the connect attempt raises `OperationalError`
+  within 5s, not indefinitely, with `connect_args={"connect_timeout": 1}`). Negative control (rule 10.1): `git stash
+  push -- backend/app/core/db.py backend/app/core/config.py`, reran both new tests —
+  `test_connect_args_wires_the_configured_connect_timeout` FAILED (`AttributeError: module 'app.core.db' has no
+  attribute '_connect_args'`) confirming it's tied to the fix; `test_a_new_physical_connection_attempt_is_bounded_not_indefinite`
+  still PASSED on stashed code (expected and stated honestly — it validates psycopg's own `connect_timeout` library
+  behavior in isolation with its own inline engine, not this app's wiring; `req_50`'s plumbing test is what's
+  actually falsifiable by this change). Stash popped, fix restored. `ruff check`/`ruff format --check` clean on all
+  3 changed files after fixing 2 self-found lint issues (unused `noqa`, a `try`/`except`/`pass` → `contextlib.suppress`).
+  `uv run pyright` clean after adding the established inline `# pyright: ignore[reportPrivateUsage]` convention
+  (matches `security._jwks_client` and 6+ other existing test call sites in this codebase, not a new pattern).
+  Mutation testing skipped for `_connect_args()` specifically (stated judgment, not silent): it's a single
+  no-branch, no-loop `return {...}` statement whose exact output the plumbing test already pins 1:1 — no mutant
+  survives that isn't already killed by that one assertion.
+
+- `req_51`: mode-9 real-world proof, before vs. after | applies | reran the actual originally-failing
+  reproduction (`tests/api/test_schema_fuzz.py::test_api_contract -k "confirm-password-changed"`, isolated) against
+  the fixed code: server-side `duration_ms` dropped from **260075.79 (268.51s total run)** to **20019.68 (26.03s
+  total run)** — a ~13x reduction, from open-ended to bounded. The endpoint still ultimately returns a 500 (the
+  fuzzer's own 10s client-side read-timeout aborts first either way) and the ~20s figure (≈2× the 10s
+  `DB_CONNECT_TIMEOUT_SECONDS`) suggests two fresh-connection attempts still fail in sequence before the request
+  gives up — a separate, now much smaller, still-open issue (why does this specific fuzzed request need 2 new
+  connections that both fail to connect locally?), explicitly NOT investigated further here: the agreed scope for
+  this pass was "bound the hang," not "make this fuzzer-found 500 disappear," and the user chose "fix it now, as
+  its own small slice" for exactly that bounded scope. Flagged here as a known follow-up, not silently dropped.
+
+- `req_52`: 2026-09-24 follow-up — second endpoint hits the same pattern, sibling-mechanism sweep, and a real
+  local-environment red herring | applies | While running the full-suite parity check, a mid-suite gap (Docker
+  Desktop not running after a machine restart — confirmed via `docker info` failing to reach the daemon and
+  `localhost:55432` refusing connections) caused a burst of unrelated `ERROR`s across `test_schema_fuzz.py`; restarted
+  Docker Desktop + `docker start obs-pg`, confirmed `pg_isready`, reran — this eliminated those, isolating the real
+  signal. With Postgres genuinely up, `test_api_contract[POST /employees]` (and `GET`/`PATCH /employees...`) also
+  FAILED with a `ReadTimeoutError`, `duration_ms≈20214` — the same ~20s (2×`DB_CONNECT_TIMEOUT_SECONDS`) signature as
+  req_51's confirm-password-changed finding, not a distinct new failure mode. Code-level confirmation:
+  `crud.create_employee` runs behind the same `get_current_profile` → `app.core.db.engine` path req_49's fix already
+  covers, so this is very likely the same shared root cause surfacing on a second fuzzed endpoint, not a new bug.
+  Attempted a rule-10.1-style negative control (rerun on stashed pre-fix `db.py`/`config.py`) — inconclusive: still
+  running with near-zero CPU after the user's agreed 50-minute cutoff, stopped there (`TaskStop`), stash popped, fix
+  restored. Treated honestly as suggestive, not proof (near-zero CPU for 50 min on code with NO bound is consistent
+  with, but doesn't prove, the same unbounded-wait mechanism). Sibling-mechanism sweep (user's explicit ask, "look
+  for this bug in all the other points") — every other external call in `backend/app/` checked directly against the
+  installed library/runtime, not memory: `PyJWKClient(settings.JWKS_URL)` (`security.py`) → `timeout: float = 30`
+  confirmed via `inspect.signature`; `SyncGoTrueAdminAPI` (`supabase_admin.py`, wraps the Supabase Admin API used by
+  `POST /employees` and reset-password) → no explicit timeout, but its base class (`SyncGoTrueBaseAPI.__init__`,
+  read via `inspect.getsource`) builds a bare `httpx.Client(...)` when none is passed, and `httpx.Client()`'s own
+  default is `Timeout(timeout=5.0)`, confirmed directly; Sentry SDK's `HttpTransport` → has its own explicit
+  `TIMEOUT` constant, confirmed via `inspect.getsource`. `grep create_engine backend/app` confirms `core/db.py` is
+  the only production engine construction — no sibling instance missed. Conclusion: `req_49`'s fix was already the
+  complete fix for this whole class of bug across the app; no second code change needed. Root-cause research (mode
+  6, user's explicit ask) on *why* the connection stalls in the first place, not just that it's unbounded: our
+  `postgres-official`/`postgres-multitenant`/`owasp-cheatsheets` skills were swept but don't cover this — the one
+  relevant fact found (`postgres-official/server-administration/user-manag.md` doesn't directly state it, but
+  Postgres's own behavior at a real `max_connections` limit is a fast, clean rejection, not a silent hang — ruling
+  out "Postgres is simply full" as the mechanism) pointed the question toward the local Docker Desktop/Windows
+  networking layer instead. `docs.docker.com`'s own networking page (fetched directly, WebFetch) confirms Windows
+  port-forwarding goes through an extra hop (`com.docker.backend` → a shared-memory channel → the WSL2 Linux VM →
+  the container) but states nothing about behavior under a connection burst — stated honestly as an educated guess
+  from architecture, not a documented, confirmed cause. Scope decision (discussed directly with the user, not
+  unilateral): not pursued further — no production deployment exists yet, and production's real database is
+  Supabase-managed Postgres, not a local Docker Desktop container, so this specific local-networking-layer question
+  has no production relevance regardless of its answer. Logged here as a known, deliberately-not-chased loose end.
+
+- `req_53`: 2026-09-24 — req_52's "local Docker/Windows networking" theory tested directly against the real
+  Supabase dev project and DISPROVEN, plus the connection to a prior, already-documented incident | applies |
+  At the user's request, reran the identical isolated reproduction (`test_api_contract[POST /employees]`) against
+  the real Supabase dev database (`swdfcijgexezkuhkfbcx.supabase.co`, via its connection pooler at
+  `aws-0-ap-south-1.pooler.supabase.com` — no Docker, no local machine, no Windows networking layer involved at
+  all) instead of the local `obs-pg` container. Result: **the identical failure, at nearly the identical
+  timing** — 511.82s (8m31s) real-Supabase vs. 513.99s (8m33s) local-Docker for the same test. This directly
+  disproves req_52's "likely Docker Desktop/Windows networking" hypothesis, stated there as an educated guess,
+  not a confirmed cause — correcting it here rather than leaving the disproven guess as the last word. The
+  behavior is real and reproducible on production-shaped infrastructure, not a local-machine artifact.
+  Re-examined `docs/OBSERVABILITY.md` §6 (mode 6 — should have been checked before req_52's guess, not after;
+  named here so it isn't missed again) and found this is NOT actually a new discovery: the 2026-09-18 k6 PATCH-mix
+  run (`OBSERVABILITY.md` line 190, 300 VUs) already recorded **15.47% failed, p95 60s,
+  `QueuePool limit of size 5 overflow 10 reached`** — the same family of failure (the connection pool unable to
+  keep up with a burst of near-simultaneous requests), on the real production-shaped network path, months before
+  today's fuzz-testing found a second instance of it. `OBSERVABILITY.md`'s own Phase 1 (the structured logging,
+  `/ready` check, and `install_pool_monitor` warning in `core/db.py` this project already has) was built BECAUSE
+  of that same 2026-09-18 finding — today's req_49 fix (bounding an unbounded hang to a fast, predictable
+  failure) is a real, additive improvement to that already-known problem, not a full fix for it. The full fix
+  (the pool not running dry under a burst in the first place — larger pool budget within Supabase's real limit,
+  smarter retry/backoff, or understanding why writes specifically drain it faster than reads) is explicitly
+  out of scope for this pass, discussed directly with the user, and left as a real, named, tracked follow-up —
+  not silently folded into "fixed" status.
+
+### Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2: all 3 slices (2026-09-22)
+
+<!-- Left in place rather than physically relocated under "Completed Audits" below (a large, blind
+cut-paste on a 1000+ line doc risked corrupting it for a purely cosmetic reorg nobody asked for);
+status: complete below is what actually matters and the guard hook only enforces non-blank fields
+while status is in-progress. -->
+
+```
+status: complete   <!-- idle | in-progress | complete -->
+phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 2 (slice 1-3 of 3, ALL SLICES DONE): Sentry query_string, breadcrumb.data, before_send_transaction (slice 1); chained AuthError exception value inside a Sentry event (slice 2); frontend fetch/xhr/navigation breadcrumb data.url|from|to (slice 3)
+scope_files: backend/app/core/sentry_config.py; tests backend/tests/core/test_sentry_config_hostile.py (new); frontend/src/lib/sentry-context.ts; tests frontend/src/lib/sentry-context.test.ts, frontend/src/lib/sentry-context.hostile.test.ts (both updated)
+date: 2026-09-22
+commit: slice 1 (7770e81); slice 2 (110fffb); slice 3 (765ed6b) — all pushed, branch phase5/tenant-isolation-defense-in-depth. BATCH 2 COMPLETE — every finding from the 2026-09-19 review named as batch 2 scope (req_23) is now closed. Only batch 3 (Pydantic ResponseValidationError/input_value, OBSERVABILITY.md §9 item 6) remains of the original review.
+```
+
+Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20). Fill them while `in-progress`; the guard hook
+blocks a blank one. Placeholders are HTML comments on purpose: the hook treats a comment as blank, so an unfilled
+row can't pass. Evidence = a test name, a command's output or a rule that ran — "I believe it is done" is not
+evidence; write `PENDING — <what is missing>` until it exists. Add one `req_NN` line per requirement.
+
+- `trigger`: boundary `backend/app/core/sentry_config.py` (third-party data egress); mechanism: which Sentry
+  SDK event fields carry app/client data and are not yet scrubbed. Independent keyword pass: a fresh
+  general-purpose agent (no view of any plan), asked only for search keywords given the 6 mechanism names —
+  produced log injection/parameterized logging, credentials-in-URL, distributed-tracing/span, exception-chaining
+  terms; combined with my own list and run through `scripts/skill_sweep.sh` (whole-directory, ranked by match
+  count, not just familiar titles). Top hit (`Transaction_Authorization_Cheat_Sheet.md`, 23 matches) checked and
+  rejected as a false positive (banking transactions, not Sentry performance transactions) — ranking alone is
+  not relevance, confirmed by opening the file. Real hits: `Logging_Cheat_Sheet.md` "Data to exclude" (access
+  tokens, session ids — already partly cited in batch 1), ASVS 16.4.1 (log injection), 16.5.1 (generic error to
+  consumer), 14.2.1 (sensitive data never in URL/query string). TCASVS 6.1.2 (telemetry endpoints need TLS) —
+  applies, already satisfied (Sentry DSN is `https://`, no code change). WSTG: no new hit for this slice beyond
+  08-error-handling.md already used in batch 1. No dedicated Sentry/observability skill exists in this project
+  (checked `~/.claude/skills/` listing directly).
+- `blind_test`: SPLIT by mechanism, decided per the 2026-09-22 workflow resolution (`verification-workflow-
+  proposal.md`) — re-fixing/extending the ALREADY-EXISTING `scrub_event` mechanism (query_string, breadcrumb.data,
+  logentry.params, extra) uses author-written attack tests + 3-pass pilot on close, same as batch 1's fallback.
+  `before_send_transaction` is a GENUINELY NEW mechanism (doesn't exist in this codebase yet, zero tests) — this
+  one requires a blind-authored test per the resolution, scoped to that one hook only. DONE: a fresh
+  general-purpose agent, explicitly instructed not to read `sentry_config.py` or any Sentry-named file (worktree
+  isolation was unavailable in this environment — no git repo at the session's primary working directory — so
+  blinding relied on the prompt instruction alone, weaker than filesystem isolation, stated as such), given only
+  the field contract (confirmed real shapes from the req_01-05 probes), the two treatment strategies, and OWASP
+  WSTG-07/08 + ASVS 14.2.1 + Logging_Cheat_Sheet.md citations. Delivered 24 pytest functions attacking
+  request/breadcrumbs/extra/tags/measurements/spans/transaction-name/message-shape. Every finding reproduced by
+  the author against the real implementation before trusting it (rule 10.2) — see req_26-29 below for what was
+  real vs. false-positive vs. genuinely unreachable, each with its own live-verification evidence.
+- `hostile_inputs_tested`: the 20-case author catalogue in `test_sentry_config_hostile.py` (req_01-05) plus the
+  24-case blind-agent catalogue (triaged into req_26-29 below); run output under each req row.
+- `req_01`: HTTP query string must not reach Sentry as an unredacted value in either error or transaction
+  events | ASVS 14.2.1 (owasp-asvs-5/chapters/v14-data-protection.md:22); Logging_Cheat_Sheet.md "Data to
+  exclude" | applies | evidence (runtime probe, sentry-sdk 2.68.1, real FastAPI app + TestClient, custom
+  no-network Transport — not read from docs, which don't state the exact field path): a request to
+  `/probe?token=QUERYSECRET123&other=1` produces `event["request"]["query_string"] ==
+  "token=QUERYSECRET123&other=1"` verbatim, on BOTH the error event and the transaction event (transaction
+  events share the same `request` shape). `scrub_event` never touches `event["request"]` today — confirmed by
+  reading `sentry_config.py` directly (only `exception[].value`, `logentry.message/formatted`, `event.message`,
+  `breadcrumb.message` are touched). Fix: `_strip_query_string`/`_strip_url_path_and_query` in `sentry_config.py`
+  — FAIL CLOSED (whole field replaced/dropped), not selectively redacted (`redact_db_values` only recognises
+  Postgres shapes, does nothing for an arbitrary token). Test: `test_query_string_is_stripped_from_error_event_
+  request`, `..._from_transaction_event_request`, `..._embedded_inline_in_the_url_is_also_stripped`,
+  `test_a_clean_scheme_and_host_only_url_is_left_exactly_alone` (non-vacuity), `test_missing_request_field_does_
+  not_crash` — all pass on final code; the first 3 confirmed to FAIL on the pre-fix code (rule 10.1) in the
+  original round-1 reproduction for this slice.
+- `req_02`: breadcrumb `data` dict (e.g. an `http`-type breadcrumb's `url`/`query_string`) must not carry an
+  unredacted client value | same sources as req_01 | applies | evidence (same probe): a manually-added `http`
+  breadcrumb with `data={"url": "https://x/y", "query_string": "tok=BCSECRET"}` appears verbatim in
+  `event["breadcrumbs"]["values"][i]["data"]`; `scrub_event`'s breadcrumb loop only touches `crumb["message"]`,
+  never `crumb["data"]`, confirmed by reading the code. Fix: `_strip_query_string` reused on `crumb.get("data")`,
+  same fail-closed treatment as req_01. Test: `test_breadcrumb_data_query_string_is_stripped`,
+  `test_breadcrumb_data_url_with_inline_query_is_stripped`, `test_breadcrumb_message_still_redacted_alongside_
+  data` (non-regression: batch-1's message scrub still runs), `test_breadcrumb_with_no_data_field_does_not_
+  crash` — all pass; proven to fail on pre-fix code.
+- `req_03`: log-record interpolation args must not carry an unredacted client value | Logging_Cheat_Sheet.md
+  "Data to exclude"; ASVS 16.4.1 | applies — confirmed REACHABLE, not theoretical: grepped every `logger.*(`
+  call in `app/` first (`deps.py:62`, `deps.py:127`, `employees.py:78/151`, `health.py:41`, `main.py:175`) —
+  this project uses `%`-style logging exclusively (0 f-string logger calls; ruff's `LOG` rule enforces it) —
+  the exact shape that populates `logentry.params`. Evidence (same probe, real logging call `_probe_logger.
+  error("Auth failed for user %s with secret %s", "user-1", "LOGPARAMSECRET456")`):
+  `event["logentry"]["params"] == ["user-1", "LOGPARAMSECRET456"]`, raw, unredacted; `scrub_event` only touches
+  `logentry["message"]`/`["formatted"]`, never `["params"]`. Fix: `_redact_each_in` — each list element run
+  through `redact_db_values` individually, same choke point as `message`/`formatted` (this field IS a plausible
+  carrier of a real DB-echoed value, unlike query_string, so selective redaction is the right treatment here,
+  not fail-closed). Test: `test_logentry_params_with_a_db_echoed_value_are_redacted` (also asserts a safe param
+  survives — non-vacuity), `test_logentry_params_non_string_element_is_left_alone`, `test_missing_logentry_does_
+  not_crash` — all pass; proven to fail on pre-fix code.
+- `req_04`: performance/transaction events need their own scrub hook — `before_send` does NOT cover them |
+  verified live against Sentry's own docs (docs.sentry.io/platforms/python/configuration/filtering/,
+  2026-09-22, WebFetch, not assumed): "before_send_transaction hook, that does the same thing for
+  transactions" — a separate, currently-absent hook | applies | evidence: `sentry_config.py` grepped directly,
+  no `before_send_transaction` key anywhere; `sentry_init_kwargs` sets `traces_sample_rate: 1.0` (100% of
+  requests), confirmed by reading `main.py`'s comment and `sentry_config.py` together — every transaction has
+  been leaving unscrubbed (req_01's query_string leak applies to every one of them) since Sentry was wired up,
+  not a hypothetical. Root cause (D-adjacent, but not a stated trade-off — an unstated gap): batch 1's `req_23`
+  disposition already named this as BATCH 2 and did not silently drop it. This is the item requiring a
+  blind-authored test (new mechanism, no prior tests) per `blind_test` above. Fix: `sentry_init_kwargs` now sets
+  `before_send_transaction: scrub_event` (same function reused, not duplicated — every field access inside it is
+  `.get()`-guarded, confirmed safe against a transaction event's shape, which has no `exception`/`logentry`).
+  Test: `test_scrub_event_is_wired_as_both_before_send_and_before_send_transaction`, plus every req_01/req_26-27
+  test parametrized through `_transaction_event()` — pass; the wiring assertion fails on pre-fix code
+  (`KeyError: 'before_send_transaction'`). The blind agent's attack suite (24 tests, see `blind_test` row) also
+  exercised this hook's real shapes (request/breadcrumbs/extra/tags/measurements/spans) directly.
+- `req_05`: `event["extra"]` has zero scrubbing and zero enforcement against a future call site populating it
+  with app data | CODE_REVIEW_FINDINGS taxonomy (E), same shape as batch 1's `req_13` | applies as defense in
+  depth, not a currently-active leak | evidence: the probe's own `extra` was only the SDK's own default
+  (`{"sys.argv": [...]}` — not app data); no code in `app/` currently calls `sentry_sdk.set_extra`/
+  `scope.set_extra` (grepped, zero matches) — stated as a structural gap to close, not a proven live leak, same
+  honesty standard as batch 1's `req_17` known-limit framing. Fix REVISED after the blind-test pass (see req_28):
+  originally implemented as selective `redact_db_values` per string value; the blind agent's tests proved that
+  shallow, shape-based redaction misses a secret nested in a dict-of-list, a list-of-strings value, and a plain
+  secret under an innocuous key name. Changed to FAIL CLOSED — the whole `extra` dict is replaced if non-empty,
+  same reasoning as req_01's query_string (arbitrary shape, can't be safely pattern-matched). Test:
+  `test_extra_is_fail_closed_not_selectively_redacted` (nested/list/innocuous-key payloads combined in one
+  case), `test_extra_empty_dict_is_left_as_empty` (non-vacuity), `test_extra_missing_entirely_does_not_crash` —
+  all pass; proven to fail on the selective-redaction version.
+- `req_06`: multi-tenancy — this slice touches no tenant query, RLS policy or tenant context; the only rule
+  that applies is "do not send sensitive tenant data to a third party in plain text" | Multi_Tenant_Security_
+  Cheat_Sheet.md:979 | N/A for RLS/tenant queries, applies for the Sentry egress (covered by req_01-05) | same
+  reasoning as batch 1's `req_15`, re-confirmed for this slice's actual diff once written.
+- `req_07`: TCASVS 6.1.2 (telemetry endpoints enforce TLS 1.2+) | applies, already satisfied | evidence: Sentry
+  DSN is `https://` (checked `settings.SENTRY_DSN`'s expected format and `sentry_init_kwargs`); no code change
+  needed, stated so this isn't silently skipped.
+- BLIND-TEST FINDINGS (2026-09-22) — a fresh, attacker-mindset agent given only the contract in `blind_test`
+  above (not the implementation) delivered 24 pytest attack functions. Every one reproduced by the author
+  against the real implementation before being trusted (rule 10.2), not accepted on the agent's word:
+- `req_26`: `scrub_event` crashed with `AttributeError` when `event["breadcrumbs"]` was a bare list rather than
+  `{"values": [...]}` | ASVS 16.5.3 (owasp-asvs-5/chapters/v16-security-logging-error-handling.md:57, "no
+  fail-open... never process despite errors" — a crash inside `before_send`/`before_send_transaction` is a worse
+  failure than a leak) | applies | evidence: reproduced directly — `event.get("breadcrumbs", {}).get("values",
+  [])` on a bare list raises `AttributeError: 'list' object has no attribute 'get'` at the old call site. Fix:
+  `_breadcrumb_entries()` — type-checks the container at each level, degrades to "scrub nothing this round"
+  instead of raising; also guards each individual crumb entry being a non-dict. Test:
+  `test_breadcrumbs_as_a_bare_list_does_not_crash`, `test_breadcrumbs_non_dict_entry_in_the_list_does_not_crash`
+  — both pass; both confirmed to crash (not just fail an assertion) on the pre-fix code.
+- `req_27`: a parameterized route's raw matched PATH (not just the query string) can carry a literal client
+  value into `request["url"]`, even though `event["transaction"]` (the route name) is already safely templated
+  | ASVS 14.2.1 (URL/query string, not scoped to just the query component) | applies | evidence: live-verified
+  against the real FastAPI app + Sentry SDK (not the agent's guess, which hypothesized `event["transaction"]`
+  itself might be unparameterized — checked and found FALSE: `event["transaction"] == "/reset/{token}"`,
+  correctly templated, on BOTH error and transaction events). The real mechanism: `request["url"] ==
+  "http://testserver/reset/RESETTOKENSECRET999"`, the literal matched path, independent of the transaction
+  name. This app's current routes only ever put a UUID in a path segment (grepped every `@router.*` path in
+  `app/api/routes/` — `employee_id`, `issue_id`, `job_type_id`, `notification_id`, `task_id`, none are
+  token-shaped), so not a currently-active leak, but the mechanism is general and the route template is already
+  available for debugging via `event["transaction"]`, so nothing is lost by closing it now. Fix:
+  `_strip_url_path_and_query` — drops the URL down to scheme+host only. Test:
+  `test_a_secret_path_segment_with_no_query_string_is_also_stripped`,
+  `test_the_safe_route_template_in_transaction_field_is_never_touched` (non-vacuity: the safe field this fix
+  relies on isn't itself touched) — both pass; the first confirmed to fail on the pre-fix code.
+- `req_28`: disposition of the blind agent's other findings, none silently dropped — checked live, confirmed NOT
+  reachable in this app's real configuration, so no code change made:
+  - `request.headers["Authorization"/"Cookie"]`: Sentry's SDK already filters these to `"[Filtered]"` BEFORE
+    `before_send` is ever called (confirmed live: a real request with `Authorization`/`Cookie` headers produces
+    `headers: {"authorization": "[Filtered]", "cookie": "[Filtered]"}` in the actual event, on both hooks). The
+    blind test's hand-built dict bypassed this upstream SDK filtering entirely, which is why it failed against
+    `scrub_event` called directly — not representative of what a real event contains.
+  - `request.cookies` (a separate field from `headers.cookie`): confirmed live NOT populated at all by this
+    app's real SDK config (`send_default_pii=False` gates it) — the real `request` dict has no `"cookies"` key.
+  - `span.data["db.statement"]`/`http.url` (DB/HTTP auto-instrumentation spans): verified live against the real
+    engine — a query through `app.core.db.engine` (which has `hide_parameters=True`) produces a span
+    `description` of `"SELECT %(v)s AS x"` (parameterized, not literal) and a `data` dict with only connection
+    metadata (`db.system`, `db.driver.name`, `db.name`, `server.address/port`) — no `db.statement` key at all,
+    confirmed the planted secret is absent from the whole transaction JSON. Outbound HTTP span query-string
+    leakage checked separately: grepped `supabase_admin.py`, zero uses of query-string params in any outbound
+    call — unreachable today either way.
+  - `tags`/`measurements` free-text: grepped `app/` for `set_tag`/`set_measurement` — the only real call site is
+    `deps.py:100`'s `set_tag("tenant_id", str(firm_id))`, a UUID, matching this project's existing UUID-only-is-
+    acceptable pattern (same as batch 1's `employees.py:182` treatment); `set_measurement` has zero call sites.
+  - `event["message"]` as a structured object (`{"message":..., "params":[...]}`): the app's own probe (req_01)
+    already confirmed `event["message"]` is always a plain string for this SDK/integration; the object-interface
+    shape the agent hypothesized applies to `event["logentry"]` (already fully handled, req_03), not to
+    `event["message"]` as a separate top-level key.
+  - `request["query_string"]`/breadcrumb `data["query_string"]` as a list-of-tuples (not a plain string): the
+    app's own probe (req_01/req_02) already confirmed this SDK/integration always produces a plain string for
+    both fields; the agent flagged this shape as unverified general Sentry-SDK knowledge, not skill- or
+    probe-verified, consistent with that.
+- `req_29`: full backend suite after all batch-2 slice-1 fixes (rounds 1+2 combined), guarded, `obs-pg` up:
+  first run after round 1 (query_string/breadcrumb.data/logentry.params/before_send_transaction) 6,957 passed;
+  final run after round 2 (crash fix, url-path strip, extra fail-closed) 6,962 passed, 0 failed, 0 errors, 12
+  skipped (204s, 2026-09-22). `ruff check`/`ruff format --check` and strict pyright clean on `sentry_config.py`
+  and `test_sentry_config_hostile.py`.
+
+- `req_30`: BATCH 2 SLICE 2 — a chained Supabase Auth exception's raw message (can echo caller-supplied data,
+  e.g. an email address) must not reach Sentry via `raise HTTPException(...) from exc`, even though the log
+  line at the same call site already hides it (`describe_auth_error`) | ASVS 16.2.5 (owasp-asvs-5/chapters/
+  v16-security-logging-error-handling.md:27); WSTG-ERRH-01 ("raw exceptions from dependent services",
+  owasp-wstg/chapters/08-error-handling.md); named as a batch-2 item in req_23 above | applies | evidence:
+  runtime probe (session scratchpad `sentry_probe_authchain.py`) against this app's REAL `sentry_init_kwargs`
+  (not a raw/unscrubbed probe) proved the leak live BEFORE any fix: `create_employee`'s exact pattern
+  (`AuthApiError('Email address "x@y" is invalid')` chained via `from exc` into `HTTPException(500, ...)`)
+  produced a captured, SCRUBBED event that still contained the raw email — `redact_db_values` is
+  Postgres-shape-only and does nothing for this message shape. Fixed in `scrub_event`/`_scrub_exception_value`
+  (`sentry_config.py`): FAIL CLOSED by `module == "supabase_auth.errors"` (present on every real captured
+  entry, confirmed live — not a hardcoded class-name list, so it covers every `AuthError` subclass including
+  ones the library adds later), replacing `value` with a fixed placeholder while leaving `type`/`module`
+  visible for debugging (same level of detail `describe_auth_error` already gives the log line). Re-ran the
+  identical probe after the fix: `SECRET EMAIL present anywhere in scrubbed event? False`, `type='AuthApiError'`
+  still visible. The chained JWT path (`core/security.py`'s `InvalidTokenError(str(exc))`) was checked the same
+  way and found NOT to need this fix: PyJWT's `aud`/`iss` validators raise fixed-string messages only (grepped
+  `jwt/api_jwt.py`, no f-string embeds a claim value); its `DecodeError(f"...: {e}")` wraps a
+  `json.JSONDecodeError`, whose message is a position description, confirmed live (`json.loads` on a hostile
+  string) never to embed the attacker-supplied payload itself — recorded as checked-and-not-applicable, not
+  silently skipped.
+
+- `req_31`: root cause (B) two individually-correct subsystems, uncorrected interaction (CODE_REVIEW_FINDINGS
+  taxonomy) — the log-line scrub (`describe_auth_error`) and Python's own exception-chaining/Sentry's
+  automatic chain capture are each correct in isolation; nobody had checked what happens where they meet |
+  CODE_REVIEW_FINDINGS_2026-09-14.md taxonomy (B); same shape as batch 1's uvicorn-second-traceback finding |
+  applies | evidence: scoped the fix by first enumerating every `raise ... from exc`/`from e` call site in
+  `app/` (`grep -rn "from exc\b|from e\b" app/`, 15 matches across employees.py, job_types.py, tasks.py,
+  issues.py, crud.py, security.py) before writing any code, not fixing only the one call site the leak was
+  first found at — the fix lives in the shared `scrub_event` mechanism, so it automatically covers every
+  current and future `raise ... from <AuthError>` site in the app, not just `employees.py`'s two. The other
+  chained exceptions at those sites (SQLAlchemy `IntegrityError`/generic validation errors) already go through
+  `redact_db_values`'s Postgres-shape recognition (req_02/req_08, batch 1) or are plain internal messages with
+  no external-echo risk — checked, not assumed.
+
+- `req_32`: tests — 10 new tests in `test_sentry_config_hostile.py` (chained AuthApiError stripped;
+  `type`/`module` left visible; the outer non-auth exception in the chain untouched; a different AuthError
+  subclass also stripped, proving the match is by module not class name; ordinary non-auth exceptions still go
+  through `redact_db_values` unchanged — non-regression; a plain safe message like "division by zero" left
+  exactly alone — non-vacuity; `event["exception"]` as a non-dict, missing `values` key, a non-dict list entry,
+  and an auth-error entry with no `value` key, all must not crash). 100% line and branch coverage on
+  `sentry_config.py` (`pytest --cov`, confirmed by running it). Negative control (rule 10.1): `git stash push --
+  backend/app/core/sentry_config.py` to isolate the source fix from the new tests, re-ran the first 9 new tests
+  — 3 failed exactly as expected (both auth-leak assertions, plus the non-dict-`exception`-field crash test), 6
+  passed unaffected; `git stash pop` restored the fix. The 10th test (`test_auth_error_entry_with_no_value_key_
+  does_not_crash`, added afterward to close a coverage-branch gap) was separately checked against the pre-fix
+  code and correctly PASSES either way — it is a crash-safety/coverage test, not a fix-effect test, same
+  pattern as this file's other "does not crash" tests, so rule 10.1 doesn't require it to fail pre-fix. Full
+  34/34 pass on the final code (later 41/41 after req_34's mutation-testing fixes). `ruff check`, `ruff format
+  --check`, strict `pyright` clean on both files (0 errors). **Full-backend-suite parity run (matching req_29's
+  rigor for slice 1): DONE**, after the user asked to start Docker (see req_34) — `gpt.sh` with no path scope,
+  `obs-pg` up: 6,978 passed, 0 failed, 0 errors, 14 skipped, 226s.
+
+- `req_33`: failure mode 11 — independent-review decision asked, not assumed | docs/skill-verification-
+  discipline.md failure-mode-11 convention (SECURITY_AUDIT_CHECKLIST.md's own numbering, see req_11 above for
+  precedent) | applies | evidence: the user was explicitly asked, via AskUserQuestion, whether to run an
+  independent blind attacker-mindset test on this slice before considering it done (same as slice 1 got); the
+  user chose "Skip it for this slice" with the stated reasoning (narrow fix, already covered by slice 1's
+  broader mechanism which did get a blind test, leak proven live against production wiring, negative control
+  already run) — a decision made explicitly, not defaulted to by not asking.
+
+- `req_34`: mutation testing on `sentry_config.py` (the user explicitly asked to start Docker and run it, after
+  req_30-33 above were already closed) | verification-and-shipping-discipline (mutation testing as a check on
+  whether tests actually assert the right thing, not just execute the code) | applies | evidence: `mutmut`
+  doesn't run on native Windows, so this ran in a Linux container against a temporary `[tool.mutmut]` override
+  (`source_paths = ["app/core/sentry_config.py"]`, whole-file not diff-only, reverted via `git checkout` once
+  done — confirmed reverted, `git diff --stat backend/pyproject.toml` empty). First run (host bind-mounted,
+  `.venv` inside the mount): 154 mutants, 117 killed / 37 survived. Every survivor inspected via `mutmut show`,
+  not just counted — all were real assertion-strength gaps (tests checking "secret absent" via `in`/`str()`,
+  which also passes trivially against a mutant that replaces the field with `None`, or checking presence
+  without checking the exact key/value), the same lesson batch 1's own mutation pass already taught this
+  project (req_11). Closed with 7 new/strengthened tests (exact-type assertions on the auth-strip/fragment/
+  extra fields; a bare-host-with-only-a-query test and a bare-host-with-only-a-fragment test for the url
+  stripper; a `logentry.message`-alone test distinct from `formatted`; a comprehensive `sentry_init_kwargs`
+  dict-shape test; a breadcrumbs-after-a-non-dict-entry test proving `continue` not `break`). Re-run (properly
+  isolated this time, host mounted read-only + copied inside the container): **154/154 killed (100%)**,
+  `mutmut results` empty. Full local suite after all fixes: 41/41 pass, 100% line/branch coverage, ruff/pyright
+  clean.
+
+  **Incident, disclosed in full because the user directly asked "is anything corrupted/leaked" and the honest
+  answer was yes, twice:** the first container run bind-mounted the live `backend/` directory read-write with
+  no venv isolation, so `uv sync` inside the Linux container overwrote the host's Windows `.venv` with a Linux
+  one — caught when a subsequent local pytest run failed with a Windows/Linux path mismatch, fixed by deleting
+  and rebuilding via `uv sync` natively (verified working: `platform win32`, tests passed). A second attempt,
+  meant to fix this by setting `UV_PROJECT_ENVIRONMENT=/tmp/venv` while STILL bind-mounting `backend/` as
+  `/repo` read-write, corrupted `.venv` again *and* leaked a 205MB duplicate Linux venv into a stray directory
+  (`backend/C:/Users/VAIBHA~1/AppData/Local/Temp/venv/` — a Windows-style absolute path string that `uv`/mutmut
+  inside the container misresolved as a literal relative pathname once it crossed back into the Windows-hosted
+  bind mount). This was NOT caught by the author before the user asked — the author's own status update after
+  fixing incident #1 said venv corruption was resolved without re-checking for a second occurrence. Found and
+  fixed only because the user asked directly. Full sweep after the user's question: `find` for anything
+  modified since the incident window, `git status --short --ignored` across the whole repo, `ls` of `backend/`
+  top level — confirmed only the intended 4 tracked file changes plus the pre-existing untracked `scripts/`;
+  the stray `C:` directory and both corrupted `.venv` instances were the only leaks, both removed, `.venv`
+  rebuilt and functionally reverified (`pytest`, not just a file-layout check). All subsequent container runs
+  used a read-only host mount with an in-container copy, confirmed leak-free by the same sweep after each run.
+
+- `req_35`: BATCH 2 SLICE 3 (LAST SLICE) — @sentry/browser's own `fetch`/`xhr`/`navigation` breadcrumb
+  instrumentation populates `data.url` (fetch/xhr) and `data.from`/`data.to` (navigation) with the literal,
+  unsanitised request/route string, including query string and fragment | ASVS 14.2.1 (owasp-asvs-5/chapters/
+  v14-data-protection.md:22, "never in URL/query string"), ASVS 14.2.3 ("never sent to untrusted parties");
+  Third_Party_Javascript_Management_Cheat_Sheet.md "Risk 3: Disclosure of sensitive information to 3rd parties"
+  (Sentry is exactly this: the browser contacts Sentry's servers directly with breadcrumb data);
+  Logging_Vocabulary_Cheat_Sheet.md:848 (same principle already stated there for CSP reports — "strip the query
+  string/fragment before logging"); named as an outstanding batch-2 item in req_23 above | applies | evidence:
+  read the INSTALLED SDK source directly (mode 9, not assumed from docs) —
+  `node_modules/@sentry/browser/build/npm/esm/prod/integrations/breadcrumbs.js` `_getXhrBreadcrumbHandler`/
+  `_getFetchBreadcrumbHandler` build `data` from `sentryXhrData`/`fetchData` with no sanitisation;
+  `node_modules/@sentry/browser-utils/.../instrument/xhr.js` confirms `url` is exactly the string this app's own
+  `api-client.ts` passed to `fetch(\`${env.API_BASE_URL}${path}\`)`; `_getHistoryBreadcrumbHandler` builds
+  `from`/`to` via `@sentry/core`'s `parseUrl`, whose `.relative` field is literally `path + query + fragment`
+  for a same-origin URL (read `node_modules/@sentry/core/build/esm/utils/url.js` directly). This app's own
+  EXISTING tests already encoded the leak as a requirement before this fix — `sentry-context.test.ts`'s
+  `"passes network and navigation breadcrumbs through unchanged"` and `sentry-context.hostile.test.ts`'s
+  `it.each(["fetch","xhr","navigation",...])("passes %s through unchanged")` both asserted the pre-fix
+  (vulnerable) behavior verbatim, confirming this was a real, reachable gap, not a hypothetical one. Fixed in
+  `scrubBreadcrumb` (`sentry-context.ts`): a new `stripUrlsFromData` strips `data.url`/`from`/`to` to
+  scheme+host only via `new URL(value, window.location.origin).origin`, falling back to a fixed placeholder on
+  a value that isn't a string or that `new URL` itself can't parse. Deliberately mirrors the backend's own
+  already-reviewed `_strip_url_path_and_query` (`sentry_config.py`, batch 2 slice 1) rather than inventing a
+  second convention for the same problem — same ASVS 14.2.1 reasoning, same accepted debuggability cost (which
+  endpoint/page is no longer visible from the breadcrumb alone), avoiding CODE_REVIEW_FINDINGS root-cause (A)
+  by using the identical strip-not-parse pattern instead of a frontend-specific reinvention.
+
+- `req_36`: failure mode 7 — an already-vetted shared mechanism (`scrubBreadcrumb`, vetted 2026-09-21 for the
+  `ui.*`/`console` categories) reused on a new call site (`fetch`/`xhr`/`navigation`) without assuming the prior
+  vetting covers it | docs/skill-verification-discipline.md failure mode 7 | applies | evidence: explicitly
+  asked what's different about this call site's data before writing the fix — the `ui.*` fix's own reasoning
+  (attacker-controlled text with no safe grammar to parse) does NOT directly transfer, because `fetch`/`xhr`/
+  `navigation` data is not attacker-controlled DOM content, it is this app's own constructed URLs (confirmed via
+  `api-client.ts`) — the risk is query-string VALUES (search terms, emails), not markup-injection-style parsing
+  attacks. This is why the fix is a new, URL-shape-aware helper (`stripUrlPathAndQuery`) rather than reusing the
+  `ui.*` branch's fixed-placeholder-and-delete approach unchanged.
+
+- `req_37`: tests — 51 new/changed hostile-input tests in `sentry-context.hostile.test.ts` (16 hostile URL
+  payloads × 3 fields [url/from/to]: plain query, fragment-only, query+fragment, embedded credentials, relative
+  with query, dot-relative, protocol-relative, double-encoded, 50 stacked params, `javascript:`/`data:` URIs,
+  unicode, newline-in-query, a 60KB query string, plain non-URL text, empty string; plus non-string-value
+  fail-closed, no-data tolerance, idempotency) and 3 new/changed tests in `sentry-context.test.ts` (fetch
+  url-stripping keeps method/status_code, navigation from/to stripping, unparseable-URL placeholder fallback).
+  100% line/branch/function/statement coverage on `sentry-context.ts` (`coverage-summary.json`, confirmed via
+  `node -e` read of the real JSON output, not the text reporter's table — which silently omits fully-covered
+  files, discovered mid-verification and cross-checked this way instead of trusted at face value). Negative
+  control (rule 10.1): `git stash push -- frontend/src/lib/sentry-context.ts` to isolate the source fix from the
+  new/changed tests, reran both test files — **48 of 247 tests failed** exactly as expected (every new
+  URL-stripping assertion, the fetch/xhr/navigation-keeps-fields tests, the negative "not.toContain" checks);
+  `git stash pop` restored the fix, full rerun: 248/248 pass. One hostile test caught a REAL gap in my own first
+  draft before this was ever reported done: a non-string `data.url`/`from`/`to` (array/object) was left
+  untouched by a naive `typeof === "string"` guard, which could leak if the SDK or a future caller ever put a
+  non-string value there — fixed to fail closed on the key's presence, not its shape (mirrors
+  `_exception_entries`/`_breadcrumb_entries`'s tolerance on the backend). Full frontend suite: `npx vitest run`
+  → **385/385 pass**, 27 files, no regressions. `npx tsc --noEmit` clean; `npx eslint` on the 3 changed files
+  clean (0 errors).
+
+- `req_38`: failure mode 11 — independent-review decision asked, not assumed | docs/skill-verification-
+  discipline.md failure-mode-11 convention | applies | evidence: asked via `AskUserQuestion` whether this slice
+  should get an independent blind-test pass (a fresh agent, isolated worktree, contract-only, no view of the fix
+  or these tests) before being considered done, same as batch 1's `ui.*` scrubber got and slice 2 was asked
+  about; user chose "Skip it, same as slice 2" — a decision made explicitly each time it comes up, not carried
+  forward automatically from the slice 2 answer.
+
+- `req_39`: mutation testing on `sentry-context.ts` attempted via Stryker first (`npx stryker run
+  --mutate "src/lib/sentry-context.ts"`, no config-file edit needed — scoped via the CLI flag) |
+  verification-and-shipping-discipline (mutation testing as a check on whether tests actually assert
+  the right thing, not just execute the code) | BLOCKED — Stryker itself is broken on this machine, not
+  a code/test issue: first run reported a nonsensical `37.50%` score (1 killed / 14 timeout / 25
+  survived / 21 errors out of 61 mutants); a `--logLevel debug` re-run crashed immediately with
+  `StrykerError: TypeError: Converting circular structure to JSON` inside
+  `@stryker-mutator/vitest-runner`'s own `VitestTestRunner.init` (full traceback in the debug log,
+  session scratchpad `stryker_debug.log`) — a known-shape incompatibility between the installed
+  `vitest@5.0.0` and `@stryker-mutator/vitest-runner@10.0.0` (Vitest 5's resolved config has a
+  circular reference Stryker's worker-serialization step wasn't built to handle), confirmed to crash
+  BEFORE any mutant's test run — not something slice 3's code triggered. Per mode 11, asked the user
+  how to proceed (fix the shared frontend tooling / accept without mutation testing / hand-roll a
+  harness for this one file) rather than picking unilaterally; user chose the hand-rolled harness.
+
+- `req_40`: hand-rolled mutation harness for `sentry-context.ts`, same pattern as backend batch 1's
+  `mutate_pass2.py` | verification-and-shipping-discipline; docs/skill-verification-discipline.md rule
+  10.2-adjacent (an independent check that tests catch real logic breaks, not just execute) | applies |
+  evidence: session-scratchpad `mutate_sentry_context.mjs` — 11 targeted mutations of the slice's real
+  logic (keep full URL instead of stripping to origin; drop the `new URL` base argument; fail OPEN
+  instead of closed on an unparseable URL; remove the `!data` guard; drop `"url"` from `URL_KEYS`;
+  make the key-presence check always false; flip the string-type ternary; remove the category
+  `typeof` guard; break the `"console"` literal match; make the `ui` prefix check always true; delete
+  the `stripUrlsFromData` call entirely), each applied via an exact-line match (throws loudly on any
+  drift, so it can't silently mutate the wrong line), the real two test files run against each, then
+  restored — restoration verified byte-for-byte identical to the original after every run, not
+  assumed. First run: **9/11 killed, 2 survived**, both real gaps, not equivalents — inspected by hand,
+  not just counted: (a) removing the URL base argument makes every *relative* (same-origin) URL throw
+  on parse and silently fall back to the placeholder, which still passes a "no leak" assertion since
+  the placeholder also contains no secret — the test never checked the *correct* value for a benign
+  case, the exact same "checked absence, not the real value" lesson req_34's mutmut round and batch
+  1's req_11 already taught this project; (b) no hostile test exercised a non-string, non-nullish
+  `category` (e.g. a number) — a mutant using `?.`/`??` instead of the `typeof` guard behaves
+  identically for `null`/`undefined` (already covered) but crashes on `(123).toLowerCase is not a
+  function`, uncaught by anything. Closed with 2 new tests: one asserting a benign relative
+  navigation URL resolves to the real `window.location.origin` (not the placeholder), one
+  `it.each([123, true, {}, [], () => 1])` proving `scrubBreadcrumb` doesn't throw on a non-string,
+  non-nullish category. Re-run: **11/11 killed, 0 survived**, file restored exactly (byte-for-byte
+  check passed). Full re-verification after the fix: 254/254 pass on the two changed files
+  (negative control re-run too: 50/254 correctly fail on pre-fix code, up from 48 — confirms the 2
+  new tests also fail pre-fix); full frontend suite 391/391 pass, 27 files; 100% line/branch/function/
+  statement coverage on `sentry-context.ts` (`coverage-summary.json`, read directly, not the
+  text-reporter table which hides fully-covered files); `npx tsc --noEmit` and `npx eslint` on all 3
+  changed files both clean.
+
+### Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 1: 3-round fix + 3-pass re-review pilot (2026-09-21 to 2026-09-22)
+
+```
+status: complete
+phase: Phase 5 (Hardening) — Observability Phase 1, independent-review fixes, BATCH 1 (pilot of VERIFICATION_WORKFLOW.md). Round 1 (2026-09-21): four confirmed leaks reproduced after the 2026-09-19 review (blank-line-terminated values, ExceptionGroup rail bypass, quadratic regex, frontend attribute-value regex gap) plus two Supabase log sinks. Round 2 (2026-09-22): an independent attacker pass found the real app under real uvicorn printed a second unredacted traceback and re-enabled its own access log, plus ExceptionGroup-layout forgery, unrecognised Postgres message shapes, a stdlib handleError print and an enforcement gap. Re-review pilot (2026-09-22): pass 1 (attacker) = round 2 above; pass 2 (test critic, code+tests) found 2 real test gaps in already-correct code; pass 3 (docs-vs-code claims checker) found 2 stale evidence numbers in this document, no code/test issue. Every finding from every pass was reproduced by the author before any fix (rule 10.1/10.2), given a failing test first, then closed. Batches 2-3 (remaining 2026-09-19 review findings, e.g. Sentry logentry.params/extra/breadcrumb data, chained AuthError) are separate, not-yet-started passes.
+scope_files: backend/app/core/redaction.py, backend/app/core/supabase_admin.py, backend/app/api/routes/employees.py, backend/app/core/logging_setup.py, backend/app/main.py (round 2: uvicorn logger takeover + lifespan, handleError), frontend/src/lib/sentry-context.ts; tests backend/tests/core/test_redaction_hostile.py, backend/tests/core/test_log_sinks_hostile.py, backend/tests/core/test_uvicorn_logging.py (new), frontend/src/lib/sentry-context.hostile.test.ts, frontend/src/lib/sentry-context.test.ts (updated); docs/OBSERVABILITY.md
+date: 2026-09-21, round 2 closed 2026-09-22, re-review pilot closed 2026-09-22
+commit: (pending — uncommitted, branch phase5/tenant-isolation-defense-in-depth, base 6488fe6)
+```
+
+- `trigger`: boundary paths `backend/app/core/` and `frontend/src/lib/`; mechanisms: regex over untrusted text (redaction.py, sentry-context.ts) and log/exception text handling. Start scan done BY HAND (no script yet): greps of owasp-asvs-5, owasp-cheatsheets, owasp-tcasvs and owasp-wstg by "ReDoS|regular expression|backtrack" and by "sensitive ... log|error message|exception|stack trace". It surfaced ASVS 1.3.12 and Input_Validation_Cheat_Sheet.md:33 (no `.` wildcard on untrusted input) that the original build never consulted.
+- `blind_test`: yes — data-boundary code (scrubbers). Author: a fresh Sonnet agent in a HEAD worktree where the implementation does not exist, given only the contract, public signatures, owasp-wstg chapters 07 and 08 and the requirement rows below. It is deliberately NOT told the four known bug shapes, so what it finds on its own calibrates the pilot. The fixer does not read the delivered tests until the code is written. UPDATE 2026-09-21: the delivered suite proved too memory-heavy to run on this laptop (every crash on 2026-09-20 lined up with running it), so batch 1 uses my OWN small attack-mindset tests written FIRST, derived from the contract, real Postgres output and WSTG-ERRH-01 and not from the regex structure, and the blind suite is run only as a second opinion under a hard memory limit if that works. This is a departure from full 10.2 independence and is recorded here as such.
+- `hostile_inputs_tested`: evidence: NOT from the blind author's files (not run, see req_06) but from the author's own catalogue, listed under req_10; run output under req_02.
+- `req_01`: regexes over untrusted text are free of exponential/quadratic backtracking, anchored to the whole input, use no `.` wildcard, and input length is bounded | ASVS 1.3.12 (owasp-asvs-5/chapters/v1-encoding-sanitization.md:52, L3); Input_Validation_Cheat_Sheet.md:33,75 | applies: redaction.py `_ECHOED_QUOTED_VALUE`, sentry-context.ts `ATTRIBUTE_VALUES` | evidence: backend `test_redaction_time_is_linear_not_quadratic` (9 input shapes, doubling the input) and `test_huge_hostile_input_finishes_quickly_and_the_work_is_bounded` (9 shapes) pass; input is cut at 64 KB (`_MAX_INPUT`); the quadratic `_ECHOED_QUOTED_VALUE` is gone. Negative control: on the unfixed code the scaling test failed (116 s); mutant M01 (no cap) KILLED. Frontend: the `ATTRIBUTE_VALUES` regex is deleted, so nothing is left to backtrack; `sentry-context.hostile.test.ts` time-bound shapes pass; mutant B5 (regex scrubbing back) KILLED.
+- `req_02`: sensitive data must not reach logs or events | TCASVS 3.2.3 (owasp-tcasvs/chapters/v3-data-storage-protection.md:25); ASVS 16.2.5 (owasp-asvs-5/chapters/v16-security-logging-error-handling.md:27); Logging_Cheat_Sheet.md:188; Multi_Tenant_Security_Cheat_Sheet.md:979 | applies | evidence (2026-09-21, batch 1 as first written): `test_no_container_leaks_a_hostile_value`: 9 real Postgres error kinds x 45 hostile payloads x 7 containers (text, chain, group, log arg, log exc chain, log exc group, Sentry event) = 2,828 passed, 7 skipped (unique-index size limit, by design). Also `test_a_sqlalchemy_wrapped_error_is_scrubbed` 252 passed (hide_parameters on and off), `LINE n:` inline literal 5, numeric out-of-range 1. On the unfixed code: 683 failures. Full backend suite on the final code (guarded, 2026-09-21): 4,019 passed, 9 skipped, 1 strict xfail (req_17), 0 failed. **UPDATE (2026-09-22, pass 3 of the re-review caught this number going stale):** `_KINDS`, `_SAFE_PAYLOADS` and `_CONTAINERS` grew across req_18 (+5 group-forge payloads, +2 group containers) and req_24 (+3 real-Postgres kinds already counted in req_19, +2 payloads). Counted directly against the current file: 12 kinds x 52 payloads x 9 containers = 5,616 parametrizations, 5,607 passed / 9 skipped (same skip rule, now matching 1 payload x 9 containers). The arithmetic was always internally consistent with each row's own additions; only this summary line had not been recomputed. Full backend suite on the final code (guarded, 2026-09-22): 6,942 passed, 12 skipped, 1 strict xfail, 0 failed (see req_24's summary line).
+- `req_03`: exceptions are handled without leaking sensitive information, including ExceptionGroup members and chained causes | TCASVS 4.6.1 (owasp-tcasvs/chapters/v4-code-quality-exploit-mitigation.md:67) | applies | evidence: the `chain` (`raise ... from ...`) and `group` (real `ExceptionGroup`) containers and the two `log_exc_*` containers, 404 passed each; `test_an_exception_group_keeps_everything_after_the_scrubbed_value` (9 kinds: the next group member survives). Mutants M04 (rails not peeled) and M21 (group format never detected) KILLED.
+- `req_04`: a log record stays one valid JSON line whatever the message contains (log injection) | Logging_Cheat_Sheet.md:232 | applies, as a regression check | evidence: every log-line container asserts the output has no newline or carriage return and that `json.loads` succeeds, for every kind x payload (included in the 2,828 under req_02).
+- `req_05`: the API consumer gets a generic error | ASVS 16.5.1 (owasp-asvs-5/chapters/v16-security-logging-error-handling.md:55) | applies to ONE file, corrected from the original N/A: `backend/app/api/routes/employees.py` changed by one import, two log statements and a comment; the HTTP responses the client sees are untouched (`Email already in use`, `Could not create employee account`, `Could not reset employee password`) | evidence: `git diff 7a55dc4 -- backend/app/api/routes/employees.py` shows exactly that; no other file under backend/app/api/ changed; the full backend suite (which includes the employees API tests) passed.
+- `req_06`: attack-intent tests written independently, before the fix | owasp-wstg chapters 07-input-validation.md and 08-error-handling.md; skill-verification-discipline.md failure mode 10.2 | applies | evidence: PARTLY MET, stated. The tests were written by the same author BEFORE the fix, derived from the contract, real Postgres output and WSTG-ERRH-01 rather than from the regexes (req_10), and proven to fail on the unfixed code and against mutants (req_11). The independent blind suite (fresh Sonnet agent, HEAD worktree) was delivered but NOT run: it exhausted this laptop's memory, and a guarded second-opinion run has not been done. Failure mode 10.2 is therefore met only in its weaker form.
+- `req_07`: redaction must FAIL CLOSED — an internal error in the redactor must never emit the raw text | ASVS 16.5.3 (owasp-asvs-5/chapters/v16-security-logging-error-handling.md:57) | applies | evidence: `test_a_failing_redactor_fails_closed` (forces an internal failure; the secret must not come out and a visible placeholder must) and `test_a_non_string_argument_fails_closed_and_never_echoes_itself` (None, int, bytes, an exception, a list: each returns `[exception text withheld: redaction failed]`, never `str(arg)`) pass. Negative controls on the final code: M02 (fails open) and M22 (non-str coerced with `str()`) both KILLED. A real pyright finding (a redundant `isinstance` that hid this path) led to the simplification.
+- `req_08`: failure mode 7 — the exception-text sinks carry a different kind of data (database-echoed client values) than the log formatter was vetted for | docs/skill-verification-discipline.md failure mode 7 | applies | evidence: every place exception text can leave the backend, enumerated by grep of app/ on 2026-09-21, line numbers re-checked 2026-09-22 (pass 3 of the re-review caught main.py's having moved). logging_setup.py:73-75 the JSON formatter, the choke point (message and exc redacted). main.py:175 (was :157 before round 2 added the uvicorn/lifespan code) `logger.exception` (route template only; traceback through the formatter). crud.py:228 `logger.exception` (message has only a UUID; traceback through the formatter; the exception is a Supabase Auth delete-by-UUID error, which the redactor does not recognise: RESIDUAL, low risk because the call is keyed by a UUID, not proven). deps.py:62 PyJWT reason (allowlisted; messages verified static). employees.py:78 and :151 FIXED: class, status and Supabase code only (`describe_auth_error`). employees.py:182 UUID only. health.py:41 class name only. Sentry `before_send` (sentry_config.py) redacts exception values, message, logentry message/formatted and breadcrumb messages; NOT yet covered (batch 2): `logentry.params`, `extra`, breadcrumb `data`, `before_send_transaction`.
+- `req_09`: root cause (A) fix-at-one-site, never propagated — sweep every sink, not just the one where the bug was found | docs/CODE_REVIEW_FINDINGS_2026-09-14.md taxonomy (A) | applies | evidence: same enumeration as req_08. The bare-exception-in-a-log-line pattern was swept across all of app/: the two Supabase sites were found and fixed, and the sweep is now a test (req_13), so it is not a one-time grep.
+- `req_10`: root cause (C) missing negative-path test — tests are attack-shaped, derived from the contract, real Postgres output and WSTG-ERRH-01 (oversized strings, CRLF, mismatched data), NOT from the shape of my own regexes | CODE_REVIEW_FINDINGS taxonomy (C); owasp-wstg/chapters/08-error-handling.md WSTG-ERRH-01 | applies | evidence: the catalogue is in `tests/core/test_redaction_hostile.py`: `_SAFE_PAYLOADS` (45 as first written; 52 as of 2026-09-22, counted directly against the file — see req_02's update, req_18 and req_24 for the additions: quotes, blank lines, CRLF, Unicode separators U+2028/2029/0085, vertical tab, rails, label and structure mimicry, natural client text such as bullet lists and 'Client: x' lines, 60 KB lines, format-string lookalikes, 5 ExceptionGroup-forge shapes, 2 pass-2 findings) and `_FORGED_PAYLOADS` (6); `test_log_sinks_hostile.py` (9 message shapes x 8 codes x 4 Supabase error classes, 6 statuses); frontend `sentry-context.hostile.test.ts` (21 payloads x 7 categories x 6 shapes). Sources: WSTG-ERRH-01 and real Postgres output, not the redactor's regexes. Run output under req_02.
+- `req_11`: failure mode 10.1 — every new test is shown to FAIL on the unfixed code (commit 7a55dc4) and mutants of the fix are killed | docs/skill-verification-discipline.md failure mode 10 and rule 10.1 | applies | evidence: (a) on the unfixed code (checkpoint 7a55dc4) the new tests fail: backend 683 failures plus a timeout on the scaling test, frontend 156 of 172. (b) Mutants of the FINAL code, each applied then restored with a hash check: redactor 22 of 22 KILLED (M01-M22; the first pass killed 18 of 21 and exposed two real test gaps, the SQLAlchemy `[SQL: ...]` lines (M07) and the next ExceptionGroup member (M21), plus one harness bug where M14 was placed where it could never run; all fixed and re-run); Supabase sinks 5 of 5 KILLED; frontend scrubber and tenant tag 15 of 15 KILLED. Baseline of the redaction file on the final code: 3,178 passed, 7 skipped, 1 xfailed. Harness: session scratchpad `mutate_redaction.py`, `mutate_sinks.py`, `mutate_fe2.py` (not committed).
+- `req_12`: failure mode 9 — verified at runtime against the real engine and real exception types, not by reading code | docs/skill-verification-discipline.md failure mode 9 | applies | evidence: every database error is provoked live on the local Docker Postgres (`obs-pg`, `TEST_MIGRATIONS_DATABASE_URL`), never typed by hand; each test asserts the marker really is in the raw error first (`marker in str(err)`), so a Postgres that stops echoing would fail the test instead of passing vacuously. Real `raise ... from`, real `ExceptionGroup`, real SQLAlchemy `DBAPIError`, real `supabase_auth` error classes. Golden exact-output tests: `test_golden_a_real_unique_violation_keeps_everything_but_the_value`, `test_golden_a_real_sqlalchemy_unique_violation` (hide on and off).
+- `req_13`: root cause (E) no enforcement — a structural test so a new exception sink cannot silently bypass the redactor | CODE_REVIEW_FINDINGS taxonomy (E) | applies | evidence: `test_no_module_formats_exception_text_outside_the_redacted_choke_point`, `test_no_logger_call_in_the_app_passes_a_bare_exception` and `test_the_allowlist_is_not_stale` pass. Negative controls: S1 (bare `exc` in create_employee) and S2 (f-string of `exc` in reset_password) both KILLED by the AST test; S3, S4, S5 (describe_auth_error echoing text, code or status) KILLED by the unit tests.
+- `req_14`: root cause (F) documentation re-verified — OBSERVABILITY.md section 3 and DEPLOYMENT.md section 6 checked against the final behaviour, residual limits stated | CODE_REVIEW_FINDINGS taxonomy (F) | applies | evidence: `git diff 7a55dc4 -- docs/OBSERVABILITY.md`: section 2 inventory row, section 3 items 2 and 4 and the desktop-client paragraph, section 9 gap 6, section 10 evidence list. DEPLOYMENT.md was checked and left unchanged (its only redaction sentence, line 251, is still true). Residual limits are stated in OBSERVABILITY.md section 3 item 2 and section 9 gap 6.
+- `req_15`: multi-tenancy — batch 1 touches no tenant query, RLS policy or tenant context; the only multi-tenant rule that applies is "do not log sensitive tenant data in plain text" | Multi_Tenant_Security_Cheat_Sheet.md:979; postgres-multitenant and saas-multitenant-architecture skills | N/A for RLS and tenant queries, applies for logging (covered by req_02) | evidence: `git diff --name-only 7a55dc4` lists no change to crud.py, models.py, api/deps.py, alembic or migrations (checked 2026-09-21); no tenant query, RLS policy or tenant context was touched. Logging of sensitive data is covered by req_02.
+- `req_16`: DESIGN DECISION — frontend breadcrumbs FAIL CLOSED: for `ui.*` breadcrumbs the message and data are replaced with a fixed string instead of regex-scrubbing attribute values, which removes the ReDoS and embedded-quote class entirely | ASVS 1.3.12; the 2026-09-19 review's own suggested alternative; TCASVS 3.2.3 | applies | evidence: `sentry-context.hostile.test.ts`, 172 tests (attribute-name coverage, data field, non-string message, console case variants, time bounds). On the unfixed code 156 of 172 failed. Now: all pass; full frontend suite 27 files / 332 tests passed; `tsc -b --noEmit` and eslint clean on the changed files. Mutants B1-B8 and T1-T7: 15 of 15 KILLED, original restored (hash-verified). Cost accepted: Sentry no longer says which element was clicked.
+- `req_17`: KNOWN LIMIT, stated not hidden — text-level redaction cannot tell a client value that contains a line shaped like a structural marker from the real marker, so such a value can end redaction early; recorded as an accepted residual (root cause D) with a strict xfail test; the real fix is rendering exceptions from the exception object, deferred | CODE_REVIEW_FINDINGS taxonomy (D) | applies | evidence: `test_a_value_that_forges_a_complete_chain_marker_is_the_known_limit` is a strict xfail (1 xfailed in the full run; it fails the day the limit is closed, which forces the marker to be removed). The 18 `test_a_value_that_forges_structure_does_not_end_redaction_early` cases for single forged lines (SQL, Background, Traceback, File frame, chain marker, error head) PASS. Wording is in OBSERVABILITY.md section 3 item 2 and section 9 gap 6. (Round 2, below: req_18 narrows this limit for the ExceptionGroup form.)
+- ROUND 2 (2026-09-21) — findings of the independent attacker pass (one fresh Sonnet agent, read-only, code but not tests, 36 runs). I reproduced each one myself before acting; hand-built text unless stated. Requirements first, evidence PENDING:
+- `req_18`: an ExceptionGroup-shaped value must not end redaction early: a client value containing the lines `Exception Group Traceback` and `  +---------` leaked everything after it (reviewer H2, reproduced: TAILSECRET and a neighbouring column survived). The group layout must be recognised from something the value cannot forge (the text's own FIRST line), never from a substring anywhere in the text | CODE_REVIEW_FINDINGS taxonomy (D); ASVS 1.3.12/16.5.3 spirit (structure decided by attacker-controlled text) | applies | evidence: `_is_group_first_line` decides layout from `parts[0]` only (`redaction.py`). 5 forged-group payloads (`group_header_forged`, `group_header_plus_forged`, `group_subexc_forged`, `group_all_railed_forged`, `group_end_separator_forged`) added to `_SAFE_PAYLOADS`, run through all 9 containers — no leak. `test_an_exception_group_keeps_everything_after_the_scrubbed_value` parametrized over kind and raised/never-raised. Mutants (final code): R1 (recognise from any line, the old behaviour), R2 (header form only), R3 (railed form only), M21 (never recognised) — 4/4 KILLED, hash-restored.
+- `req_19`: recognition of Postgres echo shapes — a label-less bare message (`invalid input syntax for type uuid: "<v>"`, enum, out-of-range) was not recognised as a database error and passed through untouched (H1); the `QUERY:` label was not covered (M4). Coverage boundary to be stated: the shapes this app can produce (bound-parameter errors and constraint violations), not every Postgres message | reviewer H1/M4; failure mode 7 (payload differs from what the mechanism was vetted for) | applies | evidence: `_PG_TEMPLATES` (12 templates) added to `_looks_like_db_error`; `_ECHO_OPENERS` extended with `time zone "`; `_LABELS` extended with `QUERY:`. Real Postgres shapes checked live via `pgshapes.py`/`pgquery.py` scratch probes (`tz_param`, `tz_at`, `plpgsql_exec` kinds added to `_KINDS`, 12 total): every real shape found puts `QUERY:` under a `LINE n:` line whose skip already covers it, so the label is defence in depth, pinned by a hand-built `test_a_query_line_is_redacted_even_with_no_line_label_before_it`. Boundary stated in OBSERVABILITY.md §3 item 2. Mutants: R4 (no templates), R6 (time zone opener dropped), R7 (leftmost-not-first opener), R8/R9 (specific templates dropped), R5 (QUERY label dropped), M10 (recognition bypassed), M18 (`value "` opener dropped), M19/M20 (CONTEXT/DETAIL label dropped) — 10/10 KILLED. Two round-2 mutation passes also surfaced two debuggability gaps no leak-test could see (a mutated line was silently *swallowed*, not leaked): M17 (`LINE n:` unrecognised) and M19 (`CONTEXT:` unrecognised) both SURVIVED their first run because nothing asserted the label line stayed present (redacted) rather than vanishing; closed by adding content assertions (`test_an_inline_literal_echoed_after_LINE_is_scrubbed`, `test_the_error_stays_debuggable` extended with `_REAL_LABEL`), then both re-run and KILLED.
+- `req_20`: uvicorn's own loggers must go through the redacting handler under the REAL uvicorn logging config. Reproduced on the real app under real uvicorn: `uvicorn.error` printed a second, raw traceback containing the value (Starlette re-raises after our 500 handler: starlette/middleware/errors.py:183-186), and `uvicorn.access` was NOT disabled (uvicorn's dictConfig re-enables it after our import-time `disabled = True`, so the existing test passed while the claim was false: failure mode 9) | Logging_Cheat_Sheet.md 'Data to exclude'; ASVS 14.2.1 (nothing sensitive in a URL log); fastapi/guide/advanced/events.md (`lifespan=`, not deprecated `on_event`) and testing-events.md (`with TestClient(app)` runs it) | applies | evidence: `configure_logging()` now clears `uvicorn`/`uvicorn.error` handlers and sets `propagate=True`, re-disables `uvicorn.access`, called again from `app.main._lifespan` (runs AFTER uvicorn's own dictConfig, so it has the last word). `test_uvicorn_logging.py` (new): a fixture applies uvicorn's real `LOGGING_CONFIG` via `dictConfig` then runs `with TestClient(app)`; asserts a single redacted JSON line via `uvicorn.error`, the access line stays disabled, startup lines use the JSON formatter. `test_the_real_app_under_real_uvicorn_prints_no_raw_traceback_and_no_access_line` runs a real uvicorn subprocess end to end. Before/after probe (`uv_probe2.py`, 2026-09-22): on the fixed code, 0 raw occurrences of the planted secret, 0 access-line occurrences, 2 redacted `DETAIL:  [redacted]` lines (app + uvicorn.error), confirming "every unhandled exception now appears twice, both redacted." Mutants: L1 (handlers not cleared), L2 (propagate not set), L3 (access logger not disabled), L6 (lifespan not wired in), L7 (lifespan doesn't reconfigure) — 5/5 KILLED.
+- `req_21`: a logging error must not print the raw record and arguments to stderr (stdlib `Handler.handleError` prints `Message:` and `Arguments:`; verified in the installed logging source) — reviewer LOW | Logging_Cheat_Sheet.md 'Data to exclude' | applies | evidence: `_LiveStdoutHandler.handleError` overridden to write one fixed JSON note (level, failing logger name, exception class only) inside `contextlib.suppress(Exception)`, never the record or its args. `test_a_logging_error_never_prints_the_record_or_its_arguments` drives the handler directly with a mismatched-placeholder record carrying a marker secret; asserts `"could not be formatted" in err` and the marker is absent from stdout+stderr. Mutants: L4 (handleError falls back to stdlib), L5 (handleError prints `record.args`) — 2/2 KILLED.
+- `req_22`: enforcement (root cause E) extended: the structural test must also fail on `repr(exc)`, `exc.args` and `%r` of an exception in a log call (reviewer M3: no such call exists today, so this is prevention only) | CODE_REVIEW_FINDINGS taxonomy (E) | applies | evidence: `_leaks_exception` (test_log_sinks_hostile.py) extended to recurse into `repr`/`ascii`/`format` calls (not just `str`), `.args` attribute access, subscripts (`exc.args[0]`), f-strings (`ast.JoinedStr`), `%`/`+` `BinOp`, and tuples. `_flagged()` self-tests: 14 must-flag snippets (including `%r`, `exc.args[0]`, `f"x {exc!r}"`) and 5 must-not-flag snippets, both pass. Mutants: D1-D6 (repr/.args/subscript/BinOp/f-string/tuple each individually un-recognised) — 6/6 KILLED.
+- `req_23`: disposition of the reviewer's remaining findings, none silently dropped: Sentry `logentry.params`/`extra`/breadcrumb `data`/`request.query_string`, `before_send_transaction`, chained `AuthError` value inside a Sentry event via `HTTPException ... from exc` (reviewer M5/M6, partly OPINION, no `sentry_sdk` in its sandbox) and frontend non-`ui` breadcrumbs (fetch/xhr `data.url`, navigation) are BATCH 2; localized (non-English) Postgres messages and `syntax error at or near`-style echoes are OUT OF SCOPE (Supabase runs English; SQL text is never built from client values here) and stated as such; earlier SQLAlchemy `[SQL:]` lines of a multi-error chain are dropped (over-redaction, debuggability only), stated | applies | evidence: OBSERVABILITY.md §3 items 5-6 (uvicorn takeover, handleError, both now FIXED not open) and §9 gap 6 (batch 2/3 list, unchanged disposition) carry this wording; `git diff` of `docs/OBSERVABILITY.md` this round shows exactly those additions. No finding from the round-2 reviewer pass was left unaddressed or unstated.
+
+ROUND 2 CLOSED (2026-09-22): all 6 requirements (req_18-req_23) evidenced above. Full negative-control run on the FINAL code: redactor 22/22 KILLED (M01-M22, including the two debuggability gaps M17/M19 found and closed within this round), Supabase sinks 5/5 KILLED (S1-S5), uvicorn/handleError/detector 22/22 KILLED (R1-R9, L1-L7, D1-D6) — 49/49 mutants killed, all hash-restored. Full backend suite (guarded, `obs-pg`, excluding tests/e2e): 6,726 passed, 0 failed, 0 errors, 12 skipped (373 s). `ruff check .` and `ruff format --check` clean on every changed file; strict pyright (`--pythonpath` the venv interpreter) 0 errors on `app/` and the three round-2 test files.
+
+- `req_24`: PASS 2 of the independent re-review pilot — a fresh read-only agent given BOTH the production code and the existing test files (pass 1 saw code only), asked to name specific mutations the current tests would not catch. Requirement: every confirmed finding reproduced by me before any fix/test, per rule 10.1/10.2, using a purpose-built one-off harness (`mutate_pass2.py`) that mutates, runs the *exact current* test suite, and restores hash-verified | docs/skill-verification-discipline.md failure mode 10.2 | applies | evidence: 3 findings reported, all 3 triaged with a real reproduction run (not accepted on the agent's word):
+  - **F1 (confirmed, real gap):** `redaction.py`'s chain-marker terminator (`_ends_value`) required only a blank line after the marker text, not also a genuine `Traceback`/`+ Exception Group Traceback` line after that — the third conjunct existed in the code but nothing in `_SAFE_PAYLOADS`/`_FORGED_PAYLOADS` paired a REAL chain marker with a blank line and NON-traceback content, so removing that conjunct changed no test outcome. Reproduced: mutating it out left all 5,849 tests passing (SURVIVED). Closed with a new payload `chain_marker_blank_no_traceback` (a real chain-marker phrase + blank line + tail text that must not leak) run through the full kind × container matrix (216 cases, all pass on real code); re-mutated and now KILLED (1 failed). Added as permanent mutant M23.
+  - **F2 (confirmed, real gap):** `_shape_of`'s `sqlalchemy_format` detection used the substring `"sqlalchemy.exc."`; loosening it to bare `"sqlalchemy"` changed no test outcome because no payload contains the literal word "sqlalchemy" (a plausible client string, e.g. a tech-migration task description). Reproduced: SURVIVED before the fix. Closed with `sqlalchemy_word_without_exc_forged_sql` (the word "sqlalchemy" + a forged `[SQL: ...]` line + a tail that must not leak, on a plain psycopg-only error path) run through the same matrix; re-mutated and now KILLED. Added as permanent mutant M24.
+  - **F3 (checked, already covered — no action):** `main.py`'s unhandled-exception handler logs the route TEMPLATE (`request.scope.get("route").path`), not the raw request path, specifically to keep attacker-controlled path segments out of logs (ASVS 14.2.1). The agent flagged this at LOW confidence, correctly guessing a dedicated test likely already existed outside its reading scope. Confirmed: `test_secrets_query_body_and_raw_path_never_reach_stdout` (`test_observability_blind.py`, docstring: "the 500 handler used to log the raw path") already asserts a `SENTINEL_PATH_VALUE` sent to a raising route never reaches stdout. Reproduced the mutation (`route = str(request.url.path)`) against that one test: KILLED (1 failed) on the first run, confirming it needs no new test.
+  - Final evidence: full backend suite after both fixes, guarded, `obs-pg` up: 6,942 passed (+216 from the two new payloads), 0 failed, 0 errors, 12 skipped (298 s). `ruff check .` / `ruff format --check` clean on the changed test file.
+
+PASS 2 CLOSED (2026-09-22) with 2 confirmed findings (both were test gaps in already-correct code, not production bugs) and 1 finding checked and found already covered. Per the approved re-review plan, pass 3 (docs-vs-code claims checker) now runs because pass 2 found something; the loop continues until a round returns zero confirmed findings.
+
+- `req_25`: PASS 3 of the re-review pilot — a fresh read-only agent cross-checks every factual claim in OBSERVABILITY.md, this Current Audit block and the `redaction.py` module docstring against the actual code: overclaims (a doc says something is covered that isn't), underclaims (a real behavior nobody documented), stale references (a line number, a count, a file that moved), and contradictions between the three sources | docs/skill-verification-discipline.md rule 10.2 (independent verification) applied to DOCUMENTATION, not just code | applies | evidence: 2 findings, both spot-checked myself before editing anything (not accepted on the agent's word) —
+  - **Finding 1 (moderate, confirmed by direct count):** req_02's evidence line ("9 kinds x 45 payloads x 7 containers = 2,828 passed, 7 skipped") had gone stale: req_18 and req_24 grew `_KINDS`/`_SAFE_PAYLOADS`/`_CONTAINERS` (to 12/52/9) without updating req_02's summary. I recounted `_SAFE_PAYLOADS`, `_FORGED_PAYLOADS`, `_KINDS` and `_CONTAINERS` directly against `test_redaction_hostile.py` with a script (not by re-reading the prose): 52, 6, 12, 9 — matching the agent's count exactly, and matching 12x52x9=5,616 parametrizations, 5,607 passed / 9 skipped (one payload, `long_line`, over the unique-index size limit x 9 containers). Not a security regression — coverage only grew, the arithmetic in each contributing row (req_18, req_24) was already correct — only the req_02 summary line hadn't been recomputed. Fixed: req_02 and req_10 both updated with the current counts, dated, without erasing the original 2026-09-21 evidence (this audit log is append-only by convention; the fix adds the current truth rather than rewriting history).
+  - **Finding 2 (minor, confirmed by grep):** req_08 cited `main.py:157` for the route-template `logger.exception` call; round 2's uvicorn/lifespan additions shifted it. Grepped the current file: it is at line 175. The claimed BEHAVIOR (route template only, goes through the redacting formatter) was still correct — only the line number was stale. Fixed.
+  - No security-relevant code behavior was found undocumented, and no doc claim was found to overstate an actual guarantee: `_PG_TEMPLATES`/`_ECHO_OPENERS`/`_LABELS` counts, `_MAX_INPUT`, `hide_parameters=True` in `db.py`, `sentry_config.py`'s scrub scope, the Supabase sink call sites, the frontend breadcrumb scrubber and tenant-tag choke point, and the "never builds SQL from a client value" / "no RAISE EXCEPTION with a client value" claims were all verified against the code (the latter two by a full grep of `app/`, zero matches) and found accurate.
+
+PASS 3 CLOSED (2026-09-22) with 2 confirmed findings, both documentation-hygiene (a stale evidence count, a stale line number), neither a security regression, both fixed. Re-review pilot: 3 passes run, all findings from all 3 passes reproduced/verified and closed. Findings shrank each pass (round 1: 6 real bugs; pass 2: 2 minor test gaps; pass 3: 2 doc-only typos, zero code/test issues). Asked the user whether to run a further round; **user chose to stop here (2026-09-22)** rather than run a 4th pass — pilot closed, this block moved to Completed Audits.
+
+### Phase 5 (Hardening) — Observability Phase 1: logs, health, Sentry, DB check, isolation canary (2026-09-19)
+
+```
+status: complete
+phase: Phase 5 (Hardening) — Observability Phase 1, items 1-6: (1) structured tenant-tagged request logs, (2) /ready real health check, (3) DB pool + threadpool saturation gauges, (4) Sentry tenant/release tags (backend + Tauri frontend), (5) scheduled read-only DB health check with a least-privilege ops_monitor role, (6) tenant-isolation canary. Requested 2026-09-19 after the k6 PATCH run exposed a DB-pool exhaustion that nothing warned about beforehand. Run applying skill-verification-discipline.md failure modes 6, 8, 9, 10.1, 10.2, 11, ASVS 5, TCASVS, multi-tenancy skills, and the code-review root causes; anything recalled from memory was re-verified against current official docs (list in A).
+scope_files: backend/app/core/{request_context,logging_setup,request_logging,health,runtime_stats,dsn,redaction,sentry_config,db,config}.py, backend/app/{main.py,api/deps.py,api/routes/notifications.py}, backend/ops/{db_check,canary}.py, backend/app/alembic/versions/66bc34819e6a_*.py, backend/tests/{core,ops,api}/* (new + test_schema_fuzz.py exemption), .github/workflows/{ops-db-check,isolation-canary}.yml, frontend/src/{main.tsx,config/env.ts,lib/sentry-context.ts(+test),stores/session-store.tsx(+test),features/notifications/api/mark-notification-read.ts}, docs/{OBSERVABILITY.md,DEPLOYMENT.md §6}
+date: 2026-09-19
+commit: (uncommitted; base 6488fe6)
+```
+
+**A. Fixed enumeration**
+
+- `asvs_chapters_opened`: ASVS 5 `v16-security-logging-error-handling.md` (opened in full: 16.1.1 logging inventory, 16.2.1/2.2/2.4/2.5 metadata+UTC+format+sensitive data, 16.3.2/3.4, 16.4.1 log-injection encoding, 16.4.3 separate log system, 16.5.1-16.5.3 generic errors/no-fail-open), `v13-configuration.md` (13.3.1/13.3.2 secrets + least privilege, 13.4.5 monitoring endpoints not exposed unless intended), `v14-data-protection.md` (14.1.1 classification, 14.2.1 nothing sensitive in URL/query, 14.2.3 no sensitive data to third parties), `v12-secure-communication.md` (12.3 TLS to the database). TCASVS: `v3-data-storage-protection.md` (3.2.3 app logs never hold sensitive data — re-read on 2026-09-19 to correct a citation: 3.4.4 is crash dumps, not breadcrumbs), `v6-network-communication.md` (6.1.2 TLS to telemetry endpoints), `v2-build-deployment-hardening.md` (2.4.1 minimum privilege).
+- `skills_reopened_fresh`: `owasp-cheatsheets` (six whole-directory keyword greps at the start, plus on 2026-09-19 a fresh grep for retention/alert/monitor across all 120 files and a full read of `Logging_Cheat_Sheet.md` "Where to record", "Data to exclude", "Protection", "Monitoring", "Disposal"), `saas-multitenant-architecture/chapters/ch12-tenant-aware-operations.md`, `postgres-multitenant/operations.md`, `ddia/chapters/ch01`, `supabase-official/database/{connection-management,inspect,roles}.md`, `postgres-official/contrib/pgstatstatements.md`. Each re-opened for THIS sub-task.
+- `cheatsheet_grep_keywords`: (1) `log injection|CWE-117|newline.{0,30}log|CRLF|sanitiz.{0,20}log|forg(e|ing) log`; (2) `correlation.?id|request.?id|trace.?id|X-Request-ID`; (3) `health.?check|readiness|liveness|status endpoint|actuator|/metrics|diagnostic endpoint|monitoring endpoint`; (4) `canary|synthetic|honeypot|honeytoken|tripwire|continuous(ly)? (test|verif)|authorization regression|regression test`; (5) `read-only|readonly|least.privilege.{0,40}(database|db|account)|database.{0,30}(account|user|role)|monitoring (account|user)|service account`; (6) `(sensitive|PII|personal).{0,40}(log|telemetry|crash|error report|analytics)|crash (report|dump)|error (tracking|reporting) service`; (7, 2026-09-19) `retention|log(s|ging)? (must|should)|alert|health check|monitor(ing)? (for|of)` → 53 files.
+- `cheatsheet_grep_output`: Files a title-based lookup would have skipped: `Authorization_Regression_Testing_Cheat_Sheet.md` (defines the canary patterns), `Business_Logic_Security_Cheat_Sheet.md` ("What to Alert On", "Close the Loop"), `Multi_Tenant_Security_Cheat_Sheet.md` §8, `Secrets_Management_Cheat_Sheet.md` + `Database_Security_Cheat_Sheet.md`, `GitHub_Actions_Security_Cheat_Sheet.md`, `Microservices_Security_Cheat_Sheet.md` items 6-9, `REST_Security_Cheat_Sheet.md` l.179, `Logging_Cheat_Sheet.md` ("Enable processes to detect whether logging has stopped" — a gap this pass records rather than closes; "Never exclude events from uptime/monitoring systems" — access logs keep `/health` and `/ready`). Official-doc verifications (WebFetch, not memory): anyio limiter = 40 and `borrowed_tokens`; SQLAlchemy QueuePool 5/10/30 and `hide_parameters` ("will not be displayed in INFO logging nor formatted into the string representation of StatementError"); Starlette BaseHTTPMiddleware blocks contextvar propagation upward; GitHub schedule rules (default branch only, start-of-hour delays, notice to last cron editor, 60-day disable public-only, 90-day log retention, `vars` allowed in `jobs.<id>.if`, `secrets` allowed in step `env`); Postgres `pg_read_all_stats` and libpq default root cert `~/.postgresql/root.crt`; Sentry: tags scope, JS `tracePropagationTargets` default same-origin, Python `include_local_variables` default True, `max_request_body_size` default "medium", free Developer plan = 5,000 errors / 5M spans / 30-day lookback; Railway: 7-day retention Trial/Hobby, 30 Pro, 500 lines/s/replica, `@attr:value` JSON filters, no log drain; Supabase: shared-pooler custom-role username `[ROLE].[PROJECT-REF]`, session mode port 5432, pool ≤ 80% of max_connections (40% if heavy PostgREST).
+
+**B. Fixed-domain sweep** (each item now backed by a test or captured output)
+
+- `auth`: `/ready` and `/health` unauthenticated by necessity — fixed minimal bodies (`test_health.py`: fail-closed, leaks nothing). Log identity is bound only from the verified JWT/DB profile in `get_current_profile`; client `X-Request-ID` ignored (mutation M4 caught).
+- `session_token_lifecycle`: no token/body/query string in logs (`test_request_logging.py`, mutation M2). **Found and fixed this pass: real Sentry events carried the raw Bearer token inside frame-variable snapshots (ASGI scope) and request bodies** — see E.
+- `tenant_isolation`: per-request identity holder, no bleed under concurrent tenants (mutation M3); `ops_monitor` holds no privilege of any kind on any relation, asserted at the catalog level and by real refused SELECT/INSERT/UPDATE/DELETE/DDL; canary passes 20/20 against the real API + RLS and flags a real cross-tenant success.
+- `object_level_authz`: the canary is the continuous regression probe; its expected statuses were checked against the real API, not just its own spec table (this is how the notifications 500 was found).
+- `input_validation`: values JSON-encoded, clipped; route template not raw path (blind test found the 500 handler logging the raw path — fixed); canary config ids must be UUIDs (mutation C8 originally survived → `test_canary_config.py` added).
+- `cors`: no change needed — verified the Sentry browser SDK propagates trace headers same-origin only by default, so `allow_headers` is unaffected; `X-Request-ID` is not exposed to the client (recorded as a gap).
+- `secrets`: `OPS_MONITOR_DATABASE_URL` and `CANARY_CONFIG_B64` are environment-scoped secrets at step level, `permissions: {}`, pinned SHAs, `persist-credentials: false`; zizmor reports no findings above informational. The role is created without a password; the credential never passed through this session.
+- `supply_chain`: no new dependency (`uv export --no-dev` confirms httpx/psycopg are runtime deps); action SHAs identical to the existing workflows.
+
+**C. Self-check gate**
+
+1. `reapplied_general_principle_to_every_instance`: identity binding in one function; Sentry tenant clearing at one choke point (`session-store.tsx`, mutations F7/F12); after finding the notifications post-commit query I swept **every** `session.commit()` caller in `crud.py` and its routes — `mark_notification_read` was the only site that queried afterwards. The Sentry-options fix is enforced structurally: a test fails if `main.py` re-inlines `sentry_sdk.init(dsn=...)` (root cause E).
+6. `grepped_whole_cheatsheet_dir_not_just_familiar_titles`: DONE — seven whole-directory keyword clusters (A).
+7. `new_call_site_of_shared_mechanism_asked_whats_different_about_its_data`: DONE. New this pass: the JSON log formatter now sits on a path where exception text can hold database-echoed client data (→ redaction); Sentry now receives a tenant tag from the client and events from a process holding bearer tokens (→ options + scrubber); `ops_monitor` is a new credential in CI.
+8. `comprehensiveness_claim_backed_by_the_actual_checklist`: `status: in-progress` was set before implementation began (see git history of this file); sections D/E/F filled with real output at completion.
+9. `pre_write_check_run_before_writing_the_code_not_after`: DONE for items 1-6; for the later log-hygiene additions the check was the verification itself (captured events and real Postgres messages BEFORE writing `redaction.py` / `sentry_config.py`).
+10.1. `negative_control_run_for_the_new_tests`: DONE, 66 controls, all caught after fixes — observability 15 (M1-M19: log injection, query leak, tenant bleed, trusted X-Request-ID, fail-open /ready, single-flight, cache, engine-keyed cache, suppress, thresholds, rate limit, 500 header, saturation fast-fail, body leak, raw path); db_check 10 (D1-D10); canary 9 (C1-C9); live privilege drift on the real role 7 (BYPASSRLS, SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES grants, extra role membership, CREATEROLE, leftover password, read-only default removed); redaction/parameters/Sentry 13 (R1-R8, S1-S5); frontend Sentry 12 (F1-F12). Controls that initially SURVIVED and what they taught: M9 (a tautological test — the lenient TestClient swallowed the error; rewritten with `raise_server_exceptions=True`), C7/C8 (expected-count independence and UUID validation had no test → `test_canary_config.py`), P3 (a granted INSERT was masked by the read-only default AND by RLS → catalog-level `has_table_privilege` test + a write test that overrides the read-only default), S3 (caught only via a fixture error — accepted).
+10.2. `blind_test_authoring_used_where_it_mattered`: DONE for items 1-3 and 6: a separate agent, given a written spec and an isolated git worktree at HEAD (implementation absent), authored `test_observability_blind.py` (93) and `test_canary_blind.py` (289); copied unmodified except documented adjustments (removed `uvicorn.access` from the third-party-logger list because it is deliberately disabled; detached pytest's own log handler in one test; shortened parametrize ids and a 100k→30k value for a Windows env-var / httpx 65,536-URL limit; split a credential-looking literal for Sonar S6698; lint fixes). **Result: it found a real bug in my implementation** (500 handler logged the raw request path) — fixed. Honest caveat: the agent's blindness was by isolation and instruction, not hook-enforced. **NOT blind-tested, own tests + mutation controls only:** `redaction.py`, `sentry_config.py`, `db_check.py`, the migration, the frontend Sentry module, and the notifications fix — these came after the blind round, and the bugs they fix were found by capturing real output, not by an independent author. Recommend a blind pass on redaction/sentry_config if budget allows.
+11. `code_review_decision_asked_not_assumed`: see F.
+
+**D. Verification-of-verification**
+
+- `fix_verified_by_real_command_output`: Local disposable Postgres 17 (docker, migrated to head 66bc34819e6a). Backend: `ruff check .` clean; `pyright` 0 errors; `pytest --cov=app --cov-fail-under=93` → **759 passed, 4 skipped** (2 = `/health`+`/ready` intentionally public in the schema-fuzz negative; 2 = e2e needing a local Supabase stack, run by the `e2e` CI job), coverage **96.01%**; `pytest -m authz` → 59 passed, 2 skipped. Frontend: `tsc --noEmit` clean, `eslint src` 0 errors (3 pre-existing react-refresh warnings), `vitest run` 26 files / **160 tests** passed. Canary vs real API + RLS: 20/20, and 6 violations flagged when firm B's ids point at firm A's objects. Live Supabase, read-only: `max_connections` 60, `pg_stat_statements` 1.11 preloaded, `ops_monitor` absent, alembic head `178722372dba`. k6 baselines pulled from the Actions logs of runs 35342907608 (300 VUs: 140 req/s, p95 161 ms, 0% failed) and 35345082189 (PATCH: 15.47% failed, `QueuePool limit of size 5 overflow 10 reached`). TLS: handshake-only `openssl s_client` with the repo's `certs/supabase-ca.crt` → `Verification: OK` for the pooler certificate and hostname.
+- `migration_verified_against_live_db_not_assumed`: verified on the LOCAL Postgres: upgrade → role attributes `(super f, bypassrls f, createrole f, createdb f, replication f, login t, connlimit 2)`, sole membership `pg_monitor`, no password, `default_transaction_read_only=on`, `statement_timeout=10s`, `idle_in_transaction_session_timeout=30s`, `lock_timeout=2s`; downgrade removes the role; re-upgrade restores it. **NOT applied to the live project** — deliberately, pending the owner's decision; when applied, re-check `pg_roles`/`pg_auth_members` and re-run the advisors (2026-09-19 baseline: security 1 WARN leaked-password-protection + 1 INFO; performance 10 WARN `auth_rls_initplan`, 14 INFO unindexed FKs, 4 INFO unused indexes — none introduced by this work).
+
+**E. Bounded claim**
+
+- `standard_and_scope`: ASVS 5 (V12, V13, V14, V16), TCASVS (V2, V3, V6), the cheat sheets in A — scoped to `scope_files`. Explicitly NOT claimed: alert routing for pool pressure / auth-failure spikes, logging-stopped detection, a metrics backend, on-call, an independent tamper-evident log store (ASVS 16.4.3), or any production run of the canary or `db_check` — no deployment exists (DEPLOYMENT.md §13), GitHub schedules fire only from the default branch, and both workflows are off until `OPS_MONITORING_ENABLED=true`. The full gap list is `OBSERVABILITY.md` §9.
+- `severity_trend_vs_last_pass`: this pass found **pre-existing** defects in already-shipped configuration, not just in the new code: (1) **HIGH** — Sentry events carried request bodies, frame-local client data and the raw bearer token (defaults the earlier "PII default-off" check did not cover; DEPLOYMENT.md §6 corrected); (2) **MEDIUM** — SQLAlchemy parameter dumps and Postgres-echoed values (incl. whole failing rows) in exception text bound for logs and Sentry; (3) **MEDIUM (functional)** — `PATCH /notifications/{id}/read` returned 500 for any task-linked notification (the 2026-09-08 post-commit-RLS bug class at a site its fix never reached, hidden because the route test mocks `crud`); (4) **LOW** — 500 handler logged the raw request path (new code, found by the blind test before release); (5) test-fixture teardown FK-order bug and three CI-red lint/type errors already on the branch. Versus the previous feature-slice passes this is a higher-severity trend — and all of it was found by looking at real captured output, which is the lesson: verify what a default actually does.
+
+**F. Independent pass**
+
+- `security_review_run`: **Run (2026-09-19), at the user's request** after being asked with for/against and a lean (Rule 11). Not the multi-agent `/code-review ultra`: four fresh, read-only Sonnet subagents were run ONE AT A TIME, each scoped to code the blind test authoring had not covered, told not to trust the author's tests and to reproduce findings against real output. (1) redaction + logging + `hide_parameters`; (2) backend and frontend Sentry config; (3) `ops_monitor` migration + `db_check` + `ops-db-check.yml`; (4) notifications fix + sibling post-commit sweep + `isolation-canary.yml`. **Result: real defects in code this pass wrote, so the earlier "verified" claims for those files were too strong.** Reproduced by the author afterwards (not just relayed): (a) a blank line inside a DETAIL/CONTEXT value ends redaction early and the rest of the value leaks; (b) ExceptionGroup tracebacks (`    | ` line prefix) bypass the line-anchored patterns; (c) `_ECHOED_QUOTED_VALUE` is quadratic on hostile input (4k/8k/16k repeats = 1.1s/4.1s/17.7s) and runs before the clip; (d) the frontend breadcrumb regex leaves attribute values that contain `"` unscrubbed. Reported, not yet reproduced by the author: `logentry.params`/`extra`/breadcrumb `data` and non-psycopg exception values (`ResponseValidationError` carries the whole returned row) are not scrubbed; no `before_send_transaction`; `db_check` reports healthy if the role loses `pg_monitor` (fail-open), the slow-statement query is cluster-wide, and `uv run` after `uv sync --no-dev` re-installs the dev group inside both secret-bearing workflow steps; the `ops-monitoring` environment has no branch restriction; the canary has no positive control (a stale task id yields green); an untracked `backend/%SystemDrive%/...` directory must not be committed. The post-commit sweep found no live sibling of the notifications bug (protected only by `expire_on_commit=False`). **Status: findings reported to the user; fixes NOT yet applied — this entry is not closed until they are fixed and re-verified or explicitly accepted.**
+
+### Phase 5 (Hardening) — Raiser Can Read Their Own Resolved Issue (2026-09-18)
+
+```
+status: complete
+phase: Phase 5 (Hardening) — GET /issues/{id} widened from Owner-only to also allow the issue's own raiser. Reported gap, 2026-09-18: an Employee's issue_resolved notification opened TaskDetailPage (no idea an issue exists) — the Owner's resolution_notes were completely unreachable, since GET /issues/{id} was RequireOwnerDep-only with no exception for the raiser.
+scope_files: backend/app/crud.py (get_issue), backend/app/api/routes/issues.py, backend/app/alembic/versions/178722372dba_add_issue_to_access_denials_resource_.py, backend/tests/{crud/test_access_denials.py,api/test_authz_regression.py}, frontend/src/features/tasks/components/{issue-detail-page.tsx,issue-detail-page.test.tsx}, frontend/src/features/notifications/components/notifications-page.tsx, frontend/src/features/tasks/components/my-tasks-page.tsx, frontend/src/app/router.tsx, docs/{API_SPEC.md,DATA_MODEL.md,FRONTEND_ARCHITECTURE.md}
+date: 2026-09-18
+commit: (uncommitted)
+```
+
+**A. Fixed enumeration**
+
+- `asvs_chapters_opened`: `v8-authorization.md` §8.2.2 (BOLA/IDOR — the actual widening's governing requirement: relaxing a route's dependency from `RequireOwnerDep` to `ActiveProfileDep` is safe only because `crud.get_issue` itself enforces the real per-object check, not the route decorator alone).
+- `skills_reopened_fresh`: `owasp-cheatsheets` (whole-directory grep below, this pass); `owasp-asvs-5/chapters/v8-authorization.md` reopened fresh for this specific question (widening a role-gated route), distinct from the read-only re-confirmation it got in the `issue_resolved` pass earlier today.
+- `cheatsheet_grep_keywords`: `least privilege|widen|narrow.*scope|principle of least` (surfaced `Authorization_Cheat_Sheet.md`'s "Enforce Least Privileges" section — the actual design constraint applied: grant only what's needed, not a blanket role change) and the same `IDOR|BOLA|object-level|recipient` cluster from the earlier pass today, re-run rather than assumed still current.
+- `cheatsheet_grep_output`: `Authorization_Cheat_Sheet.md` "Enforce Least Privileges" — "it is easier to grant users additional permissions rather than to take away some they previously enjoyed... careful planning... can help reduce the risk of needing to revoke permissions later deemed overly broad." Applied directly: the route itself was widened to `ActiveProfileDep` (any authenticated actor can call it), but `crud.get_issue` is what actually narrows real access back down — an Employee gets only their own issue (`raised_by == actor.id`), not every issue in the firm. `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md` — "implement access control checks for each object... web frameworks often provide ways to facilitate this" — the object-level check lives in `crud.get_issue`, mirroring `get_task`'s/`get_notification`'s existing shape exactly, not a bespoke new pattern.
+
+**B. Fixed-domain sweep**
+
+- `auth`: `POST /issues/{id}/resolve` unchanged (still `RequireOwnerDep`) — only `GET /issues/{id}` relaxed to `ActiveProfileDep`.
+- `session_token_lifecycle`: N/A, no new mechanism.
+- `tenant_isolation`: Unchanged — `crud.get_issue`'s existing `Issue.firm_id == actor.firm_id` filter (RLS-backed) still applies before the new role/raised_by check; an Employee still can't reach another firm's issue at all, regardless of role.
+- `object_level_authz`: This *is* the change — added `if actor.role != "owner" and issue.raised_by != actor.id: deny`, same 404-not-403 shape as `get_task`'s `assigned_to` check, mirrored deliberately rather than invented fresh.
+- `input_validation`: N/A — no new request field.
+- `cors`: N/A, unchanged.
+- `secrets`: N/A — `IssueOut`'s response body (description, resolution_notes, etc.) was already returned to the Owner unchanged; this only adds a second, narrower-scoped caller (the raiser) to an existing response shape.
+- `supply_chain`: No new dependency (`git status` on `package.json`/`requirements`/lockfiles — no diff).
+
+**C. Self-check gate (mapped to skill-verification-discipline.md's failure modes, per the user's explicit list this pass: 1, 6, 7, 8, 9, 10.1, 10.2, 11)**
+
+1. `reapplied_general_principle_to_every_instance`: `get_task`'s "role != owner and X != actor.id → deny, 404 not 403" shape reused verbatim for `get_issue` (`raised_by` in place of `assigned_to`) — not reinvented, not left inconsistent with its sibling.
+6. `grepped_whole_cheatsheet_dir_not_just_familiar_titles`: two keyword-cluster greps (Section A) run against the whole `owasp-cheatsheets/cheatsheets/` directory this pass, surfacing `Authorization_Cheat_Sheet.md`'s Least-Privilege section specifically (not assumed already covered by the earlier `issue_resolved` pass's IDOR grep, which targeted a different question).
+7. `new_call_site_of_shared_mechanism_asked_whats_different_about_its_data`: `record_access_denial`'s CHECK-constraint-bound `resource_type` column is the shared mechanism being extended to a new value (`'issue'`) — checked live via `pg_constraint` (not assumed) that this was actually a 2-value constraint before writing the migration, same discipline as the earlier `notifications_type_check` widening today.
+8. `comprehensiveness_claim_backed_by_the_actual_checklist`: this entry, filled with real evidence before/alongside the code rather than narrated afterward.
+9. `pre_write_check_run_before_writing_the_code_not_after`: Section A's ASVS/cheat-sheet checks, plus the live `pg_constraint`/`alembic_version` queries, were run and stated in the conversation's fact-forcing-gate messages before `crud.py`/`issues.py` were edited.
+10.1. `negative_control_run_for_the_new_tests`: **Run for real, twice.** (1) Backend: commented out `get_issue`'s new `if actor.role != "owner" and issue.raised_by != actor.id` check, reran `test_get_issue_wrong_raiser_writes_denial` — failed with `assert Issue(...) is None` (the exact predicted leak), `test_get_issue_owner_bypasses_raised_by_check` still correctly passed (owner access unaffected) — restored, both pass. (2) Frontend: reverted both `issue_resolved` link-target branches (`notifications-page.tsx`, `my-tasks-page.tsx`) to the old `/tasks/{taskId}` fallback, reran the two link-target tests — both failed with `href="/tasks/t1"`/`href="/tasks/t2"` instead of `/issues/i1` (exact predicted symptom) — restored, both pass.
+10.2. `blind_test_authoring_used_where_it_mattered`: **Not run this pass** — named honestly, same as the `issue_resolved` pass earlier today: this widens a real authz boundary (arguably a stronger 10.2 candidate than that pass was), but was self-authored given the negative-control-verified coverage already achieved across three layers (crud/SQLite, route-level real-Postgres regression, frontend). Flagged for the user to override.
+11. `code_review_decision_asked_not_assumed`: **Being asked in this same turn's response** — this slice is a stronger "for" case than the `issue_resolved` pass (a genuine authz boundary widened, not just a new notification type), balanced against: least-privilege re-narrowed inside `crud.get_issue` (not a blanket widening), mirrors `get_task`'s already-shipped pattern exactly, and has negative-control-verified coverage at all three layers.
+
+**D. Verification-of-verification**
+
+- `fix_verified_by_real_command_output`: Negative controls above (10.1) — real pytest/vitest output, not narrated. Full backend suite: `145 passed, 74 skipped` (`pytest -q`; the 2 new real-Postgres regression tests correctly skip locally, no `TEST_DATABASE_URL` — will run for real in CI). Full frontend suite: `npx tsc --noEmit` → clean; `npx vitest run` → **134 passed**, 25 test files (one unrelated `login-form.test.tsx` failure on one run, reproduced as pre-existing environmental flakiness — passed in isolation, passed on a clean full-suite rerun, not caused by this pass's changes).
+- `migration_verified_against_live_db_not_assumed`: Applied via `alembic upgrade head` against the real `MIGRATIONS_DATABASE_URL` immediately after `crud.py`'s edit (closing the window where a real denied access under the running `--reload` dev server would have hit the old 2-value CHECK constraint) — confirmed via `SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.access_denials'::regclass AND contype = 'c'` before (`('task','notification')`) and after (`('task','notification','issue')`) the migration ran.
+
+**E. Bounded claim**
+
+- `standard_and_scope`: ASVS 5 (v8 §8.2.2), `Authorization_Cheat_Sheet.md` ("Enforce Least Privileges"), `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md` — scoped to `scope_files` above, applied against the real live schema (migration already run against production).
+- `severity_trend_vs_last_pass`: **Zero new security findings; one real pre-existing gap closed.** The gap this pass fixes (raiser locked out of their own issue) was an access *denial* being too broad, not a leak — the fix narrows a route's dependency outward while narrowing the actual object-level check inward to compensate, net effect: strictly the intended new access, nothing more.
+
+**F. Independent pass**
+
+- `security_review_run`: Asked, not assumed (Rule 11) — see item 11 above; append the user's answer here once given, covering both this slice and the still-open `issue_resolved` one from earlier today.
+
+### Phase 5 (Hardening) — issue_resolved Notification Type (Backend) (2026-09-18)
+
+```
+status: complete
+phase: Phase 5 (Hardening) — issue_resolved Notification Type (Backend). Reported gap, 2026-09-18: resolve_issue only ever notified the issue's raiser for resolution_type="reassigned" (via _reassign_task's task_reassigned); "clarified"/"deadline_adjusted" left them with zero signal, not even a stale one — there was no issue_resolved value to fire. Adds it, fired unconditionally for all three resolution types.
+scope_files: backend/app/crud.py (resolve_issue), backend/app/alembic/versions/0563652c7653_add_issue_resolved_to_notifications_.py, backend/tests/crud/test_reviews_and_issues.py, frontend/src/features/notifications/types/index.ts, docs/{PRD.md,DATA_MODEL.md,API_SPEC.md}
+date: 2026-09-18
+commit: (uncommitted)
+```
+
+**Honest process note, not backfilled to look better**: `status: in-progress` was set on THIS entry mid-task — after `crud.py`'s edit and the migration existed, not before the first line was written. The pre-write OWASP/ASVS checks (Section A below) genuinely did run before each edit, stated in the fact-forcing-gate messages at the time — but the checklist file itself wasn't touched until now. Recorded plainly per failure mode 8's own lesson: engaging this file's evidence fields after the fact is a real gap, not equivalent to having set `status: in-progress` first.
+
+**A. Fixed enumeration**
+
+- `asvs_chapters_opened`: `v8-authorization.md` §8.2.2 (BOLA/IDOR — the new `_notify()` call uses `locked.firm_id`/`issue.raised_by`, both already tenant-scoped by the pre-existing `_lock_issue`/`get_issue` calls in the same function; no new unscoped lookup); `v2-validation-business-logic.md` §2.3.1 (sequential state validation — the call is placed after the existing `if locked.status != "open": raise InvalidIssueStateError` guard, not before) and §2.3.3 (transactional — added via `session.add()` only, no new `session.commit()`, same transaction as the rest of `resolve_issue`).
+- `skills_reopened_fresh`: `owasp-cheatsheets` (whole-directory grep below, this pass); `owasp-asvs-5/chapters/{v8-authorization.md,v2-validation-business-logic.md}` (both opened fresh this pass, not cited from an earlier read in this or a prior session).
+- `cheatsheet_grep_keywords`: `IDOR|BOLA|object-level|recipient|insecure direct object` (surfaced `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md`, `Authorization_Cheat_Sheet.md`, `Multi_Tenant_Security_Cheat_Sheet.md`, `Business_Logic_Security_Cheat_Sheet.md` among others); `notif|cross-tenant|recipient|leak` (checked specifically against `Multi_Tenant_Security_Cheat_Sheet.md`, which surfaced first grep too) — not just the titles that sounded relevant from memory.
+- `cheatsheet_grep_output`: `Multi_Tenant_Security_Cheat_Sheet.md` §3 ("Preventing Cross-Tenant Data Access (IDOR Prevention)" — "always validate resources belong to the current tenant... composite keys... authorization checks at the data access layer") — confirmed satisfied: no new lookup at all, reusing already-tenant-scoped values. `Business_Logic_Security_Cheat_Sheet.md` ("Enforce Workflows as Explicit State Machines... each transition validated against current state") — confirmed satisfied: the notify call is placed after the existing state-transition guard, inside the already-locked/validated flow.
+
+**B. Fixed-domain sweep**
+
+- `auth`: Unchanged — `resolve_issue` is still only reachable via the existing `RequireOwnerDep`-gated `POST /issues/{id}/resolve`.
+- `session_token_lifecycle`: N/A, no new mechanism.
+- `tenant_isolation`: Re-confirmed, not newly introduced — `locked.firm_id` (from `_lock_issue`, itself `WHERE firm_id, id`-scoped) is the same value already used by this function's pre-existing `_notify` call for `task_reassigned`; no new firm_id source.
+- `object_level_authz`: Re-confirmed — `issue.raised_by` was set at issue-creation time (`create_issue`) within the actor's own firm; not a new user-supplied id.
+- `input_validation`: N/A — no new request field; `resolution_type` was already validated by the existing route/schema before this pass.
+- `cors`: N/A, unchanged.
+- `secrets`: N/A — the new `Notification` row carries only ids (`task_id`, `issue_id`) and a type string, same as every other `_notify()` call site; `resolution_notes` (free text) is never written into it.
+- `supply_chain`: No new dependency (`git status` on `package.json`/`requirements`/lockfiles — no diff from this change).
+
+**C. Self-check gate (mapped to skill-verification-discipline.md's failure modes, per the user's explicit list this pass: 1, 6, 7, 8, 9, 10.1, 10.2, 11)**
+
+1. `reapplied_general_principle_to_every_instance`: the existing `_notify(session, firm_id, recipient_id, type, task_id, issue_id)` shape reused verbatim (same argument order, same "no commit here" rule from its own docstring), not reinvented for this new call site.
+6. `grepped_whole_cheatsheet_dir_not_just_familiar_titles`: two separate keyword-cluster greps (Section A) run against the whole `owasp-cheatsheets/cheatsheets/` directory, not just the 3-4 titles that sounded relevant from memory.
+7. `new_call_site_of_shared_mechanism_asked_whats_different_about_its_data`: explicitly asked what's different about this call site vs. every prior `_notify` use — recipient is the issue's original raiser (not the task's current assignee/owners) — and confirmed the payload is still ids-only, no secret/free-text content, so the mechanism's prior vetting still covers it.
+8. `comprehensiveness_claim_backed_by_the_actual_checklist`: this entry is that engagement — but see the honest process note above: `status: in-progress` was set mid-task, not before the first edit, which this entry names plainly rather than backdating.
+9. `pre_write_check_run_before_writing_the_code_not_after`: the ASVS chapters and cheat-sheet greps (Section A) were run and stated in the conversation's fact-forcing-gate messages *before* `crud.py` was edited, confirmed by the conversation's own turn order.
+10.1. `negative_control_run_for_the_new_tests`: **Run for real.** Temporarily reverted the `_notify(...)` line in `resolve_issue` to a comment, reran `test_resolve_issue_clarified_notifies_the_raiser`/`test_resolve_issue_deadline_adjusted_notifies_the_raiser`/`test_resolve_issue_reassigned_notifies_the_raiser_in_addition_to_the_new_assignee` — all 3 failed with `assert None is not None` (the exact predicted symptom), then restored and reran — all 3 passed. Command output captured in this conversation.
+10.2. `blind_test_authoring_used_where_it_mattered`: **Not run this pass** — a real deviation, named honestly: this is a security/business-logic-relevant mechanism (a new notification path on a state-transition endpoint) that would normally be a 10.2 candidate. Skipped this pass given the change's small, additive shape (one new `_notify()` call, no new branch/authz decision, reusing an already-vetted helper) — flagged here for the user to override if they want it run anyway, not silently decided as "doesn't apply."
+11. `code_review_decision_asked_not_assumed`: **Being asked in this same turn's response, not assumed** — this slice touches a shared/cross-cutting mechanism (`_notify`, a live-DB CHECK-constraint migration already applied to the real production Supabase project) which is an argument *for* running `/code-review`; against it: the change is small and additive, no new branch/authz decision, and negative-control-verified tests already exist. Recorded here per Rule 11's requirement to state both sides, not silently pick one.
+
+**D. Verification-of-verification**
+
+- `fix_verified_by_real_command_output`: Negative control above (10.1) — real pytest output, not narrated. Full backend suite after restoring the fix: `142 passed, 72 skipped` (`pytest -q`). Full frontend suite (typecheck + vitest, unaffected by this backend-only pass but re-run since `NotificationType`/`notificationMessage` also changed): `npx tsc --noEmit` → clean; `npx vitest run` → **126 passed**, 24 test files.
+- `migration_verified_against_live_db_not_assumed`: Applied via `alembic upgrade head` against the real `MIGRATIONS_DATABASE_URL` (Supabase, `postgres` role) — confirmed via a direct `SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.notifications'::regclass AND contype = 'c'` before (8 values) and after (9 values, `issue_resolved` present) the migration ran, not assumed from the migration file's own text or the exit code alone. `mcp__supabase__get_advisors(type="security")` re-run after the DDL change — only the two pre-existing, unrelated findings (`alembic_version` RLS-no-policy, leaked-password-protection disabled), no new finding introduced by this change.
+
+**E. Bounded claim**
+
+- `standard_and_scope`: ASVS 5 (v8 §8.2.2, v2.3.1/§2.3.3), `Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md`, `Multi_Tenant_Security_Cheat_Sheet.md` §3, `Business_Logic_Security_Cheat_Sheet.md` — scoped to `scope_files` above. Applied to a real, already-live schema change (the migration ran against production), not a staged/local-only DB.
+- `severity_trend_vs_last_pass`: **Zero new security findings.** The gap this pass fixes (no notification on 2 of 3 resolution outcomes) was a functional/UX gap, not itself a security defect — nothing was ever exposed to the wrong tenant or the wrong role; the fix adds a notification, it doesn't change any authorization decision.
+
+**F. Independent pass**
+
+- `security_review_run`: Asked, not assumed (Rule 11) — see item 11 above; the user's answer to that question, once given, should be appended here before this entry is considered fully closed.
+
+### Phase 6 Step 1 — E2E Test Harness Security Audit (2026-09-15)
+
+```
+status: complete
+phase: Phase 6 Step 1 — E2E test harness (WebdriverIO + @wdio/tauri-service). Security audit run
+  per the user's explicit request, applying skill-verification-discipline.md failure modes 6, 8,
+  9, 10.1, 10.2, 11 specifically (the six the user named), owasp-asvs-5, owasp-tcasvs (thick
+  client — the correct primary ASVS-family source for a desktop app, not ASVS 5 alone), and a
+  whole-directory owasp-cheatsheets grep. An independent general-purpose subagent (not the session
+  that built the slice) ran the fresh OWASP/ASVS/TCASVS sweep and read every changed file itself,
+  per rule 11's "same pass wrote the code, structural bias" reasoning — its full report is quoted
+  in C/D below, not summarized secondhand.
+scope_files: .github/workflows/ci.yml, frontend/package.json, frontend/wdio.conf.ts,
+  frontend/e2e/specs/login-flow.spec.ts, frontend/src-tauri/Cargo.toml,
+  frontend/src-tauri/src/lib.rs, frontend/src-tauri/tauri.conf.json,
+  frontend/src-tauri/tauri.e2e.conf.json, .gitleaks.toml
+date: 2026-09-15
+commit: f8079ec (audit pass), fixes below land in the next commit
+```
+
+**A. Fixed enumeration — ASVS/cheat-sheet sources actually opened, by name:**
+- `asvs_chapters_opened`: **owasp-tcasvs** (primary — thick client) — all six chapters read/swept
+  (v1-architecture-threat-modeling, v2-build-deployment-hardening, v3-data-storage-protection,
+  v4-code-quality-exploit-mitigation, v5-cryptography, v6-network-communication). Two directly
+  relevant: **V2.1.3** ("Production builds exclude unnecessary features, sample code, docs, test
+  utilities, dev configs" — the requirement driving the whole Cargo-feature-gate design) and
+  **V6.4.1** ("IPC channels... local TCP implement authentication, preventing unauthorized local
+  processes from connecting" — the embedded WebDriver server's real, accepted residual gap, see
+  B/D below). owasp-asvs-5 — all 17 chapters swept for CI/CD, test-credential, debug-mode keywords;
+  `v13-configuration.md` read in full for secrets handling (no new finding beyond what
+  Secrets_Management_Cheat_Sheet.md already covers, per C.6 below).
+- `cheatsheet_grep_keywords`: `WebDriver`, `automation`, `debug`, `test credential`, `CI/CD`,
+  `third-party dependency`, `supply chain`, `capability`, `feature flag`, `attack surface` — run
+  across the whole `owasp-cheatsheets/cheatsheets/` directory (120 files), not just titles that
+  sound relevant. Surfaced and read in full: `GitHub_Actions_Security_Cheat_Sheet.md`,
+  `CI_CD_Security_Cheat_Sheet.md`, `NPM_Security_Cheat_Sheet.md`,
+  `Software_Supply_Chain_Security_Cheat_Sheet.md`, `Attack_Surface_Analysis_Cheat_Sheet.md`,
+  `Secrets_Management_Cheat_Sheet.md`.
+- `cheatsheet_grep_output`: `GitHub_Actions_Security_Cheat_Sheet.md` — "Mask all sensitive
+  information... `::add-mask::`" already applied to both `CONTRACT_TEST_TOKEN` and the newly-added
+  `E2E_OWNER_PASSWORD`; "pin third-party actions by commit SHA" already the project's own
+  convention, no new unpinned action added this slice (the new steps are `cargo`/`npm`/`apt`
+  commands, not marketplace Actions). `NPM_Security_Cheat_Sheet.md`/
+  `Software_Supply_Chain_Security_Cheat_Sheet.md` — no direct guidance found beyond what the
+  existing third-party-tool-vetting-standard memory discipline already covers (checked separately,
+  see C.6). `Attack_Surface_Analysis_Cheat_Sheet.md` — confirms the right question to ask about a
+  new local automation server is "what's listening, on what interface, with what auth" (answered
+  in B/D: `127.0.0.1`-bound, unauthenticated by the plugin's own design, feature-gated out of any
+  real build).
+
+**B. Fixed-domain sweep, this slice:**
+- `auth`: N/A — no new authentication mechanism; the E2E spec logs in through the *existing* login
+  form/flow, exercising it, not changing it.
+- `session_token_lifecycle`: N/A — unchanged; the spec's `browser.refresh()` check exercises the
+  existing session-restore path, doesn't add a new one.
+- `tenant_isolation` / `object_level_authz`: N/A — no new backend surface, no new query.
+- `input_validation`: N/A — no new user-facing input path.
+- `cors`: N/A, unchanged.
+- `secrets`: **Real, addressed** — `E2E_OWNER_PASSWORD` is a new CI-minted credential; masked via
+  `::add-mask::` per A above, scoped to one ephemeral per-run local Supabase stack, never a real
+  secret shared beyond that job.
+- `supply_chain`: **Real, addressed** — 6 new npm devDependencies, 1 new Cargo dependency.
+  `tauri-plugin-wdio-webdriver` and `@wdio/tauri-service` both resolve (confirmed in `Cargo.lock`/
+  `package-lock.json`) to version `1.4.0` from the same `webdriverio/desktop-mobile` GitHub repo —
+  matching, coordinated versions across the Rust/JS split of one project, not two unrelated forks;
+  maintainer `christian-bromann` is WebdriverIO's own project founder (checked live against the npm
+  registry API and Tauri's own official docs, which name this exact package as *the* recommended
+  E2E stack — see the approved plan's own research). Per `third-party-tool-vetting-standard`
+  memory's standard, this clears the bar.
+- **New domain this slice actually introduces, not on the standard checklist list**: a local
+  automation/WebDriver attack surface. Covered in D below (TCASVS V6.4.1 finding, accepted).
+
+**C. Self-check gate — exactly the six failure modes the user named:**
+
+1. **Failure mode 6** (grep the whole cheat-sheet directory by mechanism, not familiar filenames):
+   done twice, independently — once during planning (surfaced `GitHub_Actions_Security_Cheat_Sheet.md`/
+   `Secrets_Management_Cheat_Sheet.md`), once again by the independent review subagent this pass
+   (surfaced `NPM_Security_Cheat_Sheet.md`/`Software_Supply_Chain_Security_Cheat_Sheet.md`/
+   `Attack_Surface_Analysis_Cheat_Sheet.md` — three files the planning pass's narrower CI/secrets-
+   focused grep hadn't opened). The second pass finding new files the first pass missed is itself
+   the evidence this mode's discipline ("checking some files ≠ checking the directory") was applied
+   for real, not just asserted.
+
+2. **Failure mode 8** (don't claim "comprehensive" without touching the actual checklist mechanism):
+   this entry *is* that engagement — `status: in-progress` was set before any of this section was
+   written (see the Current Audit block's edit history in git), not backfilled after the fact.
+
+3. **Failure mode 9** (pre-write gate — check the relevant source, name the ASVS chapter, state the
+   call-site diff, *before* writing code): done during the plan-mode research phase, before any file
+   in this slice was written — TCASVS V2.1.3 named and quoted before `Cargo.toml` was edited; the
+   call-site diff stated explicitly ("no prior use in this project — first time a testing-only
+   capability needed compile-time exclusion, distinct from `tauri_plugin_log`'s `debug_assertions`
+   gate"). This audit is the retroactive verification that the pre-write gate's conclusion actually
+   held up under a fresh, independent read — it did, with one correction (finding #1 below).
+
+4. **Failure mode 10.1** (negative control — prove a test claiming to verify a fix actually fails
+   without the fix): **honestly incomplete, not silently skipped.** `login-flow.spec.ts` was never
+   run against a deliberately-broken version of the login flow to confirm it would fail — doing so
+   requires a full local reproduction of the CI stack (real Supabase + FastAPI + a Tauri debug
+   build + WebdriverIO), which was judged too expensive to reproduce locally purely to satisfy this
+   check (the same class of cost that made the earlier `npx tauri build` verification attempt get
+   interrupted this session). What stands in its place, weaker than a real negative control: (a) the
+   spec's assertions are simple and objective (an `h1` reading "Dashboard", a URL substring) against
+   *existing, already-reviewed* login/router code the author of this slice didn't write or change,
+   so the "self-authored test matches the author's own bug" risk this rule exists for is low; (b)
+   CI's own run of this exact spec (commit `f8079ec`, run in progress at audit time) is real
+   evidence of the pass side at minimum. Recorded as a real gap, not upgraded to "verified" — the
+   fail side of the control has not been empirically demonstrated.
+
+5. **Failure mode 10.2** (blind test authoring for higher-stakes slices): **assessed as not
+   applicable, with the reasoning stated up front, not silently skipped.** The rule targets
+   self-authored-test bias where the same pass wrote new business logic and its own test from the
+   same mental model. This slice added no new business logic — the one spec asserts against
+   pre-existing, already-reviewed login/router/session-store code through a new harness. Blind
+   authorship would add cost without addressing the bias it exists to catch, since there's no new
+   implementation here whose author could unconsciously write matching-but-wrong assertions.
+
+6. **Failure mode 11** (independent-review decision asked, not assumed): the user was asked, in the
+   turn immediately before this one ("blind test or the security check"), and explicitly authorized
+   the security-audit pass — this whole entry, including the independent subagent pass, is that
+   authorization being carried out, not a self-graded pass presented as one.
+
+**D. Verification-of-verification — real command output, findings, and fixes:**
+
+- **Independent subagent's full findings** (ranked, quoted verbatim from its report, not
+  paraphrased away): "**1. [Design-clarity, not a live bug]** The capability grant is not a second
+  independent safety layer — the Cargo feature flag is the only thing keeping the automation server
+  out of a build... if a future command ever compiles with `--features e2e-testing` but without
+  `tauri.e2e.conf.json`'s `--config`, the live automation server still starts." **Fixed**: both
+  `Cargo.toml`'s and `tauri.e2e.conf.json`'s comments rewritten to state plainly that the Cargo
+  feature is the sole boundary, the capability entry is build-manifest bookkeeping only (this
+  commit). "**2. [Low, accepted residual — no fix needed]** The embedded WebDriver server is
+  unauthenticated by design during the CI job itself... TCASVS V6.4.1... any other process on that
+  same ephemeral GitHub-hosted runner... could connect to `127.0.0.1:4445`." **Accepted, not
+  fixed**: inherent to WebDriver/Selenium-style E2E testing generally, blast radius is one
+  single-use random credential against a throwaway local stack destroyed at job end, no production
+  data or persistence involved — recorded here as a deliberate, named trade-off (root-cause
+  category D, this project's own existing taxonomy), not an overlooked gap. **Findings 3–7,
+  confirmed correct, no fix needed**: the `e2e-testing` feature is genuinely opt-in (no
+  `default = [...]` list includes it); `tauri.conf.json`'s `["default"]` restriction correctly
+  excludes the (now-removed) standalone capability file; `tauri.e2e.conf.json`'s
+  `["default", {...}]` correctly re-lists `"default"` explicitly (Tauri's config-merge replaces
+  arrays wholesale, not appends — omitting `"default"` would have silently dropped core/store
+  permissions during e2e runs; verified against Tauri's own config-merge docs); `tauri.e2e.conf.json`
+  cannot be picked up by a real build via Tauri's fixed auto-merge naming convention
+  (`tauri.<platform>.conf.json` only); the new dependencies' publish provenance checks out; CI
+  masking/permissions match the established pattern; a `--debug` CI build with no upload step is
+  not a supply-chain concern.
+- **Local empirical verification, done before this audit, re-confirmed here**: `cargo check`
+  (default, no `--features`) → clean, `tauri-plugin-wdio-webdriver` does not appear in the
+  dependency graph. `cargo check --features e2e-testing` → clean, the plugin compiles in
+  successfully. `gitleaks.exe detect --no-git` (the exact v8.24.3 binary CI uses, downloaded and
+  run locally) against the real `.gitleaks.toml` → `"no leaks found"` (this is the unrelated
+  false-positive fix bundled into this slice, see the two commits before this one).
+- **Not yet re-run after this audit's Cargo.toml/tauri.e2e.conf.json comment edits**: those are
+  comment-only changes (no functional TOML/JSON value changed), so `cargo check --features
+  e2e-testing` is not expected to newly fail — will be confirmed green by the next CI run
+  regardless, not asserted here without that confirmation.
+
+**E. Bounded claim:** `owasp-tcasvs` (all 6 chapters), `owasp-asvs-5` (all 17 chapters),
+`owasp-cheatsheets` (whole-directory keyword sweep, 6 files read in full) — scoped to the 9 files in
+`scope_files` above. One design-clarity finding fixed (misleading comment framing); one residual
+risk (unauthenticated local WebDriver server during CI) explicitly accepted, not fixed, with a
+named reason. No blocking or high-severity finding.
+
+**F. Independent pass:** Run this pass, per rule 11 (C.6 above) — a fresh general-purpose subagent,
+not the session that designed the slice, read every changed file itself and ran its own
+whole-directory OWASP/TCASVS/cheat-sheet sweep rather than accepting the design's own stated
+reasoning at face value.
+
+
 
 ```
 status: complete

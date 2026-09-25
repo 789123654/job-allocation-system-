@@ -119,8 +119,11 @@ def open_issue() -> Generator[dict[str, UUID]]:
         )
     yield {"firm_id": firm_id, "task_id": task_id, "issue_id": issue_id, "owner_id": owner_id}
     with admin_engine.begin() as conn:
-        conn.execute(text("DELETE FROM issues WHERE firm_id = :fid"), {"fid": firm_id})
+        # notifications first: resolve_issue now writes an `issue_resolved` notification that
+        # references the issue (notifications_firm_id_issue_id_fkey), so deleting issues first
+        # violates that FK — found when the real-Postgres suite was first run locally.
         conn.execute(text("DELETE FROM notifications WHERE firm_id = :fid"), {"fid": firm_id})
+        conn.execute(text("DELETE FROM issues WHERE firm_id = :fid"), {"fid": firm_id})
         conn.execute(text("DELETE FROM tasks WHERE firm_id = :fid"), {"fid": firm_id})
         conn.execute(text("DELETE FROM profiles WHERE firm_id = :fid"), {"fid": firm_id})
         conn.execute(text("DELETE FROM firms WHERE id = :fid"), {"fid": firm_id})

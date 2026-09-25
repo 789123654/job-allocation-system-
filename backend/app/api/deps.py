@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 from sqlmodel import text as sql_text
 
 from app import crud
+from app.core import request_context
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import InvalidTokenError, verify_access_token
@@ -19,7 +20,17 @@ logger = logging.getLogger("app.auth")
 SessionDep = Annotated[Session, Depends(get_session)]
 # Shared across every Idempotency-Key route (tasks/issues/employees) — was the literal header
 # alias repeated 7 times across three files (SonarQube: define a constant instead of duplicating).
-IdempotencyKeyHeader = Annotated[str, Header(alias="Idempotency-Key")]
+# max_length added (code-review finding #14, 2026-09-14): every Pydantic Field()-declared string
+# elsewhere in this codebase has one (Input_Validation_Cheat_Sheet.md — "minimum and maximum length
+# check for strings"), but Header() is a different declaration idiom and this one was missed. No
+# source specifies a required number: neither Rule 230 (rest-api-guidelines) nor the Idempotency-Key
+# header's own schema it points to (Zalando's headers-1.0.0.yaml, fetched directly — `type: string,
+# format: uuid`, no length constraint) sets one; it just recommends "a UUID v4 or any other random
+# string with enough entropy." 255 is a judgment call, not a cited figure — generous for any
+# legitimate UUID (36 chars) or reasonable random token, while still capping an oversized value
+# (Header() accepts the same validation kwargs as Query()/Path(), confirmed against
+# fastapi/guide/tutorial/header-params.md, not assumed from Query's own docs alone).
+IdempotencyKeyHeader = Annotated[str, Header(alias="Idempotency-Key", max_length=255)]
 _bearer_scheme = HTTPBearer()
 
 
@@ -70,6 +81,13 @@ def get_current_profile(
         {"firm_id": str(firm_id)},
     )
 
+    # Log identity, bound from the SIGNATURE-VERIFIED claim (never a client header) at the same
+    # point as the Sentry tag below, so even a request that later fails the profile check is
+    # attributable to a tenant. The one place identity enters the logs (code-review root cause
+    # A: one site, not threaded through every route). bind_identity() drops a value that isn't a
+    # valid UUID.
+    request_context.bind_identity(tenant_id=firm_id)
+
     # Tenant tag, set as early as firm_id is known-good — every log line and Sentry event for the
     # rest of this request is then attributable to a tenant without threading firm_id through every
     # call site by hand (saas-multitenant-architecture ch07: "every metric event a service emits
@@ -81,13 +99,31 @@ def get_current_profile(
     if settings.SENTRY_DSN:
         sentry_sdk.set_tag("tenant_id", str(firm_id))
 
-    profile = session.exec(select(Profile).where(Profile.id == UUID(user_id))).first()
+    try:
+        # Code-review finding #15 (2026-09-14): every other malformed-token shape in this function
+        # is caught and turned into a clean 401 — this line was the one place that pattern wasn't
+        # applied, most likely because a `sub` claim from an already-signature-verified JWT
+        # "shouldn't" be malformed. It still isn't trusted input at the type level: nothing stops a
+        # legitimately-signed token from carrying a non-UUID `sub` (a misissued token, a JWT signed
+        # by a differently-configured Supabase project sharing the same JWKS during a migration,
+        # etc.), and Input_Validation_Cheat_Sheet.md's baseline — validate structure, don't assume
+        # it from where the data came from — applies to every claim, not just the ones already
+        # covered above.
+        user_uuid = UUID(user_id)
+    except ValueError:
+        logger.warning("Authentication failed: token 'sub' claim is not a valid UUID")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token missing required claims") from None
+
+    profile = session.exec(select(Profile).where(Profile.id == user_uuid)).first()
     if profile is None or not profile.is_active:
         logger.warning(
             "Authentication failed: profile %s inactive or not found (firm %s)", user_id, firm_id
         )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account inactive or not found")
 
+    # From the DB profile row, not the JWT: role in a token can lag or be crafted by a misissued
+    # token; require_owner already trusts the row for the same reason.
+    request_context.bind_identity(actor_id=profile.id, actor_role=profile.role)
     logger.debug("Authentication succeeded for profile %s (firm %s)", user_id, firm_id)
     return profile
 

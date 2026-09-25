@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import {
   isAlreadyResetConflict,
   useResetEmployeePassword,
 } from "@/features/employees/api/reset-employee-password";
+import { SecretRevealPanel } from "@/features/employees/components/secret-reveal-panel";
 
 export function ResetPasswordDialog({
   employeeId,
@@ -55,21 +55,11 @@ export function ResetPasswordDialog({
       <DialogContent>
         <DialogTitle>Reset password for {employeeName}</DialogTitle>
         {generatedPassword ? (
-          <div className="flex flex-col gap-4">
-            <p className="text-sm text-(--color-ledger-text-muted)">
-              Share this temporary password with {employeeName} directly — it is shown only this
-              once and cannot be retrieved again.
-            </p>
-            <Input
-              readOnly
-              value={generatedPassword}
-              onFocus={(e) => e.currentTarget.select()}
-              className="font-(family-name:--font-mono)"
-            />
-            <Button type="button" onClick={() => handleOpenChange(false)}>
-              Done
-            </Button>
-          </div>
+          <SecretRevealPanel
+            recipientLabel={employeeName}
+            value={generatedPassword}
+            onDone={() => handleOpenChange(false)}
+          />
         ) : (
           <div className="flex flex-col gap-4">
             <p className="text-sm text-(--color-ledger-text-muted)">

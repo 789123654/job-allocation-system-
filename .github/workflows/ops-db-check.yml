@@ -1,0 +1,57 @@
+name: Ops DB health check
+
+# Scheduled leading-indicator check of the production database (docs/OBSERVABILITY.md): connection
+# headroom, stuck/slow/blocked work, vacuum lag, table growth. Exits non-zero on ANY finding, so a
+# failed run is the alert — GitHub's failure notice goes to whoever last edited the cron line below.
+#
+# Off by default. A scheduled run only happens once the repository VARIABLE OPS_MONITORING_ENABLED
+# is "true" (set it after the ops_monitor role has a password and the environment secret exists),
+# so merging this file cannot start failing runs against a database that isn't wired up yet. A
+# manual run (workflow_dispatch) always works. GitHub only fires `schedule` from the default
+# branch, and disables it after 60 days of repo inactivity on public repos.
+#
+# Secret: OPS_MONITOR_DATABASE_URL, an ENVIRONMENT secret on `ops-monitoring` (do NOT add required
+# reviewers to that environment — a scheduled run would wait on a human forever). It is the
+# ops_monitor role's URL: pooler user `ops_monitor.<project-ref>`, port 5432, ?sslmode=verify-full.
+# That role has no table privileges (migration 66bc34819e6a); the URL is exposed to one step only.
+on:
+  workflow_dispatch:
+  schedule:
+    # Hourly, off the top of the hour (GitHub can delay runs at the start of every hour under load).
+    - cron: "17 * * * *"
+
+permissions: {}
+
+# Never two at once, and never cancel a run mid-check.
+concurrency:
+  group: ops-db-check
+  cancel-in-progress: false
+
+jobs:
+  db-check:
+    if: github.event_name == 'workflow_dispatch' || vars.OPS_MONITORING_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ops-monitoring
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+      # Runtime deps only: this job never needs the dev toolchain.
+      - run: uv sync --frozen --no-dev
+      - name: Check database health
+        env:
+          OPS_MONITOR_DATABASE_URL: ${{ secrets.OPS_MONITOR_DATABASE_URL }}
+          # sslmode=verify-full needs the CA that signed Supabase's pooler certificate; libpq looks
+          # in ~/.postgresql/root.crt unless told otherwise (PostgreSQL 17 docs, libpq-ssl). The
+          # repo's certs/supabase-ca.crt was checked 2026-09-19 to verify *.pooler.supabase.com.
+          PGSSLROOTCERT: certs/supabase-ca.crt
+        run: uv run python -m ops.db_check

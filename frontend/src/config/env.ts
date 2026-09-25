@@ -16,4 +16,7 @@ export const env = {
   // Optional, same as backend/app/core/config.py's SENTRY_DSN — unset (dev/test/CI) means Sentry
   // is never initialized, not a missing-config error.
   SENTRY_DSN: import.meta.env.VITE_SENTRY_DSN as string | undefined,
+  // Optional build identifier stamped on Sentry events (e.g. a git SHA set by the build) — lets a
+  // crash be tied to the exact desktop build that produced it. Unset just means no release tag.
+  SENTRY_RELEASE: import.meta.env.VITE_SENTRY_RELEASE as string | undefined,
 };

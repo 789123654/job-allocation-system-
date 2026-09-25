@@ -1,12 +1,7 @@
-from urllib.parse import parse_qs
-
-from pydantic import PostgresDsn, computed_field, field_validator
+from pydantic import Field, PostgresDsn, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# A DB connection to one of these never leaves the host, so there is no network segment to
-# intercept — local dev and CI's postgres service container both connect this way. Every other
-# host is treated as remote and must prove TLS with full cert validation (see the validator below).
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+from app.core.dsn import require_tls_for_remote_hosts
 
 
 class Settings(BaseSettings):
@@ -34,6 +29,32 @@ class Settings(BaseSettings):
     # Optional — error/performance monitoring (DEPLOYMENT.md §6). None (the default) means Sentry
     # is never initialized at all: local dev and CI have no reason to send anything anywhere.
     SENTRY_DSN: str | None = None
+    # Which build/environment an event came from (DEPLOYMENT.md §6). None lets the Sentry SDK fall
+    # back to its own SENTRY_RELEASE/SENTRY_ENVIRONMENT process env vars, then its defaults.
+    SENTRY_RELEASE: str | None = None
+    SENTRY_ENVIRONMENT: str | None = None
+
+    # DB connection pool (core/db.py). Defaults are SQLAlchemy's own (5 + 10), stated here so the
+    # readiness probe and the pool-utilization warning read the SAME capacity the engine was built
+    # with instead of re-deriving it. Production sizing is a deployment decision bounded by
+    # Postgres's max_connections (60 on the current Supabase project, read live 2026-09-19):
+    # (pool_size + max_overflow) x worker processes must stay under ~80% of it (Supabase's
+    # connection-management guide), leaving room for Auth's own connections.
+    DB_POOL_SIZE: int = Field(default=5, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=10, ge=0)
+    # Warn (app.pool log) when checked-out / capacity reaches this — leading indicator, not failure.
+    DB_POOL_WARN_RATIO: float = Field(default=0.7, gt=0, le=1)
+    # Bounds how long opening a NEW physical connection (pool exhausted, or a stale one recycled)
+    # may block, in libpq's own units (seconds). Without this, psycopg's connect() has no
+    # application-level bound at all — confirmed live (2026-09-22) via a faulthandler thread-stack
+    # dump during a schemathesis fuzz run: `get_current_profile` (api/deps.py) sat inside
+    # `psycopg.connection.connect` -> `selectors.select`, blocked for the full ~260s Windows took to
+    # give up the TCP handshake on its own, not any timeout this app set. Denial_of_Service_Cheat_
+    # Sheet.md ("Define an absolute connection timeout") and ASVS 13.1.3/13.2.6 (short timeouts,
+    # documented behavior at the connection limit, on every external sync connection) both name this
+    # exact gap. Same value `ops/db_check.py` already uses for its own separate diagnostic
+    # connection (_CONNECT_TIMEOUT_SECONDS = 10) — kept in sync, not independently chosen.
+    DB_CONNECT_TIMEOUT_SECONDS: int = Field(default=10, ge=1)
 
     @field_validator("DATABASE_URL", "MIGRATIONS_DATABASE_URL")
     @classmethod
@@ -52,24 +73,9 @@ class Settings(BaseSettings):
     @field_validator("DATABASE_URL", "MIGRATIONS_DATABASE_URL")
     @classmethod
     def _require_tls_to_remote_db(cls, v: PostgresDsn) -> PostgresDsn:
-        # ASVS 5 §12.3.1 ("encrypted protocol for all ... database connections; no fallback to
-        # cleartext") + §12.3.2 ("TLS clients validate received certificates"). DEPLOYMENT.md §2
-        # already mandates `sslmode=verify-full` on the Railway→Supabase leg; this makes it
-        # impossible to *boot* against a remote Postgres without it, the same fail-loud-at-startup
-        # stance as `_require_psycopg_driver` above. `verify-full` specifically — `require`/`prefer`
-        # encrypt but skip cert validation, so they satisfy §12.3.1 but not §12.3.2.
-        # Loopback is the one exemption (see `_LOOPBACK_HOSTS`) — "regardless of network location"
-        # still holds for anything that actually crosses a network.
-        hosts = v.hosts()
-        host = hosts[0]["host"] if hosts else None
-        if host in _LOOPBACK_HOSTS:
-            return v
-        if parse_qs(v.query or "").get("sslmode") != ["verify-full"]:
-            raise ValueError(
-                f"remote DB host {host!r} must use sslmode=verify-full "
-                "(ASVS 12.3, DEPLOYMENT.md §2) — encrypt and validate the certificate"
-            )
-        return v
+        # The rule and its reasoning live in core/dsn.py, shared with ops/db_check.py — same
+        # fail-loud-at-startup stance as `_require_psycopg_driver` above.
+        return require_tls_for_remote_hosts(v)
 
     @computed_field
     @property
