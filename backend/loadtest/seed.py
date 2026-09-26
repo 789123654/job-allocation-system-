@@ -21,6 +21,35 @@ not just measure latency on each caller's own data.
 /job-types/{id} and PATCH /notifications/{id}/read need a real write target, unlike the read-only
 endpoints above. `foreign_job_type_id`/`foreign_notification_id` per identity, same
 rejection-sampling pattern as `foreign_task_id`.
+
+2026-09-27 additions (blind attack-suite support, see script.js):
+- `foreign_employee_id` per identity — same rejection-sampling pattern as the three above, for
+  PATCH /employees/{id}'s cross-tenant probe. Picks a firm's first employee, falling back to its
+  owner if `employees_per_firm=0`, since any real profile row in another firm serves the same
+  "does this object 404 across tenants" purpose.
+- `mismatched_claim_firm_id` / `mismatched_claim_token` per identity, and `escalated_role_token`
+  for employee identities — tokens with a VALID signature (minted with the same private key as
+  `token`) but claims that disagree with what this profile's real seeded row actually is: a real
+  `sub` paired with a different firm's `firm_id`, or a real employee's `sub` paired with
+  `role: "owner"`. k6 has no signing key, so these can't be forged client-side in script.js — only
+  seed.py (holding `private_key.pem`) can mint them. This is what lets script.js test "does the
+  server ever honor a client-supplied claim it shouldn't" (Multi_Tenant_Security_Cheat_Sheet.md /
+  ASVS 8.4.1) as opposed to just "is a bad signature rejected" (already covered by `token` +
+  tampering in script.js).
+- A single deterministic **race scenario**, not per-firm: one extra task (`race_task_id`), seeded
+  directly into `assigned` status for one real employee (`race_employee_id` in firm #0), with a
+  fixed `race_idempotency_key` and that employee's own `race_token` — identical values copied onto
+  *every* identity so that whichever random VU iterations land on the race probe branch, across the
+  whole run, all hit the exact same request, the only way k6's independent VUs can be made to
+  genuinely collide on the same row without adding a coordination mechanism this project doesn't
+  otherwise need (`Business_Logic_Security_Cheat_Sheet.md`'s "Prevent Race Conditions on Sensitive
+  Operations" / "Use Idempotency Keys" sections).
+- **`foreign_issue_id`, added 2026-09-27 (fast-follow to the blind pass above)** — one `issues` row
+  seeded per firm (schema read directly from the `a3f5c9e21d07` migration, not guessed), same
+  one-per-firm rejection-sampling pattern as `foreign_job_type_id`/`foreign_notification_id`.
+  Skipped only for a firm with zero seeded tasks (`issues.task_id` is `NOT NULL`, FK'd to
+  `tasks (firm_id, id)`) — same "no foreign object exists" fallback as the other `foreign_*_id`
+  fields when `tasks_per_firm=0`.
 """
 
 import argparse
@@ -44,13 +73,16 @@ _KID = "loadtest-key-1"  # must match generate_keys.py's _KID exactly — see th
 _TASK_STATUSES = ("created", "assigned", "in_progress", "submitted", "completed", "billed")
 
 
-def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm: int) -> list[dict]:
+def _seed(
+    conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm: int
+) -> tuple[list[dict], dict]:
     identities: list[dict] = []
     firm_rows: list[dict] = []
     profile_rows: list[dict] = []
     task_rows: list[dict] = []
     job_type_rows: list[dict] = []
     notification_rows: list[dict] = []
+    issue_rows: list[dict] = []
     # firm_id -> [task_id, ...], client-generated below (not DB-returned) so script.js's
     # cross-tenant probe (2026-09-17 addition) has a real task id it KNOWS belongs to a different
     # firm than the requester, without an extra round-trip or RETURNING clause.
@@ -59,9 +91,19 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
     # a single real write target each, unlike tasks_by_firm above).
     job_type_by_firm: dict[object, object] = {}
     notification_by_firm: dict[object, object] = {}
+    issue_by_firm: dict[object, object] = {}
+    # 2026-09-27 addition — same one-per-firm shape, for PATCH /employees/{id}'s cross-tenant probe.
+    employee_by_firm: dict[object, object] = {}
     now = datetime.now(UTC)
 
-    for _ in range(firms):
+    # 2026-09-27 addition — the one deterministic race-condition target (script.js's
+    # businessLogicRaceProbe), captured from firm #0 specifically so it exists exactly once
+    # regardless of `firms`, not one per firm (a single genuinely-contested row is the point).
+    race_firm_id: object | None = None
+    race_owner_id: object | None = None
+    race_employee_id: object | None = None
+
+    for i in range(firms):
         firm_id = uuid4()
         firm_rows.append({"id": firm_id})
 
@@ -93,6 +135,16 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
             identities.append(
                 {"firm_id": str(firm_id), "profile_id": str(emp_id), "role": "employee"}
             )
+
+        # Falls back to the owner when employees_per_firm=0 — any real profile row in this firm
+        # proves the same thing to the cross-tenant probe (a different firm's object 404s), same
+        # reasoning as job_type_by_firm/notification_by_firm's one-per-firm shape.
+        employee_by_firm[firm_id] = employee_ids[0] if employee_ids else owner_id
+
+        if i == 0:
+            race_firm_id = firm_id
+            race_owner_id = owner_id
+            race_employee_id = employee_ids[0] if employee_ids else None
 
         firm_task_ids: list[object] = []
         for _ in range(tasks_per_firm):
@@ -147,6 +199,44 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
         )
         notification_by_firm[firm_id] = notification_id
 
+        # 2026-09-27 addition — one issue per firm, for GET /issues/{id}'s cross-tenant probe
+        # (crossTenantIssueProbe, script.js). issues.task_id is NOT NULL (FK'd to tasks), so this
+        # only exists for a firm that actually seeded at least one task, same fallback shape as
+        # employee_by_firm falling back to the owner when employees_per_firm=0.
+        if firm_task_ids:
+            issue_id = uuid4()
+            issue_rows.append(
+                {
+                    "id": issue_id,
+                    "fid": firm_id,
+                    "task_id": firm_task_ids[0],
+                    "raised_by": owner_id,
+                    "description": "Load test issue",
+                }
+            )
+            issue_by_firm[firm_id] = issue_id
+
+    # 2026-09-27 addition — the race-condition target itself, appended once (not per firm) so it
+    # goes into the same bulk task INSERT below. Deterministic status/assignee, not the random
+    # spread above: businessLogicRaceProbe needs a task that starts life "assigned" and stays a
+    # valid /submit target for the whole run, not whatever a random roll happened to produce.
+    race_idempotency_key: str | None = None
+    race_task_id: object | None = None
+    if race_employee_id is not None:
+        race_task_id = uuid4()
+        race_idempotency_key = str(uuid4())
+        task_rows.append(
+            {
+                "id": race_task_id,
+                "fid": race_firm_id,
+                "title": "Race probe target — do not remove",
+                "assigned_to": race_employee_id,
+                "deadline": None,
+                "status": "assigned",
+                "created_by": race_owner_id,
+            }
+        )
+
     if firm_rows:
         conn.execute(
             text(
@@ -192,6 +282,14 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
             ),
             notification_rows,
         )
+    if issue_rows:
+        conn.execute(
+            text(
+                "INSERT INTO issues (id, firm_id, task_id, raised_by, description, status, created_at) "
+                "VALUES (:id, :fid, :task_id, :raised_by, :description, 'open', now())"
+            ),
+            issue_rows,
+        )
 
     # Cross-tenant probe target (script.js, 2026-09-17): each identity gets one real task id known
     # to belong to a DIFFERENT firm, so the load test can assert GET /tasks/{id} 404s for it under
@@ -203,12 +301,20 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
     for identity in identities:
         if len(firm_ids) < 2:
             identity["foreign_task_id"] = None  # nothing foreign exists to pick
+            identity["mismatched_claim_firm_id"] = None
             continue
         while True:
             other_firm = random.choice(firm_ids)
             if str(other_firm) != identity["firm_id"]:
                 break
         identity["foreign_task_id"] = str(random.choice(tasks_by_firm[other_firm]))
+        # 2026-09-27 addition — the SAME other_firm already picked above, reused (not a fresh
+        # rejection-sampling pass) so claimMismatchProbe's forged-firm token and the real
+        # foreign_task_id it targets always point at the same firm: a token honestly signed for
+        # this identity's own profile, but claiming to belong to the firm that owns
+        # foreign_task_id, then requesting exactly that task — the one request shape that would
+        # actually reveal whether firm_id claims are trusted over the profile's real, seeded firm.
+        identity["mismatched_claim_firm_id"] = str(other_firm)
 
     # Same rejection-sampling pattern, one per firm this time so no random.choice over a list is
     # needed (job_type_by_firm/notification_by_firm each map firm_id -> a single id already).
@@ -233,23 +339,106 @@ def _seed(conn: Connection, firms: int, employees_per_firm: int, tasks_per_firm:
                     break
             identity["foreign_notification_id"] = str(notification_by_firm[other])
 
-    return identities
+    # 2026-09-27 addition — same one-per-firm rejection-sampling pattern, for PATCH
+    # /employees/{id}'s cross-tenant probe (employeeUpdateProbe, script.js).
+    employee_firm_ids = list(employee_by_firm.keys())
+    for identity in identities:
+        if len(employee_firm_ids) < 2:
+            identity["foreign_employee_id"] = None
+        else:
+            while True:
+                other = random.choice(employee_firm_ids)
+                if str(other) != identity["firm_id"]:
+                    break
+            identity["foreign_employee_id"] = str(employee_by_firm[other])
+
+    # 2026-09-27 addition — same one-per-firm rejection-sampling pattern, for GET /issues/{id}'s
+    # cross-tenant probe (crossTenantIssueProbe, script.js). issue_by_firm only has entries for
+    # firms that seeded at least one task, so this can be < firm_ids's own length.
+    issue_firm_ids = list(issue_by_firm.keys())
+    for identity in identities:
+        if len(issue_firm_ids) < 2:
+            identity["foreign_issue_id"] = None
+        else:
+            while True:
+                other = random.choice(issue_firm_ids)
+                if str(other) != identity["firm_id"]:
+                    break
+            identity["foreign_issue_id"] = str(issue_by_firm[other])
+
+    return identities, {
+        "task_id": str(race_task_id) if race_task_id else None,
+        "employee_id": str(race_employee_id) if race_employee_id else None,
+        "firm_id": str(race_firm_id) if race_firm_id else None,
+        "idempotency_key": race_idempotency_key,
+    }
 
 
-def _mint_tokens(identities: list[dict], private_key: object, issuer: str) -> None:
+def _mint_tokens(
+    identities: list[dict], private_key: object, issuer: str, race_info: dict
+) -> None:
     # Generous fixed expiry — minted once before the whole run starts, must outlive it entirely.
     exp = int(time.time()) + 4 * 3600
-    for identity in identities:
+    expired = int(time.time()) - 3600  # already-expired, for forgedTokenVariantProbe
+
+    def _mint(sub: str, firm_id: str, role: str, **overrides) -> str:
         claims = {
-            "sub": identity["profile_id"],
+            "sub": sub,
             "aud": "authenticated",
             "iss": issuer,
             "exp": exp,
-            "app_metadata": {"firm_id": identity["firm_id"], "role": identity["role"]},
+            "app_metadata": {"firm_id": firm_id, "role": role},
         }
-        identity["token"] = jwt.encode(
-            claims, private_key, algorithm="RS256", headers={"kid": _KID}
+        claims.update(overrides)
+        return jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": _KID})
+
+    for identity in identities:
+        identity["token"] = _mint(identity["profile_id"], identity["firm_id"], identity["role"])
+        # 2026-09-27 additions — all four below carry a VALID signature (this is the whole point:
+        # k6 can't forge a signature without the private key, only seed.py can) but a claim that
+        # disagrees with either the token spec (ARCHITECTURE.md §4's exp/iss/aud checklist) or with
+        # this profile's own real, seeded row — checked directly against
+        # `owasp-cheatsheets/JSON_Web_Token_Cheat_Sheet.md`'s exp/iss/aud table and
+        # `Multi_Tenant_Security_Cheat_Sheet.md`'s "never trust client-supplied tenant ID" guidance.
+        identity["expired_token"] = _mint(
+            identity["profile_id"], identity["firm_id"], identity["role"], exp=expired
         )
+        identity["bad_iss_token"] = _mint(
+            identity["profile_id"], identity["firm_id"], identity["role"], iss=issuer + "-wrong"
+        )
+        # "anon" is Supabase's own other real audience value (generate_keys.py/ARCHITECTURE.md §4
+        # note that "authenticated" is the only correct one here) — a plausible-looking wrong
+        # value, not an arbitrary string, matching how a real confused-audience token would look.
+        identity["bad_aud_token"] = _mint(
+            identity["profile_id"], identity["firm_id"], identity["role"], aud="anon"
+        )
+        if identity.get("mismatched_claim_firm_id"):
+            identity["mismatched_claim_token"] = _mint(
+                identity["profile_id"], identity["mismatched_claim_firm_id"], identity["role"]
+            )
+        else:
+            identity["mismatched_claim_token"] = None
+        if identity["role"] == "employee":
+            identity["escalated_role_token"] = _mint(
+                identity["profile_id"], identity["firm_id"], "owner"
+            )
+        else:
+            identity["escalated_role_token"] = None
+
+    # Race scenario: one shared token for one real employee, copied onto every identity (see the
+    # module docstring) so script.js's businessLogicRaceProbe always targets the same row/key
+    # regardless of which identity a given VU iteration randomly drew.
+    if race_info["employee_id"]:
+        race_token = _mint(race_info["employee_id"], race_info["firm_id"], "employee")
+        for identity in identities:
+            identity["race_task_id"] = race_info["task_id"]
+            identity["race_idempotency_key"] = race_info["idempotency_key"]
+            identity["race_token"] = race_token
+    else:
+        for identity in identities:
+            identity["race_task_id"] = None
+            identity["race_idempotency_key"] = None
+            identity["race_token"] = None
 
 
 def main() -> None:
@@ -275,10 +464,10 @@ def main() -> None:
 
     engine = create_engine(db_url)
     with engine.begin() as conn:
-        identities = _seed(conn, args.firms, args.employees_per_firm, args.tasks_per_firm)
+        identities, race_info = _seed(conn, args.firms, args.employees_per_firm, args.tasks_per_firm)
     engine.dispose()
 
-    _mint_tokens(identities, private_key, issuer)
+    _mint_tokens(identities, private_key, issuer, race_info)
 
     out_path = _HERE / "identities.json"
     out_path.write_text(json.dumps(identities))

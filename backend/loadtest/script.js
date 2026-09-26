@@ -33,6 +33,15 @@
 import http from "k6/http";
 import { check, sleep } from "k6";
 import { SharedArray } from "k6/data";
+import encoding from "k6/encoding";
+
+// 2026-09-27 — attack-test suite added alongside the existing latency/isolation checks above,
+// interleaved into the same dispatcher/VU-iteration pattern (not a separate script/executor), per
+// this project's own standing instruction to check every mechanism against `owasp-cheatsheets` and
+// `owasp-asvs-5`, not just at design time. Written from `docs/API_SPEC.md`/`docs/ARCHITECTURE.md`
+// and the four `owasp-*` skills only — never from reading `backend/app/` or `supabase/` — so these
+// probes assert what the contract documents must hold, not what today's implementation happens to
+// do. Citations are in each new function's own comment, not repeated here.
 
 const BASE_URL = __ENV.API_BASE_URL || "http://localhost:8000";
 
@@ -84,14 +93,92 @@ function pseudoUuid() {
 // (SonarQube S3776, cognitive complexity) purely for readability — same requests, same checks, same
 // isolation:critical tags, no behavior change.
 
+// Category 5 (transport/security-headers, continuous) — API_SPEC.md §1's "Added 2026-09-05" section
+// names 5 headers required on every response a client sees, checked directly against
+// `owasp-cheatsheets/HTTP_Headers_Cheat_Sheet.md`'s own sections for each one (Cache-Control,
+// X-Content-Type-Options, X-Frame-Options, CSP frame-ancestors, HSTS) plus ASVS 5's
+// `v4-api-web-service.md` V4.1 (Content-Type must carry a charset). Called from the two
+// highest-frequency branches below (pollNotifications/pollTasks) rather than its own dispatcher
+// branch — that's "sampled throughout the run" without spending extra request volume on a check
+// that any existing response already carries the answer to.
+function assertSecurityHeaders(res) {
+  check(
+    res,
+    {
+      "Cache-Control: no-store present": (r) => (r.headers["Cache-Control"] || "").includes("no-store"),
+      "X-Content-Type-Options: nosniff present": (r) => r.headers["X-Content-Type-Options"] === "nosniff",
+      "X-Frame-Options: DENY present": (r) => r.headers["X-Frame-Options"] === "DENY",
+      "CSP frame-ancestors 'none' present": (r) =>
+        (r.headers["Content-Security-Policy"] || "").includes("frame-ancestors 'none'"),
+      "Strict-Transport-Security present": (r) => !!r.headers["Strict-Transport-Security"],
+      "Content-Type carries a charset (ASVS V4.1)": (r) => (r.headers["Content-Type"] || "").includes("charset"),
+    },
+    { isolation: "critical" },
+  );
+}
+
+// Category 7 (clean errors under stress) — called from every probe below that expects a non-2xx.
+// RFC 9457 shape per API_SPEC.md §1 ("Rule 176/177"), cross-checked against
+// `owasp-cheatsheets/Error_Handling_Cheat_Sheet.md` (never a stack trace / internals in the body)
+// and `REST_Security_Cheat_Sheet.md`'s own error-format section. The "no other tenant's data" half
+// of this can't be checked generically without knowing every response shape (out of bounds for a
+// blind pass) — narrowed to "no email address appears in an error body at all", which both cheat
+// sheets' own minimal-error-shape guidance already rules out regardless of whose tenant it is.
+function assertCleanProblemDetails(res) {
+  if (res.status < 400) return;
+  const body = res.body || "";
+  const contentType = res.headers["Content-Type"] || "";
+  check(
+    res,
+    {
+      "error response is application/problem+json (RFC 9457)": () => contentType.includes("application/problem+json"),
+      "error body has no stack trace/SQL/internals": () =>
+        !/traceback|exception|psycopg|sqlalchemy|select .* from|\bat \w+\(/i.test(body),
+      "error body contains no email address (no other tenant's PII)": () =>
+        !/[\w.-]+@[\w.-]+\.\w+/.test(body),
+    },
+    { isolation: "critical" },
+  );
+  let parsed = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch (e) {
+    parsed = null;
+  }
+  check(null, {
+    "error body has RFC 9457 fields (type/title/status/detail/instance)": () =>
+      !!parsed && ["type", "title", "status", "detail", "instance"].every((k) => k in parsed),
+  }, { isolation: "critical" });
+}
+
+// Category 2 (forged/broken tokens) — the one variant k6 can build without seed.py's signing key:
+// an unsigned `alg: none` token, checked directly against
+// `owasp-cheatsheets/JSON_Web_Token_Cheat_Sheet.md`'s "None Algorithm" section ("Make sure that
+// alg:none is not accepted by your JWT parser"). `k6/encoding`'s `rawurl` mode is exactly base64url
+// with no padding, i.e. the JOSE encoding a real header/payload segment uses.
+function algNoneToken(identity) {
+  const b64 = (obj) => encoding.b64encode(JSON.stringify(obj), "rawurl");
+  const header = b64({ alg: "none", typ: "JWT" });
+  const payload = b64({
+    sub: identity.profile_id,
+    aud: "authenticated",
+    iss: `${BASE_URL}/auth/v1`,
+    exp: Math.trunc(Date.now() / 1000) + 3600,
+    app_metadata: { firm_id: identity.firm_id, role: identity.role },
+  });
+  return `${header}.${payload}.`;
+}
+
 function pollNotifications(headers) {
   const res = http.get(`${BASE_URL}/notifications`, { headers });
   check(res, { "notifications 200": (r) => r.status === 200 });
+  assertSecurityHeaders(res);
 }
 
 function pollTasks(identity, headers) {
   const res = http.get(`${BASE_URL}/tasks`, { headers });
   check(res, { "tasks list 200": (r) => r.status === 200 });
+  assertSecurityHeaders(res);
   const body = res.status === 200 ? res.json() : null;
   // Tenant-ownership assertion, not just a status check: the response must never contain the one
   // task id we know for certain belongs to a different firm (seed.py's foreign_task_id).
@@ -124,6 +211,7 @@ function crossTenantTaskProbe(identity, headers) {
     responseCallback: http.expectedStatuses(404),
   });
   check(res, { "cross-tenant task fetch 404s": (r) => r.status === 404 }, { isolation: "critical" });
+  assertCleanProblemDetails(res);
 }
 
 function tamperedTokenProbe(identity) {
@@ -137,6 +225,7 @@ function tamperedTokenProbe(identity) {
     responseCallback: http.expectedStatuses(401),
   });
   check(res, { "tampered token rejected (401)": (r) => r.status === 401 }, { isolation: "critical" });
+  assertCleanProblemDetails(res);
 }
 
 function wrongRoleTaskCreateProbe(identity, headers) {
@@ -155,6 +244,7 @@ function wrongRoleTaskCreateProbe(identity, headers) {
     },
   );
   check(res, { "employee creating a task is rejected (403)": (r) => r.status === 403 }, { isolation: "critical" });
+  assertCleanProblemDetails(res);
 }
 
 function ownerTaskCreateProbe(identity, headers) {
@@ -195,6 +285,7 @@ function notificationReadProbe(identity, headers) {
       { "cross-tenant notification PATCH 404s": (r) => r.status === 404 },
       { isolation: "critical" },
     );
+    assertCleanProblemDetails(cross);
   }
 }
 
@@ -216,6 +307,7 @@ function jobTypeUpdateProbe(identity, headers) {
       { "employee updating a job type is rejected (403)": (r) => r.status === 403 },
       { isolation: "critical" },
     );
+    assertCleanProblemDetails(res);
     return;
   }
   const list = http.get(`${BASE_URL}/job-types`, { headers });
@@ -243,6 +335,7 @@ function jobTypeUpdateProbe(identity, headers) {
       { "cross-tenant job type PATCH 404s": (r) => r.status === 404 },
       { isolation: "critical" },
     );
+    assertCleanProblemDetails(cross);
   }
 }
 
@@ -262,6 +355,7 @@ function taskDeadlineProbe(identity, headers) {
       { "employee updating a task deadline is rejected (403)": (r) => r.status === 403 },
       { isolation: "critical" },
     );
+    assertCleanProblemDetails(res);
     return;
   }
   const list = http.get(`${BASE_URL}/tasks`, { headers });
@@ -289,7 +383,250 @@ function taskDeadlineProbe(identity, headers) {
       { "cross-tenant task deadline PATCH 404s": (r) => r.status === 404 },
       { isolation: "critical" },
     );
+    assertCleanProblemDetails(cross);
   }
+}
+
+function employeeUpdateProbe(identity, headers) {
+  // Category 1 + 3 combined (same shape as jobTypeUpdateProbe/taskDeadlineProbe above) — PATCH
+  // /employees/{id}, Owner-only per API_SPEC.md. Deliberately never flips a real seeded employee's
+  // `is_active` to false — that would deactivate a profile other concurrent iterations still rely
+  // on being able to authenticate as (ARCHITECTURE.md §4: is_active is checked fresh on every
+  // request), so the "own" write below is a same-value PATCH, same non-destructive pattern this
+  // file already uses for job-types (`is_active: jt.is_active`) and task deadlines
+  // (always a relative future date, never a fixed one that could already have passed).
+  // Cited: `owasp-cheatsheets/Authorization_Cheat_Sheet.md` (object-level auth on every {id}
+  // endpoint) + `owasp-wstg/05-authorization.md` (IDOR / horizontal-privilege testing).
+  if (identity.role !== "owner") {
+    const res = http.patch(
+      `${BASE_URL}/employees/${identity.foreign_employee_id || pseudoUuid()}`,
+      JSON.stringify({ is_active: true }),
+      {
+        headers: { ...headers, "Content-Type": "application/json" },
+        responseCallback: http.expectedStatuses(403),
+      },
+    );
+    check(
+      res,
+      { "employee updating another employee is rejected (403)": (r) => r.status === 403 },
+      { isolation: "critical" },
+    );
+    assertCleanProblemDetails(res);
+    return;
+  }
+  const list = http.get(`${BASE_URL}/employees`, { headers });
+  const own = list.status === 200 ? list.json() : null;
+  if (Array.isArray(own) && own.length > 0) {
+    const emp = own[Math.floor(Math.random() * own.length)];
+    const res = http.patch(
+      `${BASE_URL}/employees/${emp.id}`,
+      JSON.stringify({ is_active: emp.is_active }),
+      { headers: { ...headers, "Content-Type": "application/json" } },
+    );
+    check(res, { "employee update 200": (r) => r.status === 200 });
+  }
+  if (identity.foreign_employee_id) {
+    const cross = http.patch(
+      `${BASE_URL}/employees/${identity.foreign_employee_id}`,
+      JSON.stringify({ is_active: true }),
+      {
+        headers: { ...headers, "Content-Type": "application/json" },
+        responseCallback: http.expectedStatuses(404),
+      },
+    );
+    check(
+      cross,
+      { "cross-tenant employee PATCH 404s": (r) => r.status === 404 },
+      { isolation: "critical" },
+    );
+    assertCleanProblemDetails(cross);
+  }
+}
+
+function crossTenantIssueProbe(identity, headers) {
+  // Category 1's last direct-object case — GET /issues/{id} is "any authenticated" (API_SPEC.md:
+  // Owner sees any issue in their firm, an Employee only their own), but a cross-FIRM issue id
+  // must 404 regardless of role, same "404 not 403" convention as crossTenantTaskProbe. Cited:
+  // `owasp-cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md` +
+  // `owasp-asvs-5/chapters/v8-authorization.md` 8.2.2 (IDOR/BOLA).
+  // Inert until identities.json carries a real foreign_issue_id — seed.py's docstring explains why
+  // that field isn't populated yet (the `issues` table schema lives in the out-of-bounds
+  // `backend/app/models.py`); wired now so it starts firing the moment that's added, no script.js
+  // change needed.
+  if (!identity.foreign_issue_id) {
+    sleep(1);
+    return;
+  }
+  const res = http.get(`${BASE_URL}/issues/${identity.foreign_issue_id}`, {
+    headers,
+    responseCallback: http.expectedStatuses(404),
+  });
+  check(res, { "cross-tenant issue fetch 404s": (r) => r.status === 404 }, { isolation: "critical" });
+  assertCleanProblemDetails(res);
+}
+
+function forgedTokenVariantProbe(identity) {
+  // Category 2 (forged/broken tokens, continuous) — the other 4 variants alongside the existing
+  // bad-signature probe above, all straight from ARCHITECTURE.md §4's own JWT verification
+  // checklist (algorithm allowlist / exp / iss / aud), cross-checked against
+  // `owasp-cheatsheets/JSON_Web_Token_Cheat_Sheet.md`'s "None Algorithm" section and its exp/iss/
+  // aud claims table, and `owasp-asvs-5/chapters/v9-self-contained-tokens.md` 9.1.2/9.2.1/9.2.3.
+  // Rolled internally rather than 4 separate dispatcher branches, same reasoning as this file's own
+  // per-probe split, one level narrower. alg:none needs no signing key (built client-side above);
+  // the other three need a validly-signed-but-wrong-claim token, which only seed.py can mint.
+  const variant = Math.trunc(Math.random() * 4);
+  let bearer;
+  let label;
+  if (variant === 0) {
+    bearer = algNoneToken(identity);
+    label = "alg:none token rejected (401)";
+  } else if (variant === 1) {
+    bearer = identity.expired_token;
+    label = "expired token rejected (401)";
+  } else if (variant === 2) {
+    bearer = identity.bad_iss_token;
+    label = "wrong-issuer token rejected (401)";
+  } else {
+    bearer = identity.bad_aud_token;
+    label = "wrong-audience token rejected (401)";
+  }
+  const res = http.get(`${BASE_URL}/notifications`, {
+    headers: { Authorization: `Bearer ${bearer}` },
+    responseCallback: http.expectedStatuses(401),
+  });
+  check(res, { [label]: (r) => r.status === 401 }, { isolation: "critical" });
+  assertCleanProblemDetails(res);
+}
+
+function employeeCreateEmployeeProbe(identity, headers) {
+  // Category 3 (role escalation at scale) — POST /employees is Owner-only (API_SPEC.md); an
+  // Employee token must never create one, repeated at volume, not just single-request pytest
+  // coverage. Cited: `owasp-wstg/05-authorization.md` (privilege escalation via role tampering) +
+  // `owasp-cheatsheets/Authorization_Cheat_Sheet.md`. Owner branch deliberately skipped: the real
+  // creation path calls Supabase's Admin API (ARCHITECTURE.md §4), which this JWKS-stub harness
+  // never stands up — only the role gate itself (which runs before that call) is testable here.
+  if (identity.role === "owner") {
+    pollNotifications(headers);
+    return;
+  }
+  const res = http.post(
+    `${BASE_URL}/employees`,
+    JSON.stringify({ full_name: "Should Be Rejected", email: `${pseudoUuid()}@loadtest.example` }),
+    {
+      headers: { ...headers, "Content-Type": "application/json" },
+      responseCallback: http.expectedStatuses(403),
+    },
+  );
+  check(
+    res,
+    { "employee creating an employee is rejected (403)": (r) => r.status === 403 },
+    { isolation: "critical" },
+  );
+  assertCleanProblemDetails(res);
+}
+
+function employeeCreateJobTypeProbe(identity, headers) {
+  // Category 3, same shape — POST /job-types is Owner-only (API_SPEC.md), a pure DB write with no
+  // external dependency, so unlike employee creation this one could also exercise the legit owner
+  // path — deliberately not added here to avoid extra DB growth per iteration beyond what
+  // ownerTaskCreateProbe already accepts (README.md's own framing); the role gate is the point.
+  if (identity.role === "owner") {
+    pollNotifications(headers);
+    return;
+  }
+  const res = http.post(
+    `${BASE_URL}/job-types`,
+    JSON.stringify({ name: "should be rejected" }),
+    {
+      headers: { ...headers, "Content-Type": "application/json" },
+      responseCallback: http.expectedStatuses(403),
+    },
+  );
+  check(
+    res,
+    { "employee creating a job type is rejected (403)": (r) => r.status === 403 },
+    { isolation: "critical" },
+  );
+  assertCleanProblemDetails(res);
+}
+
+function claimMismatchProbe(identity) {
+  // Category 4 (zero-trust claim mismatch) — both tokens below carry a VALID signature (seed.py's
+  // private key, same as `token`); a real outside attacker can't forge one without it (only
+  // Supabase's Auth service ever mints app_metadata). This is defense-in-depth verification of
+  // ARCHITECTURE.md §5's stated tenant/role boundary, not a "can an outsider do this" test — cited
+  // directly: `owasp-cheatsheets/Multi_Tenant_Security_Cheat_Sheet.md` ("Never trust
+  // client-supplied tenant IDs without validation", "Tenant Context Injection") and
+  // `owasp-asvs-5/chapters/v8-authorization.md` 8.4.1 ("an operation can never affect a tenant the
+  // consumer has no permission for") + 8.2.2 (IDOR/BOLA) for the role-escalation half.
+  if (identity.mismatched_claim_token && identity.foreign_task_id) {
+    // Real sub, but firm_id claims the SAME firm that owns foreign_task_id (seed.py ties these
+    // together deliberately) — requesting exactly that task is the one shape that would reveal
+    // whether a forged firm_id claim is ever honored over the profile's real, seeded firm.
+    const res = http.get(`${BASE_URL}/tasks/${identity.foreign_task_id}`, {
+      headers: { Authorization: `Bearer ${identity.mismatched_claim_token}` },
+      responseCallback: http.expectedStatuses(404),
+    });
+    check(
+      res,
+      { "forged firm_id claim never grants access to that firm's task": (r) => r.status === 404 },
+      { isolation: "critical" },
+    );
+    assertCleanProblemDetails(res);
+  }
+  if (identity.escalated_role_token) {
+    // Real employee sub/firm_id, role claims "owner" — attempting an owner-only write with it.
+    const res = http.post(
+      `${BASE_URL}/job-types`,
+      JSON.stringify({ name: "should be rejected" }),
+      {
+        headers: {
+          Authorization: `Bearer ${identity.escalated_role_token}`,
+          "Content-Type": "application/json",
+        },
+        responseCallback: http.expectedStatuses(403),
+      },
+    );
+    check(
+      res,
+      { "forged owner-role claim never grants owner-only access": (r) => r.status === 403 },
+      { isolation: "critical" },
+    );
+    assertCleanProblemDetails(res);
+  }
+}
+
+function businessLogicRaceProbe(identity) {
+  // Category 6 (business-logic races at real concurrency) — deliberately ignores the per-iteration
+  // random `identity` for target selection: every VU that rolls into this branch, over the whole
+  // run, hits the exact SAME task + SAME Idempotency-Key with the SAME employee token (seed.py's
+  // race_task_id/race_idempotency_key/race_token, copied identically onto every identity), so
+  // concurrent VUs genuinely collide on the same request — the only way k6's independently
+  // iterating VUs can be made to race without adding a coordination mechanism this project doesn't
+  // otherwise need. Cited: `owasp-cheatsheets/Business_Logic_Security_Cheat_Sheet.md`'s "Prevent
+  // Race Conditions on Sensitive Operations" and "Use Idempotency Keys for External Actions"
+  // sections, and its own "Test Concurrency" checklist item ("write a test that races them").
+  // POST /tasks/{id}/submit is exactly one of API_SPEC.md §3's `Idempotency-Key`-pattern endpoints.
+  if (!identity.race_task_id) {
+    sleep(1);
+    return;
+  }
+  const res = http.post(`${BASE_URL}/tasks/${identity.race_task_id}/submit`, null, {
+    headers: {
+      Authorization: `Bearer ${identity.race_token}`,
+      "Content-Type": "application/json",
+      "Idempotency-Key": identity.race_idempotency_key,
+    },
+  });
+  // Never a 500: a lock/constraint violation from the race surfacing as an unhandled server error
+  // — rather than a clean 2xx first-success or a clean problem+json on a later conflicting call —
+  // is the race actually winning, not just losing gracefully.
+  check(
+    res,
+    { "concurrent duplicate-key submit never 500s": (r) => r.status < 500 },
+    { isolation: "critical" },
+  );
+  assertCleanProblemDetails(res);
 }
 
 export default function vuIteration() {
@@ -305,27 +642,46 @@ export default function vuIteration() {
   const identity = identities[Math.floor(Math.random() * identities.length)];
   const headers = { Authorization: `Bearer ${identity.token}` };
 
+  // Weights rebalanced 2026-09-27 to make room for the 7 new attack-suite branches below without
+  // dropping the original latency-measurement branches to zero — pollNotifications stays dominant
+  // (still the one truly continuous real-usage pattern, ARCHITECTURE.md §8) but every branch keeps
+  // enough share to be a genuinely continuous check across the whole ramp/hold/ramp-down window,
+  // not a one-shot at the start.
   const roll = Math.random();
-  if (roll < 0.35) {
+  if (roll < 0.25) {
     pollNotifications(headers);
-  } else if (roll < 0.45) {
+  } else if (roll < 0.33) {
     pollTasks(identity, headers);
-  } else if (roll < 0.52) {
+  } else if (roll < 0.38) {
     pollJobTypes(headers);
-  } else if (roll < 0.59) {
+  } else if (roll < 0.43) {
     crossTenantTaskProbe(identity, headers);
-  } else if (roll < 0.66) {
+  } else if (roll < 0.47) {
     tamperedTokenProbe(identity);
-  } else if (roll < 0.72) {
+  } else if (roll < 0.52) {
+    forgedTokenVariantProbe(identity);
+  } else if (roll < 0.57) {
     wrongRoleTaskCreateProbe(identity, headers);
-  } else if (roll < 0.77) {
+  } else if (roll < 0.6) {
+    employeeCreateEmployeeProbe(identity, headers);
+  } else if (roll < 0.63) {
+    employeeCreateJobTypeProbe(identity, headers);
+  } else if (roll < 0.67) {
     ownerTaskCreateProbe(identity, headers);
-  } else if (roll < 0.85) {
+  } else if (roll < 0.73) {
     notificationReadProbe(identity, headers);
-  } else if (roll < 0.93) {
+  } else if (roll < 0.78) {
     jobTypeUpdateProbe(identity, headers);
-  } else {
+  } else if (roll < 0.83) {
     taskDeadlineProbe(identity, headers);
+  } else if (roll < 0.88) {
+    employeeUpdateProbe(identity, headers);
+  } else if (roll < 0.91) {
+    crossTenantIssueProbe(identity, headers);
+  } else if (roll < 0.96) {
+    claimMismatchProbe(identity);
+  } else {
+    businessLogicRaceProbe(identity);
   }
 
   sleep(1 + Math.random() * 2); // between-poll think time, not a tight request loop
