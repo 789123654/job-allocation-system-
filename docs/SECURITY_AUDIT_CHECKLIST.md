@@ -24,9 +24,11 @@ commit: batch 3 fix (eb7c627); connect-timeout fix (905efb5) — both on branch 
 <!-- Left in place rather than moved to "Completed Audits" below (same reasoning as batch 2's closeout comment
 above it in this file): a large cut-paste on a 2000+ line doc risks corrupting it for a purely cosmetic reorg. -->
 
-Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20). Fill them while `in-progress`; the guard hook
-blocks a blank one. Evidence = a test name, a command's output or a rule that ran — "I believe it is done" is
-not evidence; write `PENDING — <what is missing>` until it exists. Add one `req_NN` line per requirement.
+Workflow rows (see `VERIFICATION_WORKFLOW.md`, added 2026-09-20, finalized §10 2026-09-27). Fill them while
+`in-progress`; the guard hook blocks a blank one. Evidence = a test name, a command's output or a rule that
+ran — "I believe it is done" is not evidence; write `PENDING — <what is missing>` until it exists. Add one
+`req_NN` line per requirement. `independent_review` (§10 Phase 8) is required alongside the three below —
+mandatory whenever `blind_test` is `no`, since at least one of the two outside checks must always run.
 
 - `trigger`: OBSERVABILITY.md §9 item 6's last open item from the 2026-09-19 review, and
   `CODE_REVIEW_FINDINGS`'s original `security_review_run` entry ("`ResponseValidationError` carries the whole
@@ -48,6 +50,8 @@ not evidence; write `PENDING — <what is missing>` until it exists. Add one `re
   parameter and FastAPI's known pyright false-positive on inline route handlers) that wasn't worth carrying for a
   file whose unique value was already extracted; kept in the session scratchpad for reference, not lost.
 - `hostile_inputs_tested`: PENDING — filled once req rows below are written up with the actual test names.
+- `independent_review`: N/A — field added 2026-09-27 (§10 Phase 8), after this audit was already closed;
+  not retroactively required for a completed pass. Required on every future `in-progress` audit.
 
 - `req_41`: BATCH 3 — `ResponseValidationError`/`RequestValidationError`/`WebSocketRequestValidationError`
   (`fastapi.exceptions.ValidationException`) embed the raw offending value(s) in their own `__str__` via Pydantic

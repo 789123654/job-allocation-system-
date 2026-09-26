@@ -136,10 +136,13 @@ Observability Phase 1, with batch 1 as the pilot; what batch 1's findings show d
   slow ordinary work with it.
 - The limit in §7 stays: this lowers the odds of a repeat, it does not promise a new kind of mistake cannot ship.
 
-**Audit-checklist template changes proposed in discussion** (not yet made): add a `trigger` field filled from the
-scan; replace the prose in sections A–C with one row per requirement (requirement, skill `file:line`, applies or
-`N/A: reason`, evidence, status); add a `blind_test` field (yes/no, reason, what the author was given) and a
-`hostile_inputs_tested` field; write "tested against these inputs" instead of "verified" in F and the summary.
+**Audit-checklist template changes proposed in discussion**: `trigger`, `blind_test`, and
+`hostile_inputs_tested` fields **were added** to the Current Audit template (found already present,
+2026-09-27, while writing §10 — this line had gone stale without being updated, itself an instance of the
+exact doc-vs-code drift Phase 8's "claims checker" pass exists to catch). `independent_review` was added
+2026-09-27 alongside them, for §10 Phase 8. Not yet done: replacing the prose in sections A–C with one row
+per requirement (requirement, skill `file:line`, applies or `N/A: reason`, evidence, status); writing
+"tested against these inputs" instead of "verified" throughout F and the summary.
 
 ## 10. Finalized workflow, agreed 2026-09-27 — supersedes §2 for all future work
 
