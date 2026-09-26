@@ -1,4 +1,4 @@
-# Verification workflow — proposed 2026-09-20, NOT YET BUILT OR ENFORCED
+# Verification workflow — process finalized 2026-09-27 (§10), enforcement hooks NOT YET BUILT
 
 Agreed in discussion on 2026-09-20 after the independent review of Observability Phase 1. **Nothing
 below is implemented.** Where a sentence says "the script" or "the hook" it describes a design, not
@@ -140,3 +140,96 @@ Observability Phase 1, with batch 1 as the pilot; what batch 1's findings show d
 scan; replace the prose in sections A–C with one row per requirement (requirement, skill `file:line`, applies or
 `N/A: reason`, evidence, status); add a `blind_test` field (yes/no, reason, what the author was given) and a
 `hostile_inputs_tested` field; write "tested against these inputs" instead of "verified" in F and the summary.
+
+## 10. Finalized workflow, agreed 2026-09-27 — supersedes §2 for all future work
+
+Sections 1–9 above are kept as the historical record of how this workflow was designed and piloted
+(Observability Phase 1, Batch 1). This section is the actual, current version to follow going
+forward. **Still true from the header above: the enforcement hooks described at the end of this
+section are NOT built yet** — only the process itself is finalized.
+
+**Phase 0 — Does this need the full treatment?**
+Decided against the real boundary-path list in §3 above, not by feel. Small/contained changes get a
+lighter version of Phases 1 and 8; only genuinely new or high-risk mechanisms get the full weight —
+this is a deliberate dial, not skipped rigor (running the full pipeline on every one-line change
+causes checklist fatigue and gets rubber-stamped instead of actually checked).
+
+**Phase 1 — Independent scoping, before I touch anything.**
+A fresh agent, given only the task and the files it touches (not my plan), builds the first-draft
+checklist and keyword list. It must apply three specific checks from
+`skill-verification-discipline.md` and show its work, not just assert it:
+- grepped the *whole* relevant skill directory by real keywords, not just familiar filenames
+  (failure mode 6);
+- for any reused/shared mechanism, explicitly asked what's different about this new call site's data
+  (failure mode 7);
+- did not claim "comprehensive" without showing the actual grep output as proof (failure mode 8).
+
+**Phase 2 — Search the real skills using that checklist.**
+Beyond `owasp-cheatsheets` + `owasp-asvs-5` (always both, never just one): also search
+`owasp-tcasvs` (thick-client/desktop) and the multi-tenant architecture skills
+(`saas-multitenant-architecture`, `postgres-multitenant`) whenever the change touches the Tauri
+client or firm/tenant isolation. Plus whichever framework skill applies (FastAPI, Postgres,
+Supabase, React).
+
+**Phase 3 — Build one real checklist.** One line per requirement: what it is → source → applies or
+`N/A: reason` → what would count as proof. Kept short on purpose.
+
+**Phase 4 — Write the test before the code, using `owasp-wstg` for real attack technique.**
+The decision of whether this needs a genuinely blind test author is **never made unilaterally, even
+in auto mode — always reasoned through with the user first.** If a blind author is used, the test's
+actual content must stay structurally hidden from the pass that writes the code — if I can see the
+test before writing the code, the entire point is defeated, so this can't be "I'll just not peek,"
+it has to be kept out of my context until after the code is submitted.
+
+**Phase 5 — Write the code with a hacking mindset.**
+Not "write code, then test until it passes." The whole time, the goal is to actively try to break
+what's being built — aiming to make it fail, not confirming it succeeds.
+
+**Phase 6 — Re-scan the actual diff.** Anything new that showed up while writing (an unplanned
+regex, an unplanned dependency) becomes a new checklist line, not a silent addition.
+
+**Phase 7 — Fill the checklist with real evidence.** A line is ticked only with a test name or real
+command output — never "I believe it's done." **Once filled in, the whole checklist is shown to the
+user, and we verify it together, item by item — implemented, not just ticked on paper.**
+
+**Phase 8 — Independent review.** For fixing/reviewing existing code: 3 fresh, separate passes
+(attacker on code only → test critic on code+tests → claims checker on docs vs. code), every finding
+reproduced for real before trusted. For a genuinely new, high-stakes mechanism: full blind-authored
+tests instead, scoped to one file at a time. **If Phase 4 decided no blind test was needed, this
+phase becomes mandatory — at least one of the two outside checks always runs, never neither.** Same
+as Phase 4's decision: never picked unilaterally, always reasoned through with the user first —
+combine both asks into one conversation right after Phase 1's checklist comes back, not two separate
+interruptions. Any agent run for this (blind-test author or review passes) runs wrapped in the
+memory-guard tooling (`gpt.sh`/`memguard.py`) — this is what was missing the one time a full
+blind-authored pass crashed the laptop (2026-09-20).
+
+**Phase 9 — One last fresh read for concurrency/security/money code.** Re-read the finished thing
+once, cold, asking "what's the other path nobody tested?" — a test written by the same pass that
+wrote the code shares its blind spots.
+
+**Phase 10 — Report honestly.** State plainly what was proven by a real run vs. reasoned through.
+"Tests pass" alone never stands in for that distinction.
+
+**Phase 11 — Ship it.** Branch → commit with real evidence → push → PR → wait for every check to
+actually finish → merge → independently re-check `main` itself is green after, not just the branch.
+
+**Phase 12 — If a bug turns up, sweep for its twin.** Grep the whole codebase for the same mistake
+shape before closing it out — not just the one reported spot.
+
+**Also carried forward from §2-9 above, still true:** the fixed-domain sweep (auth, sessions,
+tenant isolation, object-level authorization, input validation, CORS, secrets, supply chain) still
+runs as my own cheap backstop even after Phase 1's independent pass — costs nothing extra, and
+catches it if the independent agent itself has a blind spot. Phase 0's boundary-path list stays the
+literal one in §3, not a fresh judgment call each time.
+
+**What would actually fix the "nothing forces this to fire" limit (§7 above), not yet built:**
+1. A `PreToolUse` gate on Edit/Write, scoped to §3's boundary paths, blocking the first edit until
+   Phases 1/2/4's answers are stated — the same mechanism `~/.claude/hooks` already uses elsewhere
+   in this setup for "state facts before editing," just scoped to this workflow's specific questions.
+2. Extending the existing `audit-checklist-guard.js` Stop hook so it also requires Phase 8's review
+   result filled in (which pass ran, or a stated reason none did) before a boundary-touching task can
+   be marked closed.
+3. **Honest ceiling that stays even if both are built**: a hook can force something to be *written*
+   in the field. It cannot verify that what's written is *true*. That layer still depends on the
+   user's own spot-checks (Phase 7's joint verification above) — building the hooks closes the "did
+   you even try" gap, not the "was your answer honest" gap.
