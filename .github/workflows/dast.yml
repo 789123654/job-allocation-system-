@@ -200,7 +200,7 @@ jobs:
         if: always()
         run: cat /tmp/uvicorn.log
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v5.0.0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: zap-reports

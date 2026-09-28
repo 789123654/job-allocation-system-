@@ -63,14 +63,14 @@ rejection-sampling pattern as `foreign_task_id`.
   `task_type='billing'`) / `billing_wrong_state_task_id` (seeded `assigned`, default task_type) /
   `billing_idempotency_key` / `billing_token` / `billing_employee_id` — deterministic targets for
   `POST /tasks/{id}/review` and `POST /tasks/{id}/mark-billed`, same one-scenario-for-the-whole-run
-  shape as `race_task_id` above (firm #0, `race_owner_id`/`race_employee_id` reused) so every VU that
-  draws either branch hits the same real row. Each pair shares ONE fixed Idempotency-Key across every
-  call, for the whole run, by design: both endpoints are documented as workflow-state-checked
-  (only valid from one specific status), so a real state transition only ever happens once — a fresh
-  key on a second real attempt would be probing an undocumented "already reviewed/billed" status
-  code, not the spec's own idempotent-replay guarantee (Rule 230). The `_wrong_state` id of each pair
-  never transitions (nothing else ever calls a mutating endpoint on it), so the 409 check it backs
-  stays valid for the whole run.
+  shape as `race_task_id` above (firm #0, `race_owner_id`/`race_employee_id` reused) so every VU
+  that draws either branch hits the same real row. Each pair shares ONE fixed Idempotency-Key
+  across every call, for the whole run, by design: both endpoints are documented as
+  workflow-state-checked (only valid from one specific status), so a real state transition only
+  ever happens once — a fresh key on a second real attempt would be probing an undocumented
+  "already reviewed/billed" status code, not the spec's own idempotent-replay guarantee (Rule 230).
+  The `_wrong_state` id of each pair never transitions (nothing else ever calls a mutating endpoint
+  on it), so the 409 check it backs stays valid for the whole run.
 - `own_issue_id` / `own_issue_resolve_key` per identity — the SAME per-firm issue already seeded
   above (`issue_by_firm`), this time exposed to identities IN that firm too (previously only ever
   exposed cross-firm, as `foreign_issue_id`), plus a fixed per-firm Idempotency-Key, same
@@ -286,8 +286,8 @@ def _seed(
             }
         )
 
-    # 2026-09-28 additions — same one-scenario-for-the-whole-run shape as race_task_id above, reusing
-    # race_firm_id/race_owner_id/race_employee_id (module docstring). review_task_id/
+    # 2026-09-28 additions — same one-scenario-for-the-whole-run shape as race_task_id above,
+    # reusing race_firm_id/race_owner_id/race_employee_id (module docstring). review_task_id/
     # billing_task_id go into the normal task_rows batch below (default task_type is fine for
     # review_task_id and billing_wrong_state_task_id — only billing_task_id itself needs
     # task_type='billing', done via its own separate INSERT further down so the main task_rows
@@ -411,7 +411,8 @@ def _seed(
     if issue_rows:
         conn.execute(
             text(
-                "INSERT INTO issues (id, firm_id, task_id, raised_by, description, status, created_at) "
+                "INSERT INTO issues "
+                "(id, firm_id, task_id, raised_by, description, status, created_at) "
                 "VALUES (:id, :fid, :task_id, :raised_by, :description, 'open', now())"
             ),
             issue_rows,
@@ -643,7 +644,9 @@ def main() -> None:
 
     engine = create_engine(db_url)
     with engine.begin() as conn:
-        identities, race_info = _seed(conn, args.firms, args.employees_per_firm, args.tasks_per_firm)
+        identities, race_info = _seed(
+            conn, args.firms, args.employees_per_firm, args.tasks_per_firm
+        )
     engine.dispose()
 
     _mint_tokens(identities, private_key, issuer, race_info)
