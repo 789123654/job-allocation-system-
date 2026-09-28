@@ -73,7 +73,7 @@ jobs:
       # at `.venv`'s own interpreter rather than `uv.lock`. Isolated via `uvx --from` (own throwaway
       # env), not added to this project's own dependency tree for a one-off report generator.
       - run: uvx --from cyclonedx-bom cyclonedx-py environment .venv/bin/python -o sbom-python.cdx.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-python
           path: backend/sbom-python.cdx.json
@@ -297,7 +297,7 @@ jobs:
       - name: Generate Rust/Tauri SBOM
         working-directory: frontend/src-tauri
         run: cargo cyclonedx --format json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-rust
           path: frontend/src-tauri/app.cdx.json
@@ -373,7 +373,7 @@ jobs:
       # above. `--output-file` and `--output-format` confirmed directly against the tool's own
       # --help output before wiring this in, not assumed.
       - run: npx --yes @cyclonedx/cyclonedx-npm --output-file sbom-npm.cdx.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-npm
           path: frontend/sbom-npm.cdx.json
