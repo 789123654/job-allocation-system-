@@ -819,19 +819,21 @@ function markBilledProbe(identity, headers) {
   );
   assertCleanProblemDetails(wrongState);
 
-  // Wrong actor: an Owner gets 403 (role gate), any OTHER employee gets 404 (object-level auth —
-  // "an Employee can only touch resources assigned to them", never confirming the task exists to
-  // someone it isn't assigned to). Uses the ambient per-iteration identity, skipped on the
-  // vanishingly rare iteration where it IS the billing employee (that's just the legit call above).
+  // Wrong actor: confirmed against the real app (2026-09-28 run) that BOTH an Owner and any other
+  // Employee get 404 here, not 403-for-Owner/404-for-employee as originally guessed blind — the
+  // real endpoint never distinguishes role for this check, it's a pure object-level-auth 404 (never
+  // confirming the task exists to someone it isn't assigned to), consistent with every other
+  // {id}-scoped endpoint's own 404-not-403 pattern in this file. Uses the ambient per-iteration
+  // identity, skipped on the vanishingly rare iteration where it IS the billing employee (that's
+  // just the legit call above).
   if (identity.profile_id !== identity.billing_employee_id) {
-    const expected = identity.role === "owner" ? 403 : 404;
     const cross = http.post(`${BASE_URL}/tasks/${identity.billing_task_id}/mark-billed`, null, {
       headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() },
-      responseCallback: http.expectedStatuses(expected),
+      responseCallback: http.expectedStatuses(404),
     });
     check(
       cross,
-      { [`mark-billed by the wrong actor is rejected (${expected})`]: (r) => r.status === expected },
+      { "mark-billed by the wrong actor is rejected (404)": (r) => r.status === 404 },
       { isolation: "critical" },
     );
     assertCleanProblemDetails(cross);
@@ -857,7 +859,16 @@ function taskIssueCreateProbe(identity, headers) {
     },
   };
   const first = http.post(`${BASE_URL}/tasks/${identity.race_task_id}/issues`, body, opts);
-  check(first, { "assigned employee creates an issue (2xx)": (r) => r.status >= 200 && r.status < 300 });
+  // race_task_id is shared for the WHOLE run (module docstring) — confirmed against the real app
+  // (2026-09-28 run) that once any iteration successfully opens an issue on it, the endpoint
+  // correctly rejects further opens with 409 ("a task can only have one open issue at a time" — a
+  // real business rule, not documented in API_SPEC.md's contract, so the original blind pass
+  // couldn't have known it). Only the very first iteration across the whole run ever sees 201;
+  // every later one legitimately sees 409. Both are valid non-error outcomes; only a 5xx is a bug.
+  check(first, {
+    "assigned employee's issue create never errors (2xx new, or 409 already-open)": (r) =>
+      (r.status >= 200 && r.status < 300) || r.status === 409,
+  });
   // Idempotency-retry-safety: `Business_Logic_Security_Cheat_Sheet.md`'s "Use Idempotency Keys for
   // External Actions" — replaying the SAME key must not create a second issue row.
   const retry = http.post(`${BASE_URL}/tasks/${identity.race_task_id}/issues`, body, opts);
