@@ -1,0 +1,208 @@
+name: DAST scan (OWASP ZAP)
+
+# Manual only, same reasoning as loadtest.yml — always targets a throwaway postgres:17 service
+# container in this same job, never a real deployment (no staging environment exists yet,
+# DEPLOYMENT.md §13). Two passes against the app's own OpenAPI schema (this is a JSON REST API,
+# not an HTML app — an OpenAPI-driven API scan finds real endpoints; a link-following spider scan
+# would find almost nothing): one with no token (what an anonymous attacker sees), one with a real
+# seeded Owner JWT via ZAP's Replacer add-on (what an authenticated-but-malicious user can reach).
+#
+# First version: proves the scan mechanics work end-to-end and uploads both reports for a human to
+# read — it does NOT fail the job on ZAP's own alert findings yet. ZAP's default rule set includes
+# a lot of low-severity/informational noise (missing cache headers, etc.); hard-failing on all of it
+# without a curated ignore list would make this workflow useless within a week. A later pass can add
+# a `.zap/rules.tsv` ignore file and turn on real thresholds once the noise has been triaged once —
+# same incremental "prove mechanics first" approach already used for the Tauri installer build.
+#
+# Caveat, stated per this repo's own verification discipline: there is no dedicated OWASP ZAP skill
+# in this project to check the CLI/Replacer syntax below against — it's built from general ZAP
+# documentation knowledge, not skill-verified. It was smoke-tested locally before being committed
+# (see the commit message) — the CLI flags, the Replacer header injection, and the JSON report shape
+# the summarize step below parses were all confirmed against a real `docker run` output, not assumed.
+#
+# Local repro note (this job itself doesn't need it — `--network host` + `localhost` is correct on
+# the real ubuntu-latest runner): on Docker Desktop for Windows/Mac, `--network host` doesn't bridge
+# to the actual host OS the way it does on Linux, so a container can't reach `localhost:8000` there.
+# Reproducing this locally on Windows/Mac needs `host.docker.internal:8000` instead (found the hard
+# way while smoke-testing this file — `--network host` silently produced `NoUrlsException`, zero
+# URLs imported, no error explaining why).
+on:
+  workflow_dispatch:
+    inputs:
+      firms:
+        description: "Firms to seed (just needs to be non-zero so ID-based endpoints have something real to hit)"
+        default: "2"
+      employees_per_firm:
+        default: "3"
+      tasks_per_firm:
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  zap:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://fastapi_app:loadtest_password@localhost:5432/postgres
+      MIGRATIONS_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+      SUPABASE_URL: http://localhost:9999
+      SUPABASE_SECRET_KEY: sb_secret_loadtest_placeholder
+      CORS_ORIGINS: '["http://localhost"]'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --dev
+
+      # Same bootstrap as ci.yml/loadtest.yml's backend job — vanilla postgres:17 has none of
+      # Supabase's own auth schema/roles that a8e6def15927's migration GRANTs against.
+      - name: Stub Supabase's auth.users and auth-admin roles
+        run: |
+          uv run python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/postgres', autocommit=True)
+          conn.execute('CREATE SCHEMA IF NOT EXISTS auth')
+          conn.execute('''
+              CREATE TABLE IF NOT EXISTS auth.users (
+                  id uuid PRIMARY KEY,
+                  email text,
+                  raw_user_meta_data jsonb
+              )
+          ''')
+          conn.execute('CREATE ROLE supabase_auth_admin')
+          conn.execute('CREATE ROLE authenticated')
+          conn.execute('CREATE ROLE anon')
+          "
+      - run: uv run alembic upgrade head
+      - name: Set fastapi_app's loadtest-only password
+        run: |
+          uv run python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/postgres', autocommit=True)
+          conn.execute(\"ALTER ROLE fastapi_app WITH PASSWORD 'loadtest_password'\")
+          "
+
+      - name: Generate the throwaway JWKS keypair
+        run: uv run python loadtest/generate_keys.py
+
+      - name: Serve the JWKS stub in the background
+        working-directory: backend/loadtest/www
+        run: |
+          nohup python -m http.server 9999 > jwks_server.log 2>&1 &
+          echo $! > /tmp/jwks_server.pid
+
+      - name: Start the app under test in the background
+        run: |
+          nohup uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/uvicorn.log 2>&1 &
+          echo $! > /tmp/uvicorn.pid
+      - name: Wait for the app to become healthy
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "App is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "App never became healthy — uvicorn log:"
+          cat /tmp/uvicorn.log
+          exit 1
+
+      # Small scale — this scan is schema-driven (walks the OpenAPI spec), not volume-driven; it
+      # only needs one real firm/owner/employee/task so ID-based endpoints have something genuine to
+      # resolve against instead of 404ing on every path parameter.
+      - name: Seed one small firm and mint tokens
+        env:
+          FIRMS: ${{ inputs.firms }}
+          EMPLOYEES_PER_FIRM: ${{ inputs.employees_per_firm }}
+          TASKS_PER_FIRM: ${{ inputs.tasks_per_firm }}
+        run: |
+          uv run python loadtest/seed.py \
+            --firms "$FIRMS" \
+            --employees-per-firm "$EMPLOYEES_PER_FIRM" \
+            --tasks-per-firm "$TASKS_PER_FIRM"
+
+      - name: Pull a real seeded Owner JWT for the authenticated pass
+        run: |
+          TOKEN=$(uv run python -c "import json; print(json.load(open('loadtest/identities.json'))[0]['token'])")
+          echo "::add-mask::$TOKEN"
+          echo "ZAP_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Make the report directory ZAP's container user can write to
+        run: mkdir -p -m 777 /tmp/zap-reports
+
+      # --network host: the ZAP container reaches the app at localhost:8000 the same way a local
+      # `curl` would — no extra Docker network wiring needed on the Linux runner.
+      - name: ZAP — unauthenticated pass (what an anonymous attacker sees)
+        run: |
+          docker run --rm --network host \
+            -v /tmp/zap-reports:/zap/wrk/:rw \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py -t http://localhost:8000/openapi.json -f openapi \
+            -r report-unauth.html -J report-unauth.json
+        continue-on-error: true
+
+      # ZAP's Replacer add-on rewrites every outgoing request — used here to attach a real Owner
+      # bearer token, so this pass tests everything an authenticated-but-malicious Owner can reach
+      # (the unauthenticated pass above can't get past any `Authorization` check at all).
+      - name: ZAP — authenticated pass (real Owner JWT via Replacer header)
+        run: |
+          docker run --rm --network host \
+            -v /tmp/zap-reports:/zap/wrk/:rw \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py -t http://localhost:8000/openapi.json -f openapi \
+            -r report-auth.html -J report-auth.json \
+            -z "-config replacer.full_list(0).description=auth -config replacer.full_list(0).enabled=true -config replacer.full_list(0).matchtype=REQ_HEADER -config replacer.full_list(0).matchstr=Authorization -config replacer.full_list(0).regex=false -config replacer.full_list(0).replacement=Bearer\ ${ZAP_TOKEN}"
+        continue-on-error: true
+
+      - name: Summarize alert counts by risk level
+        if: always()
+        run: |
+          uv run python -c "
+          import json
+          import pathlib
+          for name in ['report-unauth.json', 'report-auth.json']:
+              path = pathlib.Path('/tmp/zap-reports') / name
+              if not path.exists():
+                  print(f'{name}: no report produced')
+                  continue
+              data = json.loads(path.read_text())
+              counts = {}
+              for site in data.get('site', []):
+                  for alert in site.get('alerts', []):
+                      risk = alert.get('riskdesc', 'Unknown')
+                      counts[risk] = counts.get(risk, 0) + 1
+              print(name, counts or '(no alerts)')
+          "
+
+      - name: Show the app's own log
+        if: always()
+        run: cat /tmp/uvicorn.log
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v5.0.0
+        if: always()
+        with:
+          name: zap-reports
+          path: /tmp/zap-reports/
+          if-no-files-found: warn
