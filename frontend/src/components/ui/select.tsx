@@ -1,4 +1,5 @@
 import * as RadixSelect from "@radix-ui/react-select";
+import { useDialogContentContainer } from "@/components/ui/dialog";
 import { cn } from "@/utils/cn";
 
 // Real Radix Select subcomponent API verified against the installed package's own type
@@ -27,11 +28,23 @@ export function SelectTrigger({ className, children, ...props }: RadixSelect.Sel
 }
 
 export function SelectContent({ className, children, ...props }: RadixSelect.SelectContentProps) {
+  // Real fix, 2026-09-17 (see the long comment on DialogContentContainerContext in dialog.tsx for
+  // the full chain of evidence: z-index and a CSS `!important` pointer-events override were both
+  // tried and neither reliably worked, because two nested @radix-ui/react-dismissable-layer
+  // instances — this Select's dropdown and the enclosing modal Dialog — weren't reliably agreeing
+  // on which one gets `pointer-events: auto`). When rendered inside a DialogContent, portal into
+  // that DialogContent's own DOM node instead of the default document.body — a genuine descendant
+  // never needs a competing dismissable-layer stack against its ancestor Dialog in the first
+  // place. Outside any Dialog (e.g. owner-dashboard-page.tsx's filter Selects), the hook returns
+  // null and RadixSelect.Portal falls back to its own default (document.body), unchanged.
+  const dialogContainer = useDialogContentContainer();
   return (
-    <RadixSelect.Portal>
+    <RadixSelect.Portal container={dialogContainer ?? undefined}>
       <RadixSelect.Content
         className={cn(
-          "overflow-hidden rounded-(--radius-ledger) border border-(--color-ledger-border) bg-(--color-ledger-surface) shadow-md",
+          // z-50 kept as cheap defense-in-depth for the document.body fallback case (no enclosing
+          // Dialog) — not load-bearing for the Dialog case anymore now that it portals inside.
+          "z-50 overflow-hidden rounded-(--radius-ledger) border border-(--color-ledger-border) bg-(--color-ledger-surface) shadow-md",
           className,
         )}
         {...props}

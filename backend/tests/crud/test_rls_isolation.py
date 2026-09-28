@@ -1,7 +1,9 @@
 """RLS can't be meaningfully tested against a mock (CODING_STRUCTURE.md §2) — these run against a
 real, disposable Postgres. Locally that means nothing (skipped) unless you point
-TEST_MIGRATIONS_DATABASE_URL / TEST_DATABASE_URL at one yourself; in CI it's the postgres:16
-service container in .github/workflows/ci.yml, migrated fresh every run.
+TEST_MIGRATIONS_DATABASE_URL / TEST_DATABASE_URL at one yourself; in CI it's the postgres:17
+service container in .github/workflows/ci.yml (code-review finding #21, 2026-09-15: this comment
+said :16, stale since whichever CI upgrade moved the real container to :17), migrated fresh every
+run.
 
 Two required pre-launch checks, verbatim from ARCHITECTURE.md §5:
   1. fastapi_app must never carry BYPASSRLS (a config-drift regrant would be exactly as silent

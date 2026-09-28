@@ -59,6 +59,7 @@ def test_list_notifications_returns_them(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(crud, "list_notifications", lambda *a, **kw: [_fake_notification()])
+    monkeypatch.setattr(crud, "get_task_titles", lambda *a, **kw: {})
 
     response = client.get("/notifications")
 
@@ -66,6 +67,25 @@ def test_list_notifications_returns_them(
     body = response.json()
     assert len(body) == 1
     assert body[0]["type"] == "task_assigned"
+
+
+def test_list_notifications_includes_task_title(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Real bug, 2026-09-17: notifications gave no reference to which task they were about — this
+    # proves the route actually threads a looked-up title through, not just that the endpoint
+    # doesn't crash with the field present (which test_list_notifications_returns_them's `{}` mock
+    # wouldn't catch — it never exercises a non-empty lookup result).
+    notification = _fake_notification()
+    monkeypatch.setattr(crud, "list_notifications", lambda *a, **kw: [notification])
+    monkeypatch.setattr(
+        crud, "get_task_titles", lambda *a, **kw: {notification.task_id: "File returns"}
+    )
+
+    response = client.get("/notifications")
+
+    assert response.status_code == 200
+    assert response.json()[0]["task_title"] == "File returns"
 
 
 def test_list_notifications_defaults_to_unread_only(
@@ -80,6 +100,7 @@ def test_list_notifications_defaults_to_unread_only(
         return []
 
     monkeypatch.setattr(crud, "list_notifications", _list_notifications)
+    monkeypatch.setattr(crud, "get_task_titles", lambda *a, **kw: {})
 
     response = client.get("/notifications")
 
@@ -105,6 +126,7 @@ def test_mark_read_returns_updated_notification(
     monkeypatch.setattr(
         crud, "mark_notification_read", lambda *a, **kw: _fake_notification(is_read=True)
     )
+    monkeypatch.setattr(crud, "get_task_titles", lambda *a, **kw: {})
 
     response = client.patch(f"/notifications/{notification.id}/read")
 

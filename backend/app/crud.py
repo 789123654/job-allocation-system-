@@ -1,7 +1,15 @@
 """DB read/write logic — routes stay thin (fastapi/project-structure.md). Every function here
 trusts `session` to already have `app.current_tenant` set (get_current_profile, api/deps.py) — RLS
-does the tenant-scoping; nothing here filters by `firm_id` itself, per ARCHITECTURE.md §5's
-division of responsibility (RLS = isolation, crud/routes = role-based authorization).
+is the primary tenant-isolation guarantee. Every plain getter/lister *also* filters by
+`actor.firm_id` explicitly, belt-and-suspenders (same reasoning `_validate_assignee`/
+`_validate_job_type` already used) — not because RLS is distrusted, but because
+`Multi_Tenant_Security_Cheat_Sheet.md` ("implement authorization checks at the data access layer,
+not just API layer") and `postgres-multitenant/schema-design.md` ("RLS is not a substitute for
+application-level checks"; pooled-connection session-variable leakage on a forgotten/skipped `SET`
+is "the single most common way RLS setups fail in production") both treat single-layer isolation as
+a documented anti-pattern, not a valid trade-off. Policy changed 2026-09-14 (code review finding
+#6) — the prior version of this docstring deliberately called RLS "the single source of truth";
+that trade-off is no longer the project's stance.
 
 That trust holds only within the one transaction get_current_profile's `set_config(..., true)` set
 it in — `true` (is_local) means it's transaction-scoped, deliberately, so a pooled connection can
@@ -17,15 +25,19 @@ consolidated there 2026-09-10 after this exact recovery shape was independently 
 again — see its own docstring.
 """
 
+import logging
 import secrets
+import string
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.selectable import Select
 from sqlmodel import Session, col, select
 
-from app.core.db import commit_or_recover
+from app.core.db import as_aware_utc, commit_or_recover
 from app.core.supabase_admin import admin_auth
 from app.models import (
     AccessDenial,
@@ -37,6 +49,8 @@ from app.models import (
     Task,
     TaskReview,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DuplicateJobTypeNameError(Exception):
@@ -81,10 +95,39 @@ class UnknownJobTypeError(Exception):
     """
 
 
+def _paginate[StmtT: Select[Any]](stmt: StmtT, *order_by: Any, offset: int, limit: int) -> StmtT:
+    """Deterministic-order pagination tail, shared by every `list_*` below (code-review finding
+    #8, 2026-09-14) — the exact duplicated shape that let `list_notifications` drift without its
+    `.id` tiebreaker (finding #3) until an independent pass caught it. `order_by` is always
+    `(col(Model.created_at).desc(), col(Model.id))` at the call site — the tiebreaker is what
+    makes which rows land in a `limit`-bounded page deterministic across requests.
+    """
+    return stmt.order_by(*order_by).offset(offset).limit(limit)
+
+
+_PASSWORD_SYMBOLS = "!@#$%^&*()-_=+"  # noqa: S105 — a character set to draw from, not a credential
+
+
 def _generate_password() -> str:
-    # secrets.token_urlsafe: CSPRNG, not `random` (ASVS 6.4.1's "securely random"). 16 bytes = 128
-    # bits, well past the length policy in ARCHITECTURE.md §4.
-    return secrets.token_urlsafe(16)
+    # secrets: CSPRNG throughout, not `random` (ASVS 6.4.1's "securely random"). Supabase's
+    # dashboard-configured password policy (enabled this session) requires at least one lowercase,
+    # uppercase, digit, and symbol character. A plain secrets.token_urlsafe() only draws from
+    # [A-Za-z0-9_-] — roughly 60% of generated tokens randomly contained zero symbol characters and
+    # were rejected outright by the Admin API with AuthWeakPasswordError (found via manual testing,
+    # 2026-09-16: employee creation failed with "something went wrong" for no visible reason).
+    # Guarantee one char from each required class, fill the rest from the full alphabet, then
+    # shuffle with a CSPRNG (not `random.shuffle`) so the guaranteed chars aren't always at the
+    # front — 20 chars total, well past the length policy in ARCHITECTURE.md §4.
+    required = [
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.digits),
+        secrets.choice(_PASSWORD_SYMBOLS),
+    ]
+    alphabet = string.ascii_letters + string.digits + _PASSWORD_SYMBOLS
+    chars = required + [secrets.choice(alphabet) for _ in range(16)]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
 
 
 def _write_audit_log(session: Session, actor: Profile, action: str, target_id: UUID | None) -> None:
@@ -140,9 +183,18 @@ def create_employee(
             "email": email,
             "password": password,
             "email_confirm": True,
-            "user_metadata": {
+            # firm_id/role in app_metadata, not user_metadata (code review finding #11,
+            # 2026-09-14) — app_metadata can only ever be set via this Admin API, never by an
+            # end user (confirmed against the installed supabase_auth SDK and Supabase's own
+            # docs: the client-side auth.updateUser() has no app_metadata parameter at all).
+            # handle_new_user() (migration c0f23284b2fd) reads firm_id/role from here for exactly
+            # that reason — full_name stays in user_metadata since it's display-only, not a
+            # privilege/tenant field.
+            "app_metadata": {
                 "firm_id": str(actor.firm_id),
                 "role": "employee",
+            },
+            "user_metadata": {
                 "full_name": full_name,
             },
         }
@@ -157,11 +209,34 @@ def create_employee(
     new_id = UUID(result.user.id)
 
     _write_audit_log(session, actor, action="employee_created", target_id=new_id)
-    session.commit()
+    try:
+        session.commit()
+    except Exception:
+        # The Supabase Auth user above already exists — this local commit isn't in the same
+        # transaction as that external call, so its failure can't roll the auth user back.
+        # Compensating action (found missing in code review, 2026-09-14 — see
+        # Business_Logic_Security_Cheat_Sheet.md's "external non-idempotent call" guidance):
+        # delete the now-orphaned auth user rather than leave a Supabase account with no local
+        # profile, permanently consuming that email with no way to ever sign in. Best-effort —
+        # if the delete itself fails, the orphan is a known, logged trade-off, not a silent one.
+        # Exempt from commit_or_recover like create_job_type's rollback below: raises immediately
+        # after, no further session read, so no expired-attribute/lost-tenant-context risk.
+        session.rollback()  # nosemgrep: hand-rolled-rollback-outside-commit-or-recover
+        try:
+            admin_auth.delete_user(str(new_id))
+        except Exception:
+            logger.exception(
+                "Failed to compensate for a failed employee-creation commit — "
+                "Supabase Auth user %s is now orphaned (no local profile)",
+                new_id,
+            )
+        raise
     return new_id, password
 
 
-def list_employees(session: Session, offset: int, limit: int) -> list[tuple[Profile, int]]:
+def list_employees(
+    session: Session, actor: Profile, offset: int, limit: int
+) -> list[tuple[Profile, int]]:
     """Returns (employee, pending_job_count) pairs — PRD §2.4's workload count, deliberately
     omitted when this function was first written (Phase 1, before `tasks` existed — see the
     route's own prior comment, now removed). One query, not N+1: `tests/crud/test_query_counts.py`
@@ -181,18 +256,22 @@ def list_employees(session: Session, offset: int, limit: int) -> list[tuple[Prof
     )
     stmt = (
         select(Profile, func.coalesce(workload.c.pending_count, 0))
-        .where(Profile.role == "employee")
+        .where(Profile.role == "employee", Profile.firm_id == actor.firm_id)
         .outerjoin(workload, workload.c.employee_id == col(Profile.id))
-        .order_by(col(Profile.created_at).desc(), col(Profile.id))
-        .offset(offset)
-        .limit(limit)
+    )
+    stmt = _paginate(
+        stmt, col(Profile.created_at).desc(), col(Profile.id), offset=offset, limit=limit
     )
     return [(row[0], row[1]) for row in session.exec(stmt).all()]
 
 
-def get_employee(session: Session, employee_id: UUID) -> Profile | None:
+def get_employee(session: Session, actor: Profile, employee_id: UUID) -> Profile | None:
     return session.exec(
-        select(Profile).where(Profile.id == employee_id, Profile.role == "employee")
+        select(Profile).where(
+            Profile.id == employee_id,
+            Profile.role == "employee",
+            Profile.firm_id == actor.firm_id,
+        )
     ).first()
 
 
@@ -231,6 +310,19 @@ def set_employee_active(
     session.commit()
     # No session.refresh() — see create_job_type's comment; same reasoning applies here.
     return employee
+
+
+def confirm_password_changed(session: Session, actor: Profile) -> None:
+    """API_SPEC.md §3's flagged-open question, resolved: the frontend calls Supabase's self-service
+    `updateUser({password})` directly (never through FastAPI — same doc, same section), so nothing
+    ever told `profiles.must_change_password` the password actually changed. This is the "trivial
+    FastAPI call" that doc already named as still-needed. Uses `CurrentProfileDep`, not
+    `ActiveProfileDep` — this is the one write allowed to run while the flag is still true (it's the
+    thing that clears it).
+    """
+    actor.must_change_password = False
+    session.add(actor)
+    session.commit()
 
 
 def reset_employee_password(session: Session, actor: Profile, employee: Profile) -> str:
@@ -338,20 +430,18 @@ def create_job_type(session: Session, actor: Profile, name: str) -> JobType:
     return job_type
 
 
-def list_job_types(session: Session, offset: int, limit: int) -> list[JobType]:
-    # Deterministic pagination — same non-deterministic-offset/limit bug already fixed on
-    # list_tasks, backported here (code-review finding, whole-Phase-4 sweep, 2026-09-13).
-    stmt = (
-        select(JobType)
-        .order_by(col(JobType.created_at).desc(), col(JobType.id))
-        .offset(offset)
-        .limit(limit)
+def list_job_types(session: Session, actor: Profile, offset: int, limit: int) -> list[JobType]:
+    stmt = select(JobType).where(JobType.firm_id == actor.firm_id)
+    stmt = _paginate(
+        stmt, col(JobType.created_at).desc(), col(JobType.id), offset=offset, limit=limit
     )
     return list(session.exec(stmt).all())
 
 
-def get_job_type(session: Session, job_type_id: UUID) -> JobType | None:
-    return session.exec(select(JobType).where(JobType.id == job_type_id)).first()
+def get_job_type(session: Session, actor: Profile, job_type_id: UUID) -> JobType | None:
+    return session.exec(
+        select(JobType).where(JobType.id == job_type_id, JobType.firm_id == actor.firm_id)
+    ).first()
 
 
 def set_job_type_active(session: Session, job_type: JobType, is_active: bool) -> JobType:
@@ -396,6 +486,13 @@ def create_task(
     )
     session.add(task)
     if assigned_to is not None:
+        # notifications.task_id's composite FK (firm_id, task_id) -> tasks(firm_id, id) is only
+        # declared in the raw migration SQL (c72e9a1f4b83), not mirrored on either SQLModel class
+        # — SQLAlchemy's flush ordering can't see it, so without this flush it may insert the
+        # Notification before the Task in the same transaction and hit a FK violation. Same
+        # pattern already used correctly for billing_task below (line ~691) — found live,
+        # 2026-09-16: every task creation with an assignee failed with exactly this error.
+        session.flush()
         # PRD §3.4 / DATA_MODEL.md §5 `task_assigned` — only fires when assignment happens at
         # creation time; a task created unassigned and assigned later has no PATCH endpoint yet
         # (API_SPEC.md doesn't define one), so that path doesn't exist to notify from.
@@ -417,7 +514,7 @@ def list_tasks(
     regardless of what they pass — the query filters below only apply for an Owner, since an
     Employee's results are already scoped to themselves (the same filters would be redundant).
     """
-    stmt = select(Task)
+    stmt = select(Task).where(Task.firm_id == actor.firm_id)
     if actor.role == "owner":
         if status_filter is not None:
             stmt = stmt.where(Task.status == status_filter)
@@ -429,15 +526,7 @@ def list_tasks(
             stmt = stmt.where(Task.task_type == task_type_filter)
     else:
         stmt = stmt.where(Task.assigned_to == actor.id)
-    # Deterministic order, same pattern as list_notifications' own .order_by (crud.py:827) — found
-    # by an independent code-review pass (2026-09-13): without this, Postgres has no ordering
-    # guarantee at all, so which rows land in a `limit`-bounded page (and in what order) could
-    # silently vary between requests. `.id` is the tiebreaker for rows sharing a `created_at`.
-    # Deterministic order, same pattern as list_notifications' own .order_by (crud.py:827) — found
-    # by an independent code-review pass (2026-09-13): without this, Postgres has no ordering
-    # guarantee at all, so which rows land in a `limit`-bounded page (and in what order) could
-    # silently vary between requests. `.id` is the tiebreaker for rows sharing a `created_at`.
-    stmt = stmt.order_by(col(Task.created_at).desc(), col(Task.id)).offset(offset).limit(limit)
+    stmt = _paginate(stmt, col(Task.created_at).desc(), col(Task.id), offset=offset, limit=limit)
     return list(session.exec(stmt).all())
 
 
@@ -446,7 +535,9 @@ def get_task(session: Session, actor: Profile, task_id: UUID) -> Task | None:
     someone else's task is what makes the route's existing 404-not-403 pattern work unchanged
     (API_SPEC.md: an Employee requesting another's task by ID must 404, not 403).
     """
-    task = session.exec(select(Task).where(Task.id == task_id)).first()
+    task = session.exec(
+        select(Task).where(Task.id == task_id, Task.firm_id == actor.firm_id)
+    ).first()
     if task is None:
         return None
     if actor.role != "owner" and task.assigned_to != actor.id:
@@ -629,12 +720,34 @@ def create_issue(session: Session, actor: Profile, task: Task, description: str)
         created_at=datetime.now(UTC),
     )
     session.add(issue)
+    # Same unflushed-composite-FK bug as create_task above (notifications.issue_id -> issues
+    # (firm_id, id), c72e9a1f4b83 — not mirrored on either SQLModel class) — the Notification
+    # below references issue.id before the Issue row itself has been inserted.
+    session.flush()
     _notify_owners(session, actor.firm_id, "issue_raised", task.id, issue.id)
     return issue
 
 
-def get_issue(session: Session, issue_id: UUID) -> Issue | None:
-    return session.exec(select(Issue).where(Issue.id == issue_id)).first()
+def get_issue(session: Session, actor: Profile, issue_id: UUID) -> Issue | None:
+    """Reported gap, 2026-09-18: GET /issues/{id} was Owner-only (RequireOwnerDep) — the raiser
+    themselves had no way to ever see their own issue, including its resolution_notes once the
+    Owner resolved it (issue_resolved notified them it happened, with nowhere to read what it
+    said). Now reachable by any authenticated actor (ActiveProfileDep, issues.py); this function is
+    what actually enforces the narrowed access — an Owner still sees any issue in their firm
+    (unchanged), an Employee only their own (`raised_by`), same 404-not-403 IDOR pattern as
+    get_task/get_notification (least-privilege widening, not a blanket role change —
+    Authorization_Cheat_Sheet.md "Enforce Least Privileges";
+    Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.md; ASVS 5 §8.2.2).
+    """
+    issue = session.exec(
+        select(Issue).where(Issue.id == issue_id, Issue.firm_id == actor.firm_id)
+    ).first()
+    if issue is None:
+        return None
+    if actor.role != "owner" and issue.raised_by != actor.id:
+        record_access_denial(session, actor, "issue", issue.id, "wrong_owner")
+        return None
+    return issue
 
 
 def _lock_issue(session: Session, firm_id: UUID, issue_id: UUID) -> Issue:
@@ -712,6 +825,15 @@ def resolve_issue(
         stale.is_read = True
         session.add(stale)
 
+    # Reported gap, 2026-09-18: before this, only resolution_type="reassigned" told the raiser
+    # anything at all (via _reassign_task's own "task_reassigned" notify) — "clarified" and
+    # "deadline_adjusted" left them with zero signal, not even a stale one. Fires unconditionally,
+    # for all three resolution types, same transaction (ASVS 2.3.3), same tenant-scoped
+    # firm_id/recipient_id `_notify` already uses at every other call site — `locked.firm_id` and
+    # `issue.raised_by` are both already tenant-scoped by `_lock_issue`/`get_issue` above, no new
+    # unscoped lookup (ASVS 8.2.2 / Multi_Tenant_Security_Cheat_Sheet.md §3).
+    _notify(session, locked.firm_id, issue.raised_by, "issue_resolved", locked.task_id, locked.id)
+
     return locked
 
 
@@ -726,15 +848,6 @@ _DEADLINE_NOTIF_TYPES = (
 )
 
 
-def _as_aware_utc(value: datetime) -> datetime:
-    """Postgres' `timestamptz` round-trips as tz-aware via psycopg, but don't trust that blindly —
-    SQLite (this project's own test backend) drops tzinfo on round-trip, and a naive-vs-aware
-    comparison raises a raw `TypeError`, not a clean 500. Caught by tests/crud/test_notifications.py
-    actually running this comparison against a real fetched row, not a mock.
-    """
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
 def _due_deadline_notifications(
     task: Task, now: datetime, owner_ids: list[UUID]
 ) -> list[tuple[UUID, str, UUID]]:
@@ -744,7 +857,7 @@ def _due_deadline_notifications(
     """
     if task.deadline is None:  # caller's query already filters this; narrows the type here
         return []
-    deadline = _as_aware_utc(task.deadline)
+    deadline = as_aware_utc(task.deadline)
     overdue = deadline < now
     due: list[tuple[UUID, str, UUID]] = []
     for owner_id in owner_ids:
@@ -856,8 +969,25 @@ def list_notifications(
     stmt = select(Notification).where(Notification.recipient_id == actor.id)
     if unread_only:
         stmt = stmt.where(col(Notification.is_read).is_(False))
-    stmt = stmt.order_by(col(Notification.created_at).desc()).offset(offset).limit(limit)
+    stmt = _paginate(
+        stmt, col(Notification.created_at).desc(), col(Notification.id), offset=offset, limit=limit
+    )
     return list(session.exec(stmt).all())
+
+
+def get_task_titles(session: Session, actor: Profile, task_ids: list[UUID]) -> dict[UUID, str]:
+    """Batch title lookup for the Notifications list (reported gap, 2026-09-17: notifications gave
+    no reference to which task they were about). Belt-and-suspenders `actor.firm_id` filter, same
+    as every other lister in this module — a notification's own `task_id` already only ever points
+    at a task in the same firm (set server-side in `_notify`/`_notify_owners`, never client input),
+    so this can't leak another firm's title, but the filter costs nothing and keeps the convention
+    uniform rather than one lister quietly being the exception."""
+    if not task_ids:
+        return {}
+    stmt = select(Task.id, Task.title).where(
+        col(Task.id).in_(task_ids), Task.firm_id == actor.firm_id
+    )
+    return dict(session.exec(stmt).all())
 
 
 def get_notification(

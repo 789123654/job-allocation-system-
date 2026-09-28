@@ -45,7 +45,11 @@ site_url = "http://127.0.0.1:3000"
 jwt_expiry = 3600
 # Employees are provisioned only via the Auth Admin API (crud.create_employee) — public signup is
 # never a path in this product. Matches the posture the real project must be set to (DEPLOYMENT.md
-# §13); the e2e tests use the admin API, not signup.
+# §13 step 4, added 2026-09-14 — was referenced here before it actually existed, code review
+# finding #11); the e2e tests use the admin API, not signup. Backstopped structurally too, not just
+# by this toggle: handle_new_user() (migration c0f23284b2fd) reads firm_id/role from app_metadata,
+# which a public signUp() call can never set — so even a misconfigured toggle can't hand out an
+# arbitrary firm_id/role, though it would still let in unvetted accounts, so keep this false.
 enable_signup = false
 # ASVS 6.2.1 — Supabase's own default is 6. DEPLOYMENT.md §2 requires >= 8 on the real project;
 # version-controlled here so the e2e stack rejects a weak password the same way.

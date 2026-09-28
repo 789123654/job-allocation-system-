@@ -105,8 +105,14 @@ def _mock_supabase_admin(  # pyright: ignore[reportUnusedFunction] — autouse p
 
     def _fake_create_user(data: dict[str, object], **kw: object) -> SimpleNamespace:
         new_id = uuid4()
-        metadata = data["user_metadata"]
-        assert isinstance(metadata, dict)
+        # firm_id/role in app_metadata, full_name in user_metadata (code review finding #11,
+        # 2026-09-14) — mirrors handle_new_user()'s real post-fix source split (migration
+        # c0f23284b2fd), same reasoning as this fixture's own docstring above: fake only the
+        # network call, keep the DB-write shape identical to what the real trigger would do.
+        app_metadata = data["app_metadata"]
+        user_metadata = data["user_metadata"]
+        assert isinstance(app_metadata, dict)
+        assert isinstance(user_metadata, dict)
         admin_engine = create_engine(_MIGRATIONS_URL)  # type: ignore[arg-type]
         with admin_engine.begin() as conn:
             conn.execute(
@@ -116,8 +122,8 @@ def _mock_supabase_admin(  # pyright: ignore[reportUnusedFunction] — autouse p
                 ),
                 {
                     "id": new_id,
-                    "fid": metadata["firm_id"],
-                    "name": metadata["full_name"],
+                    "fid": app_metadata["firm_id"],
+                    "name": user_metadata["full_name"],
                     "email": data["email"],
                 },
             )
@@ -208,9 +214,10 @@ def test_every_operation_rejects_a_missing_token(case: "schemathesis.Case[Any]")
     running and blew up). In practice this is 401/403 from the auth dependency, plus the odd 404/
     405/422 from schemathesis's negative phase mutating the method or a path param; a documented
     method wrongly rejected would be caught by test_api_contract's positive run above.
-    `/health` is the one intentionally public route.
+    `/health` (liveness) and `/ready` (readiness, app/core/health.py; only "ok"/"unavailable", no
+    data) are the intentionally public routes: an uptime monitor can't hold a token.
     """
-    if case.path == "/health":
+    if case.path in ("/health", "/ready"):
         pytest.skip("intentionally public")
     response = case.call()  # no Authorization header
     assert 400 <= response.status_code < 500, (

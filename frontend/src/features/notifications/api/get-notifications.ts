@@ -9,6 +9,7 @@ interface NotificationOutDto {
   type: NotificationType;
   task_id: string | null;
   issue_id: string | null;
+  task_title: string | null;
   is_read: boolean;
   created_at: string;
 }
@@ -19,6 +20,7 @@ function toNotification(dto: NotificationOutDto): Notification {
     type: dto.type,
     taskId: dto.task_id,
     issueId: dto.issue_id,
+    taskTitle: dto.task_title,
     isRead: dto.is_read,
     createdAt: dto.created_at,
   };
@@ -34,14 +36,21 @@ export const notificationsQueryKeyPrefix = tenantQueryKeyPrefix("notifications")
 // type declarations this pass, not assumed from memory (no installed skill documents this
 // library). refetchIntervalInBackground: false since the Tauri window is the only "background"
 // case that matters here (ARCHITECTURE.md §8's own reasoning) — no point polling while unfocused.
-export function useNotifications(options: { unreadOnly?: boolean } = {}) {
+// `limit` added 2026-09-17 for the nav bar's unread-count badge (router.tsx) — every prior caller
+// omits it and keeps getting the route's own default (LimitQuery: 20), unchanged. Capped at 100
+// server-side (core/validation.py's LimitQuery: `le=100`) regardless of what's passed.
+export function useNotifications(options: { unreadOnly?: boolean; limit?: number } = {}) {
   const { firmId } = useSession();
   const unreadOnly = options.unreadOnly ?? true;
+  const params = new URLSearchParams();
+  if (!unreadOnly) params.set("unread_only", "false");
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  const query = params.toString();
   return useQuery({
-    queryKey: [...tenantQueryKey("notifications", firmId), { unreadOnly }],
+    queryKey: [...tenantQueryKey("notifications", firmId), { unreadOnly, limit: options.limit }],
     queryFn: () =>
-      apiRequest<NotificationOutDto[]>(unreadOnly ? "/notifications" : "/notifications?unread_only=false").then(
-        (dtos) => dtos.map(toNotification),
+      apiRequest<NotificationOutDto[]>(`/notifications${query ? `?${query}` : ""}`).then((dtos) =>
+        dtos.map(toNotification),
       ),
     enabled: firmId !== null,
     refetchInterval: 45_000,

@@ -71,7 +71,7 @@ describe("TaskDetailPage", () => {
     expect(screen.queryByRole("button", { name: /mark billed/i })).not.toBeInTheDocument();
   });
 
-  it("raises an issue from the task detail page", async () => {
+  it("raises an issue from the task detail page and shows an explicit confirmation", async () => {
     renderAt("t1");
     await screen.findByText("File GST return");
 
@@ -82,7 +82,14 @@ describe("TaskDetailPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /^submit$/i }));
 
-    // Dialog closes on success — no confirmation step, same pattern as create-job-type-dialog.
+    // Reported gap, 2026-09-18: the dialog used to close silently on success. The task's own
+    // status never changes when an issue is raised (crud.py's create_issue, by design), and this
+    // app has no toast system, so an employee had no way to tell it worked. It now stays open
+    // with an explicit confirmation until the employee closes it themselves.
+    expect(await screen.findByText("Issue raised")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
     await screen.findByText("File GST return");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });

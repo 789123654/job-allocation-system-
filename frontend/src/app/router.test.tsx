@@ -43,20 +43,29 @@ function mockSession(overrides: {
   });
 }
 
+// QueryClientProvider added 2026-09-17: AuthenticatedLayout's nav now renders NotificationsNavLink
+// (the unread-count badge), which calls useNotifications -> useQuery — every test through this
+// helper needs a real provider now, not just the AuthenticatedHome describe block below that
+// already had one for its own, separate reasons.
 function renderAt(path: string) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/set-new-password" element={<SetNewPasswordPage />} />
-        <Route path="/" element={<AuthenticatedLayout />}>
-          <Route index element={<div>HOME-CONTENT</div>} />
-          <Route element={<OwnerRoute />}>
-            <Route path="employees" element={<div>EMPLOYEES-CONTENT</div>} />
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/set-new-password" element={<SetNewPasswordPage />} />
+          <Route path="/" element={<AuthenticatedLayout />}>
+            <Route index element={<div>HOME-CONTENT</div>} />
+            <Route element={<OwnerRoute />}>
+              <Route path="employees" element={<div>EMPLOYEES-CONTENT</div>} />
+            </Route>
           </Route>
-        </Route>
-      </Routes>
-    </MemoryRouter>,
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 

@@ -69,10 +69,15 @@ def _task(session: Session, assigned_to: object, status: str, **overrides: objec
     session.commit()
 
 
+def _owner(session: Session) -> Profile:
+    return _employee(session, role="owner", email="owner@example.com")
+
+
 def test_pending_job_count_counts_only_assigned_and_in_progress(session: Session) -> None:
     # Profile isn't hashable (a plain SQLModel/Pydantic table model, no __hash__ defined) — found
     # by actually running this test, not assumed; keyed by id instead of using Profile as a dict
     # key.
+    owner = _owner(session)
     busy = _employee(session, email="busy@example.com")
     idle = _employee(session, email="idle@example.com")
     _task(session, busy.id, "assigned")
@@ -80,15 +85,20 @@ def test_pending_job_count_counts_only_assigned_and_in_progress(session: Session
     _task(session, busy.id, "completed")  # not pending — must not count
     _task(session, idle.id, "submitted")  # not pending either — awaiting review, not active work
 
-    results = {profile.id: count for profile, count in crud.list_employees(session, 0, 50)}
+    results = {
+        profile.id: count for profile, count in crud.list_employees(session, owner, 0, 50)
+    }
 
     assert results[busy.id] == 2
     assert results[idle.id] == 0
 
 
 def test_employee_with_zero_tasks_gets_zero_not_null(session: Session) -> None:
+    owner = _owner(session)
     lonely = _employee(session, email="lonely@example.com")
 
-    results = {profile.id: count for profile, count in crud.list_employees(session, 0, 50)}
+    results = {
+        profile.id: count for profile, count in crud.list_employees(session, owner, 0, 50)
+    }
 
     assert results[lonely.id] == 0

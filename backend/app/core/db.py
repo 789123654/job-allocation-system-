@@ -1,15 +1,109 @@
+import logging
+import threading
+import time
 from collections.abc import Callable, Generator
+from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import Engine, event
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import QueuePool
 from sqlmodel import Session, create_engine
 from sqlmodel import text as sql_text
 
 from app.core.config import settings
 from app.models import Profile
 
+
+def _connect_args() -> dict[str, int]:
+    """Isolated for direct unit testing (tests/core/test_db.py) — psycopg's own libpq parameter
+    name, not a SQLAlchemy-level setting, so it only takes effect via connect_args."""
+    return {"connect_timeout": settings.DB_CONNECT_TIMEOUT_SECONDS}
+
+
 # Migrations (Alembic) own schema creation, not create_all() (fastapi/sql-databases.md).
-engine = create_engine(str(settings.DATABASE_URL))
+engine = create_engine(
+    str(settings.DATABASE_URL),
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    # Without this SQLAlchemy appends `[parameters: {...}]` to every failed statement's message —
+    # i.e. a firm's task title/description into Railway logs and Sentry (tests/core/
+    # test_db_parameter_hiding.py). The SQL text is kept. Postgres's OWN message can still echo a
+    # value; core/redaction.py handles that at the log/Sentry sinks.
+    hide_parameters=True,
+    # Bounds a brand-new physical connection attempt (Denial_of_Service_Cheat_Sheet.md, ASVS
+    # 13.1.3/13.2.6) — see DB_CONNECT_TIMEOUT_SECONDS's own docstring in core/config.py for the
+    # live-probed evidence this closes. `connect_timeout` is a libpq/psycopg parameter, so it only
+    # covers opening the TCP/auth handshake for THIS Postgres connection — not query execution
+    # time, and not any other engine (this project's tests also run against real Postgres, per
+    # TEST_DATABASE_URL, not a separate SQLite engine).
+    connect_args=_connect_args(),
+)
+
+_pool_logger = logging.getLogger("app.pool")
+
+
+def install_pool_monitor(
+    target: Engine,
+    *,
+    capacity: int,
+    warn_ratio: float = 0.7,
+    min_interval_seconds: float = 30.0,
+) -> None:
+    """Warn (logger `app.pool`) when the pool is nearly full. This is the leading indicator the k6
+    PATCH run (2026-09-18) showed nothing gives: it went from healthy to `QueuePool limit ...
+    reached` with no earlier signal. Fires from the pool's documented `checkout` event;
+    rate-limited per engine so a saturated pool warns once per interval, not once per request. A
+    listener error must never break a checkout (ASVS 16.5.2), hence the catch-all.
+    """
+    last_warned = float("-inf")
+    lock = threading.Lock()
+
+    def on_checkout(dbapi_connection: object, connection_record: object, proxy: object) -> None:
+        nonlocal last_warned
+        try:
+            pool = target.pool
+            if not isinstance(pool, QueuePool):
+                return
+            checked_out = pool.checkedout()
+            utilization = checked_out / capacity
+            if utilization < warn_ratio:
+                return
+            now = time.monotonic()
+            with lock:
+                if now - last_warned < min_interval_seconds:
+                    return
+                last_warned = now
+            _pool_logger.warning(
+                "Database connection pool utilization high",
+                extra={
+                    "event": "pool_high_utilization",
+                    "checked_out": checked_out,
+                    "capacity": capacity,
+                    "utilization": round(utilization, 3),
+                },
+            )
+        except Exception:
+            return
+
+    event.listen(target, "checkout", on_checkout)
+
+
+install_pool_monitor(
+    engine,
+    capacity=settings.DB_POOL_SIZE + settings.DB_MAX_OVERFLOW,
+    warn_ratio=settings.DB_POOL_WARN_RATIO,
+)
+
+
+def as_aware_utc(value: datetime) -> datetime:
+    """Postgres' `timestamptz` round-trips as tz-aware via psycopg, but don't trust that blindly —
+    SQLite (this project's own test backend) drops tzinfo on round-trip, and a naive-vs-aware
+    comparison raises a raw `TypeError`, not a clean 500. Shared here (moved from crud.py's
+    formerly-private `_as_aware_utc`, code-review finding #13's own fix) since idempotency.py needs
+    the identical guard for the same reason — both modules already import from this one.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def get_session() -> Generator[Session]:

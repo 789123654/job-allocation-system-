@@ -265,6 +265,23 @@ def test_cross_tenant_notification_read_is_404(client: TestClient, seeded: _Seed
 # --- Multi-user replay (firm A employee -> another firm-A account's objects) ----------------------
 
 
+# GET /issues/{id} widened from RequireOwnerDep to ActiveProfileDep, 2026-09-18 (reported gap: the
+# raiser had no way to ever read their own resolved issue) — crud.get_issue is what narrows this
+# back to least-privilege (Authorization_Cheat_Sheet.md), tested here through the real HTTP/RLS
+# surface, same reasoning as every other test in this file, not assumed from the crud-level
+# SQLite tests (tests/crud/test_access_denials.py) alone.
+def test_other_employees_issue_is_not_visible(client: TestClient, seeded: _Seeded) -> None:
+    # emp_a2 is a real employee of the same firm, but did not raise issue_a1 (emp_a1 did).
+    r = client.get(f"/issues/{seeded.issue_a1}", headers=_auth(seeded.token_emp_a2))
+    assert r.status_code == 404
+
+
+def test_raiser_can_read_their_own_issue(client: TestClient, seeded: _Seeded) -> None:
+    r = client.get(f"/issues/{seeded.issue_a1}", headers=_auth(seeded.token_emp_a1))
+    assert r.status_code == 200
+    assert r.json()["id"] == str(seeded.issue_a1)
+
+
 def test_other_employees_task_is_not_visible(client: TestClient, seeded: _Seeded) -> None:
     # emp_a2 is a real employee of the same firm, but not the assignee of task_a1.
     r = client.get(f"/tasks/{seeded.task_a1}", headers=_auth(seeded.token_emp_a2))

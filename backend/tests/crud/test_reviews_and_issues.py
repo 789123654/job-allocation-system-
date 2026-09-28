@@ -317,3 +317,86 @@ def test_resolve_issue_marks_originating_notification_read(session: Session) -> 
     session.refresh(owner_notified)
 
     assert owner_notified.is_read is True
+
+
+def _issue_resolved_notification(session: Session, issue: Issue) -> Notification | None:
+    return session.exec(
+        select(Notification).where(
+            Notification.issue_id == issue.id, Notification.type == "issue_resolved"
+        )
+    ).first()
+
+
+def test_resolve_issue_clarified_notifies_the_raiser(session: Session) -> None:
+    """Reported gap, 2026-09-18: before this, "clarified" left the raiser with zero signal at all
+    that their issue was addressed — not even a stale one, since no issue_resolved notification
+    existed to fire in the first place (unlike "reassigned", which always had task_reassigned).
+    """
+    task = _task(session, status="in_progress")
+    raiser = _employee(session)
+    issue = _issue(session, task, raised_by=raiser.id)
+    actor = _actor()
+
+    crud.resolve_issue(session, actor, issue, "clarified", "explained scope", None, None, None)
+    session.commit()
+
+    notified = _issue_resolved_notification(session, issue)
+    assert notified is not None
+    assert notified.recipient_id == raiser.id
+    assert notified.firm_id == _FIRM_ID
+    assert notified.task_id == task.id
+
+
+def test_resolve_issue_deadline_adjusted_notifies_the_raiser(session: Session) -> None:
+    task = _task(session, status="in_progress")
+    raiser = _employee(session)
+    issue = _issue(session, task, raised_by=raiser.id)
+    actor = _actor()
+
+    crud.resolve_issue(
+        session, actor, issue, "deadline_adjusted", "extended", None, datetime.now(UTC), None
+    )
+    session.commit()
+
+    notified = _issue_resolved_notification(session, issue)
+    assert notified is not None
+    assert notified.recipient_id == raiser.id
+
+
+def test_resolve_issue_reassigned_notifies_the_raiser_in_addition_to_the_new_assignee(
+    session: Session,
+) -> None:
+    """The "reassigned" path already notified *someone* via task_reassigned (the new assignee,
+    which may be a different person than the raiser) — issue_resolved fires independently, to the
+    raiser specifically, so the two notifications aren't the same thing even when they land on the
+    same person.
+    """
+    task = _task(session, status="in_progress")
+    raiser = _employee(session)
+    issue = _issue(session, task, raised_by=raiser.id)
+    actor = _actor()
+    new_employee = _employee(session)
+
+    crud.resolve_issue(
+        session,
+        actor,
+        issue,
+        "reassigned",
+        "give to someone else",
+        "finish the remaining checks",
+        None,
+        new_employee.id,
+    )
+    session.commit()
+
+    notified = _issue_resolved_notification(session, issue)
+    assert notified is not None
+    assert notified.recipient_id == raiser.id
+
+    reassigned_notification = session.exec(
+        select(Notification).where(
+            Notification.task_id == task.id, Notification.type == "task_reassigned"
+        )
+    ).first()
+    assert reassigned_notification is not None
+    assert reassigned_notification.recipient_id == new_employee.id

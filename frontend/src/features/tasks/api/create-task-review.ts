@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api-client";
-import { tasksQueryKeyPrefix } from "@/features/tasks/api/get-tasks";
+import { dateOnlyToEndOfDayIso } from "@/lib/date-only-to-instant";
+import { invalidateAfterTaskMutation } from "@/features/tasks/api/invalidate-after-task-mutation";
 import { toTask, type TaskOutDto } from "@/features/tasks/api/mappers";
 import type { Task, TaskReviewInput } from "@/features/tasks/types";
 
@@ -20,7 +21,9 @@ function createTaskReview(
       notes: input.notes ?? null,
       remaining_work_description: input.remainingWorkDescription ?? null,
       assigned_to: input.assignedTo ?? null,
-      billing_deadline: input.billingDeadline ?? null,
+      billing_deadline: input.billingDeadline
+        ? dateOnlyToEndOfDayIso(input.billingDeadline)
+        : null,
       billing_description: input.billingDescription ?? null,
       billing_amount: input.billingAmount ?? null,
       billing_recipient: input.billingRecipient ?? null,
@@ -32,8 +35,6 @@ export function useCreateTaskReview() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: createTaskReview,
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: tasksQueryKeyPrefix });
-    },
+    onSuccess: () => invalidateAfterTaskMutation(queryClient),
   });
 }

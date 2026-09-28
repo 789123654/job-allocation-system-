@@ -196,7 +196,7 @@ RLS: `tenant_isolation` pattern, same as every other table — a firm sees only 
 | `id` | uuid, composite PK w/ firm_id | |
 | `firm_id` | uuid, FK → `firms.id` | the *actor's* own firm — same convention as every other table, not the target's firm |
 | `actor_id` | uuid, composite FK `(firm_id, actor_id) → profiles(firm_id, id)` | who was denied |
-| `resource_type` | text, nullable, `check in ('task','notification')` | null for a pure role check with no specific resource in play (`require_owner`) |
+| `resource_type` | text, nullable, `check in ('task','notification','issue')` | null for a pure role check with no specific resource in play (`require_owner`). `issue` added 2026-09-18 when `GET /issues/{id}` widened from Owner-only to also allow the issue's raiser (`crud.get_issue` denies and records here when neither applies) |
 | `resource_id` | uuid, nullable, **deliberately not an FK** | the resource the actor tried to reach — no FK because the whole point is it may be something the actor can't see or that fails other constraints; an enforced FK here would defeat the reason the column exists |
 | `reason` | text, `check in ('wrong_role','not_assignee','wrong_owner')` | `wrong_role` = failed a role gate (e.g. Employee hitting an Owner-only route); `not_assignee` = visible to the actor but not theirs to act on (e.g. Owner can see a task but isn't its assignee for submit/mark-billed); `wrong_owner` = not even visible — same-tenant IDOR (e.g. an Employee requesting another's task/notification by id) |
 | `created_at` | timestamptz | |
@@ -250,6 +250,7 @@ Maps every `notifications.type` value 1:1 to the exact PRD bullet it implements,
 | `task_reassigned` | §3.4 (both trigger paths, §3.3) | Employee |
 | `task_deadline_approaching` | §3.4 | Employee |
 | `task_overdue_own` | §3.4 (new vs. original PRD) | Employee |
+| `issue_resolved` | §2.7/§3.4/§4.3 (added 2026-09-18 — reported gap: "clarified"/"deadline_adjusted" resolutions previously notified the raiser of nothing at all) | Employee (the issue's raiser) |
 
 ## 6. Schema-Level Open Questions
 

@@ -1,0 +1,60 @@
+name: Tenant isolation canary
+
+# Scheduled black-box probe of the DEPLOYED API with synthetic tenants (docs/OBSERVABILITY.md,
+# backend/ops/canary.py): firm X's credentials must never read or change firm Y's objects, a list
+# must never contain Y's ids, an employee can't reach owner-only endpoints, a tampered token is
+# 401. Fails closed — an unreachable API, a login failure, or fewer probes than expected is a
+# FAILED run, never a pass. Any failure is a possible tenant-isolation break: treat it as an
+# incident, not flakiness.
+#
+# Off by default, like ops-db-check.yml: scheduled runs need the repository VARIABLE
+# OPS_MONITORING_ENABLED == "true", which stays unset until real synthetic firms exist (no
+# production deployment exists yet — docs/DEPLOYMENT.md §13). Manual runs always work. `schedule`
+# only fires from the default branch.
+#
+# Secret: CANARY_CONFIG_B64, an ENVIRONMENT secret on `ops-monitoring` — the base64 of the JSON
+# config (api_base_url, supabase url/publishable key, two-plus synthetic firms with owner/employee
+# credentials and object ids; docs/OBSERVABILITY.md has the shape). Base64, not raw JSON:
+# GitHub's guidance is to avoid structured data as a secret because redaction can't match it.
+# It is decoded to a 0600 file in RUNNER_TEMP for one step and deleted afterwards.
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 30 minutes, off the top of the hour.
+    - cron: "7,37 * * * *"
+
+permissions: {}
+
+concurrency:
+  group: isolation-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    if: github.event_name == 'workflow_dispatch' || vars.OPS_MONITORING_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ops-monitoring
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --no-dev
+      - name: Run isolation canary
+        env:
+          CANARY_CONFIG_B64: ${{ secrets.CANARY_CONFIG_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          config="$RUNNER_TEMP/canary.json"
+          trap 'rm -f "$config"' EXIT
+          printf '%s' "$CANARY_CONFIG_B64" | base64 -d > "$config"
+          uv run python -m ops.canary --config "$config"

@@ -15,6 +15,11 @@ export function NotificationsPage() {
 
   function targetPath(n: Notification): string | null {
     if (n.type === "issue_raised" && n.issueId) return `/owner-issues/${n.issueId}/resolve`;
+    // Reported gap, 2026-09-18: issue_resolved previously fell through to the generic taskId
+    // branch below, landing on TaskDetailPage — which has no idea an issue exists, so the Owner's
+    // resolution_notes were unreachable. IssueDetailPage is the raiser's read-only counterpart to
+    // IssueResolutionPage, same as this file's issue_raised branch above targets the Owner's.
+    if (n.type === "issue_resolved" && n.issueId) return `/issues/${n.issueId}`;
     if (!n.taskId) return null;
     return role === "owner" ? `/owner-tasks/${n.taskId}/review` : `/tasks/${n.taskId}`;
   }
@@ -45,7 +50,7 @@ export function NotificationsPage() {
       <ul className="flex flex-col gap-2">
         {(notifications ?? []).map((n) => {
           const path = targetPath(n);
-          const message = notificationMessage(n.type);
+          const message = notificationMessage(n.type, n.taskTitle);
           // PRD §2.5: task_deadline_1_day is a distinct, visually highlighted warning, separate
           // from the general "approaching deadline" view — not just another list row.
           const isUrgent = n.type === "task_deadline_1_day";

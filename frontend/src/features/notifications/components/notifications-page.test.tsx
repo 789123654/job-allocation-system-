@@ -64,4 +64,27 @@ describe("NotificationsPage", () => {
     const link = await screen.findByRole("link");
     expect(link).toHaveAttribute("href", "/tasks/t1");
   });
+
+  // Reported gap, 2026-09-18: issue_resolved used to fall through to the generic taskId branch
+  // (TaskDetailPage, which has no idea an issue exists — the Owner's resolution_notes were
+  // unreachable). Must route to IssueDetailPage instead, keyed by issueId not taskId.
+  it("links an issue_resolved notification to IssueDetailPage, not TaskDetailPage", async () => {
+    server.use(
+      http.get("http://localhost:8000/notifications", () =>
+        HttpResponse.json([
+          {
+            id: "n1",
+            type: "issue_resolved",
+            task_id: "t1",
+            issue_id: "i1",
+            is_read: false,
+            created_at: "2026-09-01T00:00:00Z",
+          },
+        ]),
+      ),
+    );
+    renderAs("employee");
+    const link = await screen.findByRole("link");
+    expect(link).toHaveAttribute("href", "/issues/i1");
+  });
 });

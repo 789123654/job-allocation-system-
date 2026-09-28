@@ -82,7 +82,7 @@ def test_list_employees_orders_newest_first_regardless_of_insertion_order(sessio
     newest = _employee(session, owner, "Newest", now)
     oldest = _employee(session, owner, "Oldest", now - timedelta(hours=2))
 
-    results = crud.list_employees(session, 0, 50)
+    results = crud.list_employees(session, owner, 0, 50)
 
     assert [profile.id for profile, _ in results] == [newest.id, middle.id, oldest.id]
 
@@ -94,6 +94,6 @@ def test_list_job_types_orders_newest_first_regardless_of_insertion_order(sessio
     newest = _job_type(session, owner, "Newest", now)
     oldest = _job_type(session, owner, "Oldest", now - timedelta(hours=2))
 
-    results = crud.list_job_types(session, 0, 50)
+    results = crud.list_job_types(session, owner, 0, 50)
 
     assert [jt.id for jt in results] == [newest.id, middle.id, oldest.id]

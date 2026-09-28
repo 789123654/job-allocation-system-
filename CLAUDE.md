@@ -15,9 +15,13 @@ onboarding firm 2, 3, 4 needs zero rebuild, even though only one firm is live to
 desktop shell. Hosted on Railway, fronted by Cloudflare. Observability: Railway's own log capture + Sentry
 (errors) + UptimeRobot (uptime), all free-tier.
 
-**Status as of this file's writing**: planning phase complete (all six planning docs + a comprehensive
-security audit pass), coding not yet started. **No code exists in this repo yet — do not assume any of the
-above is implemented; it's all still design.**
+**Status (last updated 2026-09-15, code-review finding #20):** backend Phases 0-3 complete and CI-green;
+frontend Phase 4 Step 1 (scaffolding + auth) complete per `docs/CODING_STRUCTURE.md` §4's build order; repo
+is public with branch protection, secret scanning, and mutation testing in CI (`docs/SECURITY.md`). A 21-
+finding whole-repo code review (`docs/CODE_REVIEW_FINDINGS_2026-09-14.md`) has been fully worked through.
+This line was previously stale — written during planning, never updated across 5 phases of real
+implementation — do not trust a status claim in this file over `git log`/the actual repo state; re-verify
+before relying on it, the same discipline that caught it stale in the first place.
 
 ## 2. Documentation map — read in this order
 

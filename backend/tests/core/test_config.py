@@ -52,3 +52,25 @@ def test_loopback_db_without_tls_is_allowed() -> None:
     # local dev + CI's postgres service container — the connection never crosses a network
     settings = _settings("postgresql+psycopg://test:test@127.0.0.1:5432/test")
     assert settings.DATABASE_URL.query is None
+
+
+def test_multi_host_dsn_with_second_host_remote_and_no_tls_is_rejected() -> None:
+    """Host-list/failover DSN: first host is loopback, second is remote. Checking only
+    hosts()[0] would wrongly let this through — every listed host must be checked.
+    """
+    with pytest.raises(ValidationError, match="sslmode=verify-full"):
+        _settings("postgresql+psycopg://u:p@localhost,db.abcdefgh.supabase.co:5432/postgres")
+
+
+def test_multi_host_dsn_with_second_host_remote_and_verify_full_is_accepted() -> None:
+    settings = _settings(
+        "postgresql+psycopg://u:p@localhost,db.abcdefgh.supabase.co:5432/postgres"
+        "?sslmode=verify-full"
+    )
+    hosts = [h["host"] for h in settings.DATABASE_URL.hosts()]
+    assert hosts == ["localhost", "db.abcdefgh.supabase.co"]
+
+
+def test_multi_host_dsn_with_all_hosts_loopback_is_allowed() -> None:
+    settings = _settings("postgresql+psycopg://u:p@localhost,127.0.0.1:5432/postgres")
+    assert settings.DATABASE_URL.query is None
