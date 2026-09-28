@@ -1136,6 +1136,21 @@ upgrade path yet (`npm audit fix --dry-run` confirms). Waived in `.trivyignore` 
 removal condition, matching the file's existing waiver precedent (the Tauri/glib entry) — not
 reachable in this project's context (a CI/local dev tool, never processes untrusted request data).
 
+**E. First real completed numbers, 2026-09-29 (deferred, not yet acted on — tracked here for a later
+pass):** this step's first-ever CI run to actually finish all 1127 mutants (`crud.py`/`idempotency.py`
+scope), GitHub Actions run `36384537222`. Killed 406, survived 94, timeout 621, no-tests 6. The 94
+survived mutants (real test-coverage gaps, not live bugs — see below) concentrate in: `create_task_review`
+(20), `reset_employee_password` (15), `idempotency.reject_if_idempotency_key_used` (10), `resolve_issue`
+(9), `create_issue` (6), `record_access_denial` (5), `submit_task`/`mark_task_billed`/`_notify` (4 each),
+`idempotency.record_idempotency_key` (4), smaller counts elsewhere. The 621 timeout count is concentrated
+in just 23 functions, most timing out on nearly all their own mutants (not spread evenly) — likelier a
+per-mutant timeout budget that's too tight for this suite's real speed than 23 independent real hangs;
+not yet verified either way. **Not a live vulnerability**: mutmut mutates a throwaway copy of the code to
+check whether tests would catch a hypothetical future bug — the real, shipped code already passes the
+full test suite cleanly beforehand. Next step when revisited: (1) check mutmut's timeout setting against
+this suite's real baseline runtime, (2) write tests for the top survived-mutant functions above, starting
+with `create_task_review` and `reset_employee_password`.
+
 ## Completed Audits
 
 ### Phase 5 (Hardening) — Frontend Error Tracking (Sentry) (2026-09-13)
