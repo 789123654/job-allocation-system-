@@ -629,6 +629,318 @@ function businessLogicRaceProbe(identity) {
   assertCleanProblemDetails(res);
 }
 
+// 2026-09-28 additions — the remaining 7 documented endpoints (docs/API_SPEC.md), same blind-pass
+// discipline as everything above this line: written from API_SPEC.md + the four `owasp-*` skills
+// only, never from `backend/app/`. Each function pairs a legit-use check with at least one
+// spec-derived attack check, same shape as the existing probes.
+
+function employeesListProbe(identity, headers) {
+  // GET /employees — Owner only, paginated (API_SPEC.md §3). Wrong-role check first (role gate
+  // runs before any object lookup, same as every other Owner-only endpoint in this file).
+  if (identity.role !== "owner") {
+    const res = http.get(`${BASE_URL}/employees`, {
+      headers,
+      responseCallback: http.expectedStatuses(403),
+    });
+    check(res, { "employee listing employees is rejected (403)": (r) => r.status === 403 }, { isolation: "critical" });
+    assertCleanProblemDetails(res);
+    return;
+  }
+  const res = http.get(`${BASE_URL}/employees`, { headers });
+  check(res, { "owner lists employees (200)": (r) => r.status === 200 });
+}
+
+function resetPasswordProbe(identity, headers) {
+  // POST /employees/{id}/reset-password — Owner only, Idempotency-Key, no body (API_SPEC.md §3/§5).
+  if (identity.role !== "owner") {
+    const res = http.post(
+      `${BASE_URL}/employees/${identity.foreign_employee_id || pseudoUuid()}/reset-password`,
+      null,
+      { headers, responseCallback: http.expectedStatuses(403) },
+    );
+    check(
+      res,
+      { "employee resetting a password is rejected (403)": (r) => r.status === 403 },
+      { isolation: "critical" },
+    );
+    assertCleanProblemDetails(res);
+    return;
+  }
+  if (identity.reset_target_employee_id) {
+    const key = pseudoUuid();
+    const first = http.post(
+      `${BASE_URL}/employees/${identity.reset_target_employee_id}/reset-password`,
+      null,
+      { headers: { ...headers, "Idempotency-Key": key } },
+    );
+    check(first, { "owner resets an employee's password (200)": (r) => r.status === 200 });
+    // API_SPEC.md's own documented deviation from the standard cache-and-replay idempotency pattern
+    // (Rule 230): "a retry gets 409 with an explanation, never a replayed password" — because the
+    // cached response would otherwise contain the one-time generated password a second time. This
+    // is exactly the "a shared idempotency mechanism retrofitted onto a new call site whose payload
+    // is a one-time secret" class of bug — tested directly against the spec's own stated fix, not
+    // guessed from generic idempotency-replay expectations.
+    const retry = http.post(
+      `${BASE_URL}/employees/${identity.reset_target_employee_id}/reset-password`,
+      null,
+      { headers: { ...headers, "Idempotency-Key": key }, responseCallback: http.expectedStatuses(409) },
+    );
+    check(
+      retry,
+      { "retried reset-password never replays the generated password (409)": (r) => r.status === 409 },
+      { isolation: "critical" },
+    );
+    assertCleanProblemDetails(retry);
+  }
+  if (identity.foreign_employee_id) {
+    const cross = http.post(
+      `${BASE_URL}/employees/${identity.foreign_employee_id}/reset-password`,
+      null,
+      { headers: { ...headers, "Idempotency-Key": pseudoUuid() }, responseCallback: http.expectedStatuses(404) },
+    );
+    check(cross, { "cross-tenant reset-password 404s": (r) => r.status === 404 }, { isolation: "critical" });
+    assertCleanProblemDetails(cross);
+  }
+}
+
+function confirmPasswordChangedProbe(identity, headers) {
+  // POST /auth/confirm-password-changed — any authenticated actor, no body, 204 (API_SPEC.md §3).
+  // No {id}, no role gate to test — the one real attack surface is "must still require auth at all".
+  const res = http.post(`${BASE_URL}/auth/confirm-password-changed`, null, { headers });
+  check(res, { "confirm-password-changed 204": (r) => r.status === 204 });
+  const noAuth = http.post(`${BASE_URL}/auth/confirm-password-changed`, null, {
+    responseCallback: http.expectedStatuses(401),
+  });
+  check(
+    noAuth,
+    { "confirm-password-changed without a token is rejected (401)": (r) => r.status === 401 },
+    { isolation: "critical" },
+  );
+  assertCleanProblemDetails(noAuth);
+}
+
+function taskReviewProbe(identity, headers) {
+  // POST /tasks/{id}/review — Owner only, Idempotency-Key, workflow-state-checked: only valid from
+  // `submitted` (API_SPEC.md §3, `REST_Security_Cheat_Sheet.md`'s "Preventing Out-of-Order API
+  // Execution", WSTG-BUSL-06 "Test for Circumvention of Work Flows"). Deterministic dedicated
+  // targets (seed.py) so the legit/workflow-bypass checks run every time this branch fires,
+  // regardless of which random identity the iteration drew.
+  if (!identity.review_task_id) {
+    sleep(1);
+    return;
+  }
+  const legit = http.post(
+    `${BASE_URL}/tasks/${identity.review_task_id}/review`,
+    JSON.stringify({ outcome: "approved" }),
+    {
+      headers: {
+        Authorization: `Bearer ${identity.review_owner_token}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": identity.review_idempotency_key,
+      },
+    },
+  );
+  check(legit, { "owner reviews a submitted task (200)": (r) => r.status === 200 });
+
+  const wrongState = http.post(
+    `${BASE_URL}/tasks/${identity.review_wrong_state_task_id}/review`,
+    JSON.stringify({ outcome: "approved" }),
+    {
+      headers: {
+        Authorization: `Bearer ${identity.review_owner_token}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": pseudoUuid(),
+      },
+      responseCallback: http.expectedStatuses(409),
+    },
+  );
+  check(
+    wrongState,
+    { "review on a not-yet-submitted task is rejected (409)": (r) => r.status === 409 },
+    { isolation: "critical" },
+  );
+  assertCleanProblemDetails(wrongState);
+
+  if (identity.role !== "owner") {
+    const res = http.post(
+      `${BASE_URL}/tasks/${identity.foreign_task_id || pseudoUuid()}/review`,
+      JSON.stringify({ outcome: "approved" }),
+      { headers: { ...headers, "Content-Type": "application/json" }, responseCallback: http.expectedStatuses(403) },
+    );
+    check(res, { "employee reviewing a task is rejected (403)": (r) => r.status === 403 }, { isolation: "critical" });
+    assertCleanProblemDetails(res);
+  } else if (identity.foreign_task_id) {
+    const cross = http.post(
+      `${BASE_URL}/tasks/${identity.foreign_task_id}/review`,
+      JSON.stringify({ outcome: "approved" }),
+      {
+        headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() },
+        responseCallback: http.expectedStatuses(404),
+      },
+    );
+    check(cross, { "cross-tenant task review 404s": (r) => r.status === 404 }, { isolation: "critical" });
+    assertCleanProblemDetails(cross);
+  }
+}
+
+function markBilledProbe(identity, headers) {
+  // POST /tasks/{id}/mark-billed — Assigned employee only, Idempotency-Key, workflow-state-checked:
+  // only valid when task_type='billing' and status is assigned/in_progress (API_SPEC.md §3). Same
+  // deterministic-target reasoning as taskReviewProbe above.
+  if (!identity.billing_task_id) {
+    sleep(1);
+    return;
+  }
+  const legit = http.post(`${BASE_URL}/tasks/${identity.billing_task_id}/mark-billed`, null, {
+    headers: {
+      Authorization: `Bearer ${identity.billing_token}`,
+      "Content-Type": "application/json",
+      "Idempotency-Key": identity.billing_idempotency_key,
+    },
+  });
+  check(legit, { "assigned employee marks a billing task billed (200)": (r) => r.status === 200 });
+
+  const wrongState = http.post(
+    `${BASE_URL}/tasks/${identity.billing_wrong_state_task_id}/mark-billed`,
+    null,
+    {
+      headers: {
+        Authorization: `Bearer ${identity.billing_token}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": pseudoUuid(),
+      },
+      responseCallback: http.expectedStatuses(409),
+    },
+  );
+  check(
+    wrongState,
+    { "mark-billed on a non-billing/wrong-status task is rejected (409)": (r) => r.status === 409 },
+    { isolation: "critical" },
+  );
+  assertCleanProblemDetails(wrongState);
+
+  // Wrong actor: an Owner gets 403 (role gate), any OTHER employee gets 404 (object-level auth —
+  // "an Employee can only touch resources assigned to them", never confirming the task exists to
+  // someone it isn't assigned to). Uses the ambient per-iteration identity, skipped on the
+  // vanishingly rare iteration where it IS the billing employee (that's just the legit call above).
+  if (identity.profile_id !== identity.billing_employee_id) {
+    const expected = identity.role === "owner" ? 403 : 404;
+    const cross = http.post(`${BASE_URL}/tasks/${identity.billing_task_id}/mark-billed`, null, {
+      headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() },
+      responseCallback: http.expectedStatuses(expected),
+    });
+    check(
+      cross,
+      { [`mark-billed by the wrong actor is rejected (${expected})`]: (r) => r.status === expected },
+      { isolation: "critical" },
+    );
+    assertCleanProblemDetails(cross);
+  }
+}
+
+function taskIssueCreateProbe(identity, headers) {
+  // POST /tasks/{id}/issues — Assigned employee only, Idempotency-Key/secondary key (API_SPEC.md
+  // §3). Reuses race_task_id/race_token (a real assigned-employee/task pair already seeded) —
+  // creating an issue never mutates the task's own status, so it's safe alongside
+  // businessLogicRaceProbe's own submit-race use of the same task.
+  if (!identity.race_task_id) {
+    sleep(1);
+    return;
+  }
+  const key = pseudoUuid();
+  const body = JSON.stringify({ description: "Load test issue via k6" });
+  const opts = {
+    headers: {
+      Authorization: `Bearer ${identity.race_token}`,
+      "Content-Type": "application/json",
+      "Idempotency-Key": key,
+    },
+  };
+  const first = http.post(`${BASE_URL}/tasks/${identity.race_task_id}/issues`, body, opts);
+  check(first, { "assigned employee creates an issue (2xx)": (r) => r.status >= 200 && r.status < 300 });
+  // Idempotency-retry-safety: `Business_Logic_Security_Cheat_Sheet.md`'s "Use Idempotency Keys for
+  // External Actions" — replaying the SAME key must not create a second issue row.
+  const retry = http.post(`${BASE_URL}/tasks/${identity.race_task_id}/issues`, body, opts);
+  check(retry, { "retried issue creation never 500s": (r) => r.status < 500 }, { isolation: "critical" });
+  if (first.status >= 200 && first.status < 300 && retry.status >= 200 && retry.status < 300) {
+    let firstBody = null;
+    let retryBody = null;
+    try {
+      firstBody = first.json();
+    } catch (e) {
+      firstBody = null;
+    }
+    try {
+      retryBody = retry.json();
+    } catch (e) {
+      retryBody = null;
+    }
+    check(
+      null,
+      {
+        "retried issue creation never creates a duplicate row": () =>
+          !firstBody || !retryBody || firstBody.id === retryBody.id,
+      },
+      { isolation: "critical" },
+    );
+  }
+  if (identity.foreign_task_id) {
+    const cross = http.post(
+      `${BASE_URL}/tasks/${identity.foreign_task_id}/issues`,
+      JSON.stringify({ description: "should be rejected" }),
+      {
+        headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() },
+        responseCallback: http.expectedStatuses(404),
+      },
+    );
+    check(cross, { "cross-tenant issue creation 404s": (r) => r.status === 404 }, { isolation: "critical" });
+    assertCleanProblemDetails(cross);
+  }
+}
+
+function issueResolveProbe(identity, headers) {
+  // POST /issues/{id}/resolve — Owner only, Idempotency-Key (API_SPEC.md §3). Not documented as
+  // workflow-state-checked (unlike review/mark-billed above), so this only asserts the legit call,
+  // the endpoint's own idempotency guarantee (via own_issue_resolve_key's fixed per-firm key,
+  // seed.py), and the standard cross-tenant/wrong-role checks — never an assumed state rejection.
+  if (identity.role !== "owner") {
+    const res = http.post(
+      `${BASE_URL}/issues/${identity.foreign_issue_id || pseudoUuid()}/resolve`,
+      JSON.stringify({ resolution_type: "clarified", resolution_notes: "should be rejected" }),
+      { headers: { ...headers, "Content-Type": "application/json" }, responseCallback: http.expectedStatuses(403) },
+    );
+    check(res, { "employee resolving an issue is rejected (403)": (r) => r.status === 403 }, { isolation: "critical" });
+    assertCleanProblemDetails(res);
+    return;
+  }
+  if (identity.own_issue_id) {
+    const legit = http.post(
+      `${BASE_URL}/issues/${identity.own_issue_id}/resolve`,
+      JSON.stringify({ resolution_type: "clarified", resolution_notes: "Load test resolution" }),
+      {
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+          "Idempotency-Key": identity.own_issue_resolve_key,
+        },
+      },
+    );
+    check(legit, { "owner resolves their own firm's issue (200)": (r) => r.status === 200 });
+  }
+  if (identity.foreign_issue_id) {
+    const cross = http.post(
+      `${BASE_URL}/issues/${identity.foreign_issue_id}/resolve`,
+      JSON.stringify({ resolution_type: "clarified", resolution_notes: "should be rejected" }),
+      {
+        headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": pseudoUuid() },
+        responseCallback: http.expectedStatuses(404),
+      },
+    );
+    check(cross, { "cross-tenant issue resolve 404s": (r) => r.status === 404 }, { isolation: "critical" });
+    assertCleanProblemDetails(cross);
+  }
+}
+
 export default function vuIteration() {
   if (identities.length === 0) {
     throw new Error("identities.json is empty — run seed.py first");
@@ -642,42 +954,59 @@ export default function vuIteration() {
   const identity = identities[Math.floor(Math.random() * identities.length)];
   const headers = { Authorization: `Bearer ${identity.token}` };
 
-  // Weights rebalanced 2026-09-27 to make room for the 7 new attack-suite branches below without
-  // dropping the original latency-measurement branches to zero — pollNotifications stays dominant
-  // (still the one truly continuous real-usage pattern, ARCHITECTURE.md §8) but every branch keeps
-  // enough share to be a genuinely continuous check across the whole ramp/hold/ramp-down window,
-  // not a one-shot at the start.
+  // Weights rebalanced 2026-09-27, then again 2026-09-28 to make room for the 7 further
+  // still-blind attack-suite branches (GET /employees, reset-password, confirm-password-changed,
+  // task review, mark-billed, task issue creation, issue resolve) without dropping any existing
+  // branch to zero — pollNotifications stays dominant (still the one truly continuous real-usage
+  // pattern, ARCHITECTURE.md §8) but every branch keeps enough share to be a genuinely continuous
+  // check across the whole ramp/hold/ramp-down window, not a one-shot at the start. The 7 new
+  // branches take 0.02 each (0.14 total), funded by trimming 0.01 off six existing 0.05 branches
+  // and 0.06 off pollNotifications — every other branch's weight is unchanged from 2026-09-27.
   const roll = Math.random();
-  if (roll < 0.25) {
+  if (roll < 0.19) {
     pollNotifications(headers);
-  } else if (roll < 0.33) {
+  } else if (roll < 0.26) {
     pollTasks(identity, headers);
-  } else if (roll < 0.38) {
+  } else if (roll < 0.3) {
     pollJobTypes(headers);
-  } else if (roll < 0.43) {
+  } else if (roll < 0.34) {
     crossTenantTaskProbe(identity, headers);
-  } else if (roll < 0.47) {
+  } else if (roll < 0.38) {
     tamperedTokenProbe(identity);
-  } else if (roll < 0.52) {
+  } else if (roll < 0.43) {
     forgedTokenVariantProbe(identity);
-  } else if (roll < 0.57) {
+  } else if (roll < 0.48) {
     wrongRoleTaskCreateProbe(identity, headers);
-  } else if (roll < 0.6) {
+  } else if (roll < 0.51) {
     employeeCreateEmployeeProbe(identity, headers);
-  } else if (roll < 0.63) {
+  } else if (roll < 0.53) {
+    employeesListProbe(identity, headers);
+  } else if (roll < 0.55) {
+    resetPasswordProbe(identity, headers);
+  } else if (roll < 0.58) {
     employeeCreateJobTypeProbe(identity, headers);
-  } else if (roll < 0.67) {
+  } else if (roll < 0.62) {
     ownerTaskCreateProbe(identity, headers);
-  } else if (roll < 0.73) {
+  } else if (roll < 0.67) {
     notificationReadProbe(identity, headers);
-  } else if (roll < 0.78) {
+  } else if (roll < 0.69) {
+    confirmPasswordChangedProbe(identity, headers);
+  } else if (roll < 0.73) {
     jobTypeUpdateProbe(identity, headers);
-  } else if (roll < 0.83) {
+  } else if (roll < 0.77) {
     taskDeadlineProbe(identity, headers);
-  } else if (roll < 0.88) {
+  } else if (roll < 0.79) {
+    taskReviewProbe(identity, headers);
+  } else if (roll < 0.81) {
+    markBilledProbe(identity, headers);
+  } else if (roll < 0.85) {
     employeeUpdateProbe(identity, headers);
-  } else if (roll < 0.91) {
+  } else if (roll < 0.88) {
     crossTenantIssueProbe(identity, headers);
+  } else if (roll < 0.9) {
+    taskIssueCreateProbe(identity, headers);
+  } else if (roll < 0.92) {
+    issueResolveProbe(identity, headers);
   } else if (roll < 0.96) {
     claimMismatchProbe(identity);
   } else {

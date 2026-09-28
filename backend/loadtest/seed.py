@@ -50,6 +50,33 @@ rejection-sampling pattern as `foreign_task_id`.
   Skipped only for a firm with zero seeded tasks (`issues.task_id` is `NOT NULL`, FK'd to
   `tasks (firm_id, id)`) — same "no foreign object exists" fallback as the other `foreign_*_id`
   fields when `tasks_per_firm=0`.
+
+2026-09-28 additions (the remaining 7 documented endpoints, still a blind pass — API_SPEC.md only):
+- `reset_target_employee_id` per firm — a DEDICATED employee profile, deliberately never added to
+  `identities` (no VU ever authenticates as it). `POST /employees/{id}/reset-password`'s real,
+  successful call sets that profile's `must_change_password=true` server-side (API_SPEC.md), which
+  would otherwise break every OTHER concurrent iteration relying on being able to authenticate as a
+  real seeded employee — same class of concern `employee_by_firm`'s own comment already raised for
+  `PATCH /employees/{id}`, just with a real side effect instead of a same-value no-op available.
+- `review_task_id` (seeded `submitted`) / `review_wrong_state_task_id` (seeded `created`) /
+  `review_idempotency_key` / `review_owner_token`, and `billing_task_id` (seeded `assigned`,
+  `task_type='billing'`) / `billing_wrong_state_task_id` (seeded `assigned`, default task_type) /
+  `billing_idempotency_key` / `billing_token` / `billing_employee_id` — deterministic targets for
+  `POST /tasks/{id}/review` and `POST /tasks/{id}/mark-billed`, same one-scenario-for-the-whole-run
+  shape as `race_task_id` above (firm #0, `race_owner_id`/`race_employee_id` reused) so every VU that
+  draws either branch hits the same real row. Each pair shares ONE fixed Idempotency-Key across every
+  call, for the whole run, by design: both endpoints are documented as workflow-state-checked
+  (only valid from one specific status), so a real state transition only ever happens once — a fresh
+  key on a second real attempt would be probing an undocumented "already reviewed/billed" status
+  code, not the spec's own idempotent-replay guarantee (Rule 230). The `_wrong_state` id of each pair
+  never transitions (nothing else ever calls a mutating endpoint on it), so the 409 check it backs
+  stays valid for the whole run.
+- `own_issue_id` / `own_issue_resolve_key` per identity — the SAME per-firm issue already seeded
+  above (`issue_by_firm`), this time exposed to identities IN that firm too (previously only ever
+  exposed cross-firm, as `foreign_issue_id`), plus a fixed per-firm Idempotency-Key, same
+  shared-key reasoning as review/mark-billed above. `POST /issues/{id}/resolve` is NOT documented in
+  API_SPEC.md as workflow-state-checked the way review/mark-billed explicitly are, so this only
+  tests the endpoint's own idempotency guarantee, never an assumed state-machine rejection.
 """
 
 import argparse
@@ -94,6 +121,14 @@ def _seed(
     issue_by_firm: dict[object, object] = {}
     # 2026-09-27 addition — same one-per-firm shape, for PATCH /employees/{id}'s cross-tenant probe.
     employee_by_firm: dict[object, object] = {}
+    # 2026-09-28 addition — a DEDICATED employee per firm for POST /employees/{id}/reset-password's
+    # legit-call check, deliberately kept OUT of employee_by_firm/employee_ids/identities (see
+    # module docstring). Keyed by str(firm_id) directly since it's only ever looked up from
+    # identity["firm_id"] (already a string), not from another firm_id-keyed dict.
+    reset_target_by_firm: dict[str, object] = {}
+    # 2026-09-28 addition — one fixed Idempotency-Key per firm's single seeded issue, keyed the same
+    # way, for POST /issues/{id}/resolve's legit-call check (module docstring).
+    issue_resolve_key_by_firm: dict[str, str] = {}
     now = datetime.now(UTC)
 
     # 2026-09-27 addition — the one deterministic race-condition target (script.js's
@@ -140,6 +175,19 @@ def _seed(
         # proves the same thing to the cross-tenant probe (a different firm's object 404s), same
         # reasoning as job_type_by_firm/notification_by_firm's one-per-firm shape.
         employee_by_firm[firm_id] = employee_ids[0] if employee_ids else owner_id
+
+        # 2026-09-28 addition — see module docstring: a dedicated employee profile that ONLY
+        # exists as a reset-password target, never as a real identity a VU authenticates with.
+        reset_target_id = uuid4()
+        profile_rows.append(
+            {
+                "id": reset_target_id,
+                "fid": firm_id,
+                "role": "employee",
+                "email": f"{reset_target_id}@loadtest.example",
+            }
+        )
+        reset_target_by_firm[str(firm_id)] = reset_target_id
 
         if i == 0:
             race_firm_id = firm_id
@@ -215,6 +263,7 @@ def _seed(
                 }
             )
             issue_by_firm[firm_id] = issue_id
+            issue_resolve_key_by_firm[str(firm_id)] = str(uuid4())
 
     # 2026-09-27 addition — the race-condition target itself, appended once (not per firm) so it
     # goes into the same bulk task INSERT below. Deterministic status/assignee, not the random
@@ -230,6 +279,60 @@ def _seed(
                 "id": race_task_id,
                 "fid": race_firm_id,
                 "title": "Race probe target — do not remove",
+                "assigned_to": race_employee_id,
+                "deadline": None,
+                "status": "assigned",
+                "created_by": race_owner_id,
+            }
+        )
+
+    # 2026-09-28 additions — same one-scenario-for-the-whole-run shape as race_task_id above, reusing
+    # race_firm_id/race_owner_id/race_employee_id (module docstring). review_task_id/
+    # billing_task_id go into the normal task_rows batch below (default task_type is fine for
+    # review_task_id and billing_wrong_state_task_id — only billing_task_id itself needs
+    # task_type='billing', done via its own separate INSERT further down so the main task_rows
+    # batch's column list stays untouched).
+    review_task_id: object | None = None
+    review_wrong_state_task_id: object | None = None
+    review_idempotency_key: str | None = None
+    billing_task_id: object | None = None
+    billing_wrong_state_task_id: object | None = None
+    billing_idempotency_key: str | None = None
+    if race_employee_id is not None:
+        review_task_id = uuid4()
+        review_wrong_state_task_id = uuid4()
+        review_idempotency_key = str(uuid4())
+        task_rows.append(
+            {
+                "id": review_task_id,
+                "fid": race_firm_id,
+                "title": "Review probe target (submitted) — do not remove",
+                "assigned_to": race_employee_id,
+                "deadline": None,
+                "status": "submitted",
+                "created_by": race_owner_id,
+            }
+        )
+        task_rows.append(
+            {
+                "id": review_wrong_state_task_id,
+                "fid": race_firm_id,
+                "title": "Review probe target (wrong state) — do not remove",
+                "assigned_to": race_employee_id,
+                "deadline": None,
+                "status": "created",
+                "created_by": race_owner_id,
+            }
+        )
+
+        billing_task_id = uuid4()
+        billing_wrong_state_task_id = uuid4()
+        billing_idempotency_key = str(uuid4())
+        task_rows.append(
+            {
+                "id": billing_wrong_state_task_id,
+                "fid": race_firm_id,
+                "title": "Mark-billed probe target (wrong state) — do not remove",
                 "assigned_to": race_employee_id,
                 "deadline": None,
                 "status": "assigned",
@@ -264,6 +367,29 @@ def _seed(
                 "now(), now())"
             ),
             task_rows,
+        )
+    if billing_task_id is not None:
+        # 2026-09-28 addition — separate INSERT (not appended to task_rows above) purely so the
+        # main batch's column list/params stay exactly as they were: this is the one seeded task
+        # that needs a non-default `task_type='billing'`, for POST /tasks/{id}/mark-billed's
+        # legit-call check (module docstring).
+        conn.execute(
+            text(
+                "INSERT INTO tasks "
+                "(id, firm_id, title, assigned_to, deadline, status, task_type, created_by, "
+                "created_at, updated_at) "
+                "VALUES (:id, :fid, :title, :assigned_to, :deadline, :status, 'billing', "
+                ":created_by, now(), now())"
+            ),
+            {
+                "id": billing_task_id,
+                "fid": race_firm_id,
+                "title": "Mark-billed probe target (billing/assigned) — do not remove",
+                "assigned_to": race_employee_id,
+                "deadline": None,
+                "status": "assigned",
+                "created_by": race_owner_id,
+            },
         )
     if job_type_rows:
         conn.execute(
@@ -366,11 +492,40 @@ def _seed(
                     break
             identity["foreign_issue_id"] = str(issue_by_firm[other])
 
+    # 2026-09-28 addition — reset_target_employee_id per identity, own firm only (module
+    # docstring): unlike every foreign_*_id above, this is never cross-firm — POST
+    # /employees/{id}/reset-password's legit call needs an employee IN THE CALLER'S OWN FIRM.
+    for identity in identities:
+        target = reset_target_by_firm.get(identity["firm_id"])
+        identity["reset_target_employee_id"] = str(target) if target else None
+
+    # 2026-09-28 addition — own_issue_id/own_issue_resolve_key per identity (module docstring):
+    # issue_by_firm is keyed by the uuid object, identity["firm_id"] is already a string, so build
+    # the str-keyed view once here rather than re-deriving it per identity.
+    issue_by_firm_str = {str(fid): iid for fid, iid in issue_by_firm.items()}
+    for identity in identities:
+        own_issue = issue_by_firm_str.get(identity["firm_id"])
+        identity["own_issue_id"] = str(own_issue) if own_issue else None
+        identity["own_issue_resolve_key"] = (
+            issue_resolve_key_by_firm.get(identity["firm_id"]) if own_issue else None
+        )
+
     return identities, {
         "task_id": str(race_task_id) if race_task_id else None,
         "employee_id": str(race_employee_id) if race_employee_id else None,
+        "owner_id": str(race_owner_id) if race_owner_id else None,
         "firm_id": str(race_firm_id) if race_firm_id else None,
         "idempotency_key": race_idempotency_key,
+        "review_task_id": str(review_task_id) if review_task_id else None,
+        "review_wrong_state_task_id": (
+            str(review_wrong_state_task_id) if review_wrong_state_task_id else None
+        ),
+        "review_idempotency_key": review_idempotency_key,
+        "billing_task_id": str(billing_task_id) if billing_task_id else None,
+        "billing_wrong_state_task_id": (
+            str(billing_wrong_state_task_id) if billing_wrong_state_task_id else None
+        ),
+        "billing_idempotency_key": billing_idempotency_key,
     }
 
 
@@ -430,15 +585,39 @@ def _mint_tokens(
     # regardless of which identity a given VU iteration randomly drew.
     if race_info["employee_id"]:
         race_token = _mint(race_info["employee_id"], race_info["firm_id"], "employee")
+        # 2026-09-28 addition — review_owner_token: the SAME real firm-#0 owner already seeded
+        # (race_info["owner_id"]), minted here (not in _seed) because only _mint_tokens holds the
+        # private key. billing_token/billing_employee_id just reuse race_token/race_employee_id
+        # directly — the mark-billed scenario's employee IS the race scenario's employee (module
+        # docstring), no separate profile or signing needed.
+        review_owner_token = _mint(race_info["owner_id"], race_info["firm_id"], "owner")
         for identity in identities:
             identity["race_task_id"] = race_info["task_id"]
             identity["race_idempotency_key"] = race_info["idempotency_key"]
             identity["race_token"] = race_token
+            identity["review_task_id"] = race_info["review_task_id"]
+            identity["review_wrong_state_task_id"] = race_info["review_wrong_state_task_id"]
+            identity["review_idempotency_key"] = race_info["review_idempotency_key"]
+            identity["review_owner_token"] = review_owner_token
+            identity["billing_task_id"] = race_info["billing_task_id"]
+            identity["billing_wrong_state_task_id"] = race_info["billing_wrong_state_task_id"]
+            identity["billing_idempotency_key"] = race_info["billing_idempotency_key"]
+            identity["billing_token"] = race_token
+            identity["billing_employee_id"] = race_info["employee_id"]
     else:
         for identity in identities:
             identity["race_task_id"] = None
             identity["race_idempotency_key"] = None
             identity["race_token"] = None
+            identity["review_task_id"] = None
+            identity["review_wrong_state_task_id"] = None
+            identity["review_idempotency_key"] = None
+            identity["review_owner_token"] = None
+            identity["billing_task_id"] = None
+            identity["billing_wrong_state_task_id"] = None
+            identity["billing_idempotency_key"] = None
+            identity["billing_token"] = None
+            identity["billing_employee_id"] = None
 
 
 def main() -> None:
