@@ -6,7 +6,7 @@
 
 ## 1. Backend Containerization
 
-**Docker, with an explicit Dockerfile** — not Railway's Nixpacks auto-detection. Reasoning, restated from earlier: a Dockerfile is portable. If this ever moves off Railway (Fly.io, Render, AWS), the build definition travels with the repo instead of living in Railway's UI config — cheap to decide now, same logic applied to `firm_id`/RLS.
+**Docker, with an explicit Dockerfile** — not Railway's Nixpacks auto-detection. Reasoning, restated from earlier: a Dockerfile is portable. If this ever moves off Railway (Fly.io, Render, AWS), the build definition travels with the repo instead of living in Railway's UI config — cheap to decide now, same logic applied to `firm_id`/RLS. **This is exactly what happened, 2026-09-30**: the move to DigitalOcean (not one of the three platforms guessed above, but the same portability argument) needed zero changes to this Dockerfile itself — only the comment on line ~22 below and this document's platform-specific sections, confirming the original reasoning for choosing Docker over Nixpacks held up in practice, not just in theory.
 
 Shape of the Dockerfile (not written yet — this is planning, not the file itself), **verified against `fastapi/guide/deployment/docker.md`, not memory**: Python base image → install dependencies via `uv` (§ tooling, decided earlier this session) → copy `app/` → expose the port → run via `CMD ["fastapi", "run", "app/main.py", "--port", "80"]` — the `fastapi` CLI's own `run` command, not raw `uvicorn` or `gunicorn`+`uvicorn`. **Correction to what this section said before verification:** I'd written "gunicorn managing uvicorn workers" from general recall — FastAPI's own docs state that pattern (the old `tiangolo/uvicorn-gunicorn-fastapi` image) is now explicitly deprecated, since Uvicorn itself can now manage and restart dead workers without Gunicorn's help. If multiple workers are ever needed (not a Phase 1 concern at 10 users, and per the same doc, not needed at all if Railway ever runs this behind its own multi-container/cluster scaling instead of one fat container), the current mechanism is `fastapi run app/main.py --port 80 --workers 4` — a flag on the same command, no second process manager.
 
@@ -26,13 +26,64 @@ genuinely has no direct-internet path. Recorded as the current best answer, not 
 against Railway's own current docs at actual deploy time** — same platform-research caveat this whole
 document already carries, not a new one.
 
-## 2. Hosting — Railway
+**Migrated to DigitalOcean App Platform, 2026-09-30 — paragraph above kept as historical reasoning, not
+the current platform.** The `--forwarded-allow-ips '*'` flag itself does **not** need to change: App
+Platform is a PaaS with no raw droplet IP exposed for this app, consistent with containers being reachable
+only through DO's own platform ingress — the same "no direct-internet path" reasoning that made `'*'`
+reasonable for Railway. **Confidence note (independent review, 2026-09-30): this specific "no direct path"
+claim is inferred from App Platform's architecture, not a sentence quoted from DO's own docs the way the
+Railway/Envoy claim was** — re-verify against DO's own docs at actual deploy time, same caveat this whole
+document already carries elsewhere. What changes is the assumption about *what the forwarded headers
+actually contain*. DigitalOcean's own support docs state plainly that on App Platform, `X-Forwarded-For`
+holds **DigitalOcean's own ingress IP, not the real client's** — the real visitor IP instead lives in a
+differently-named header, `DO-Connecting-IP`, which Uvicorn's `ProxyHeadersMiddleware` has no setting to
+read (it only reads **`X-Forwarded-For`/`-Proto`** — corrected 2026-09-30 after independent review checked
+the actual middleware source; it does not read `X-Forwarded-Host` at all, unlike what this paragraph
+originally claimed). **Not a live bug today**: grepped the
+whole backend (`client\.host|X-Forwarded|ip_address|remote_addr` across `backend/app/**/*.py`) and nothing
+currently reads a client-IP header for anything — this flag today only affects HTTPS-scheme detection
+(still correct on DO), not client-IP trust (currently unused).
 
-Railway's GitHub integration builds from the Dockerfile on every push to `main` and deploys automatically — no custom deploy step needed in CI (§4).
+**Real, open gap recorded for whenever that changes — do not wire up client-IP trust without this
+first.** Cloudflare stays in front of DigitalOcean (§3), so the theoretically-trustworthy header would be
+Cloudflare's `CF-Connecting-IP`. But DigitalOcean's own docs confirm the platform's default
+`your-app.ondigitalocean.app` hostname **cannot be disabled** — only redirected at the app level, which an
+attacker can simply ignore. That means anyone can bypass Cloudflare entirely and hit DigitalOcean directly,
+forging any `CF-Connecting-IP`/`X-Forwarded-For` value they like — exactly the bypass
+`owasp-wstg/chapters/05-authorization.md` (WSTG-ATHZ-02) names: "test... spoofable IP headers... for
+edge/proxy-based access-control bypass." **Before any future code trusts a client-IP header for an
+audit-log field, rate limiting, or any other security decision, it must first be verified that the request
+genuinely came through Cloudflare** — e.g. Cloudflare Authenticated Origin Pulls (mTLS) or a shared-secret
+header Cloudflare injects and the app checks. Not built now because nothing consumes client IP yet
+(building an unused, untested trust check would be speculative); tracked in §8's deferred table.
 
-**Actual current pricing, checked directly, not assumed:** Hobby plan is **$5/month**, which functions as a usage credit rather than a flat fee — if actual resource usage (CPU/RAM/egress) comes in under $5 worth, that's all you pay; usage beyond that is metered ($20/vCPU-month, $10/GB RAM-month, $0.05/GB egress, $0.15/GB-month volume storage). For a 10-user internal tool with light request volume, realistic usage should sit at or very near that $5 floor — this isn't a real budget line at Phase 1 scale.
+## 2. Hosting — DigitalOcean App Platform (migrated from Railway, 2026-09-30)
 
-Environment variables (Supabase connection string, JWKS/JWT config) live in Railway's environment variable UI, never committed to the repo.
+**Original Railway reasoning, kept as historical record:** Railway's GitHub integration built from the
+Dockerfile on every push to `main` and deployed automatically — no custom deploy step needed in CI (§4).
+Hobby plan was $5/month (usage-credit model), Supavisor session-mode pooling was required because Railway
+had no outbound IPv6.
+
+**What carries over unchanged to DigitalOcean, verified against `docs.digitalocean.com` directly, not
+assumed:**
+- **Auto-deploy from the Dockerfile on every push** — confirmed via DigitalOcean's own "Create Apps" docs:
+  a GitHub-repo source with a Dockerfile has Autodeploy **on by default** (`deploy_on_push: true`), same
+  behavior as Railway. No change to CI (§4).
+- **The Supavisor session-mode pooling decision** (below) — DigitalOcean App Platform has the *same*
+  outbound-IPv6 limitation Railway had: its own docs state "App Platform apps do not support connecting to
+  IPv6 services or hosts" and there are no dedicated egress IPv6 addresses. Same fix, no change needed.
+- **TLS on the origin domain** — App Platform auto-provisions certs (Let's Encrypt / Google Trust Services)
+  for standard (non-wildcard) domains, same as Railway did. Cloudflare's `Full (strict)` mode (§3) still
+  works unmodified.
+
+**What's different — DigitalOcean App Platform pricing, checked directly, not assumed:** cheapest container
+tier suitable for one small always-on backend service is the **Shared (Fixed) CPU tier, $5.00/month** (1
+vCPU, 512 MiB RAM, 50 GiB transfer) — the same ~$5/month floor as Railway's Hobby plan, confirmed against
+DigitalOcean's own pricing docs. (Corrected 2026-09-30 after independent review: DigitalOcean's own pricing
+page states its former "Basic"/"Professional" tier names were retired — "Shared (Fixed)" is the current
+name for this tier, the dollar figure and specs were already correct.)
+
+Environment variables (Supabase connection string, JWKS/JWT config) live in DigitalOcean App Platform's environment variable UI (migrated 2026-09-30 — was Railway's), never committed to the repo.
 
 **Connection string requirement, carried over from `ARCHITECTURE.md` §5's resolved finding:** the connection string here must authenticate as the dedicated `fastapi_app` Postgres role, never the project's default `postgres` role — `postgres` carries `BYPASSRLS` on Supabase, which would silently defeat this project's entire RLS-based tenant isolation.
 
@@ -47,8 +98,8 @@ both env vars, neither ever the same value**: `DATABASE_URL` (`fastapi_app`, wha
 least-privilege, no `BYPASSRLS`) and `MIGRATIONS_DATABASE_URL` (Supabase's own `postgres` connection, used
 **only** by `alembic upgrade` — in CI's disposable `postgres:17` container this is just that container's own
 superuser, no distinction needed there; against the real Supabase project it's the project's default
-connection string from its dashboard). Neither is committed to the repo, both live in Railway's/CI's
-environment variable store like every other secret here.
+connection string from its dashboard). Neither is committed to the repo, both live in DigitalOcean App
+Platform's/CI's environment variable store (migrated 2026-09-30 — was Railway's) like every other secret here.
 
 **Pooling mode — resolved 2026-09-03: Supavisor session mode** (`ARCHITECTURE.md` §5, host:port
 `aws-[region].pooler.supabase.com:5432`, free tier). Not a direct connection: Railway (this section) has no
@@ -80,13 +131,18 @@ Sits in front of the **FastAPI API domain specifically**, not a public website �
 before this got specified, not assumed:** "Cloudflare gives free TLS" only covers the client-facing leg.
 Three legs actually exist:
 - **Tauri app → Cloudflare**: TLS at Cloudflare's edge — covered by the line above.
-- **Cloudflare → Railway (the origin)**: **must be set to `Full (strict)`, never `Flexible`.** Checked against
-  Cloudflare's own docs directly: `Flexible` mode terminates TLS at Cloudflare and forwards to the origin over
-  plain HTTP — a direct violation of ASVS 12.3.1/12.3.3 ("TLS for all inbound/outbound connections... no
-  fallback to cleartext"), and `Flexible` is a real default some Cloudflare zones start on, not a hypothetical
-  misconfiguration. Railway's own domains carry valid TLS certs by default, so `Full (strict)` (encrypts *and*
-  validates the origin cert) has no blocker — this is a dashboard setting to check, not new infrastructure.
-- **Railway (FastAPI) → Supabase Postgres**: the connection string must include `sslmode=verify-full` —
+- **Cloudflare → DigitalOcean (the origin, migrated 2026-09-30 — was Railway)**: **must be set to
+  `Full (strict)`, never `Flexible`.** Checked against Cloudflare's own docs directly: `Flexible` mode
+  terminates TLS at Cloudflare and forwards to the origin over plain HTTP — a direct violation of ASVS
+  12.3.1/12.3.3 ("TLS for all inbound/outbound connections... no fallback to cleartext"), and `Flexible` is a
+  real default some Cloudflare zones start on, not a hypothetical misconfiguration. DigitalOcean App
+  Platform's own domains also carry valid TLS certs by default (verified directly against DO's docs, same as
+  Railway's), so `Full (strict)` has no blocker — this is a dashboard setting to check, not new
+  infrastructure. **Open item, not yet resolved (see §1):** this leg proves encryption between Cloudflare and
+  DigitalOcean, not that a given request actually *went through* Cloudflare — DigitalOcean's default hostname
+  staying reachable in parallel means TLS being correct here doesn't by itself close the client-IP-spoofing
+  gap tracked in §1/§8.
+- **DigitalOcean (FastAPI) → Supabase Postgres**: the connection string must include `sslmode=verify-full` —
   Supabase's own documented `psql` connection example uses exactly this (`supabase/database/psql.md`), and
   ASVS 12.3.2 requires the client actually validate the certificate, not just encrypt opportunistically.
   **Enforced 2026-09-11, not just documented:** `Settings._require_tls_to_remote_db`
@@ -171,7 +227,7 @@ nothing to configure.)
   above) are reviewed weekly, not left to accumulate. This is a policy statement, not a tool — the tool is
   Dependabot itself, which is what actually surfaces the "a dependency needs attention" signal in the first
   place.
-- **Deployment is not this pipeline's job** — Railway's own GitHub integration (§2) handles the actual build-and-deploy on green. Building a duplicate deploy step in Actions would just re-implement what the platform already does.
+- **Deployment is not this pipeline's job** — DigitalOcean App Platform's own GitHub integration (§2, migrated 2026-09-30 — was Railway's) handles the actual build-and-deploy on green. Building a duplicate deploy step in Actions would just re-implement what the platform already does.
 
 ## 5. Desktop App Distribution — Tauri
 
@@ -214,10 +270,30 @@ failures (403/404s), workflow-state-violation attempts (409s — the exact "out-
 `API_SPEC.md` §1 already names), and unhandled exceptions. Admin actions already have a home
 (`audit_log`, `DATA_MODEL.md`) — not duplicated here.
 
+**Migrated to DigitalOcean App Platform, 2026-09-30 — the paragraph above no longer holds as written, this
+is a real gap, not a carryover.** Verified directly against DigitalOcean's own docs: App Platform's runtime
+logs (the stdout/stderr equivalent) have **no retention by default at all** — only build/deploy logs get a
+90-day retention; runtime logs are live-tail only unless log forwarding to an external destination is
+configured. "No new infrastructure" no longer applies.
+
+**Corrected 2026-09-30, after independent review (Phase 8) caught this being wrong as first written:**
+log forwarding to Sentry is **not actually possible** — DigitalOcean App Platform's own log-forwarding
+feature only supports four destinations (DigitalOcean Managed OpenSearch, self-hosted OpenSearch, Datadog,
+Better Stack), and separately, Sentry's own Log Drains feature only accepts Cloudflare, Vercel, Heroku, and
+Supabase as sources. Neither side lists the other — there is no direct path, and claiming this "reuses an
+existing account with no new vendor" was wrong. **Open decision, not yet resolved (tracked in §8's deferred
+table):** of DigitalOcean's four supported destinations, **Better Stack** has the most pilot-appropriate free
+tier of the three third-party options (Datadog's free tier is far more limited; self-hosting OpenSearch is
+real infrastructure this project doesn't want yet) — but this is a real new vendor decision, not a free
+reuse of Sentry, and Better Stack's actual current free-tier terms haven't been verified yet (same
+discipline as everything else in this document: check before relying on it, not assumed here). Sentry
+remains the correct destination for *errors* (below) — this paragraph is about *runtime logs* specifically,
+which is a separate need without a current answer.
+
 **Reconciled 2026-09-05, after `access_denials` (`DATA_MODEL.md`) was built without cross-checking
 this section first — a real process gap, caught on self-audit, not a design conflict once checked.**
 Same relationship as `audit_log` above, not a duplication: this section's "authorization failures
-(403/404s)" line still stands as-is for Railway/Sentry — it's the real-time, catch-all layer, and it
+(403/404s)" line still stands as-is for DigitalOcean-forwarded-logs/Sentry (migrated 2026-09-30 — was Railway/Sentry) — it's the real-time, catch-all layer, and it
 covers cases `access_denials` structurally can't (genuine 404s with no denial to log, 401s, anything
 not tied to an authenticated actor). `access_denials` is the narrower, durable, tenant-scoped,
 permanently-retained counterpart for one specific subset of that same category — same-tenant IDOR and
@@ -250,12 +326,20 @@ close that; the trade-off (no variable snapshot on an event) is in `OBSERVABILIT
 "structured JSON logs" promised above are implemented (same date): tenant-tagged, injection-safe,
 allowlisted fields, database-echoed values redacted.
 
-**Uptime alerting — a real gap Railway itself admits to.** Its own docs state plainly: no built-in alerting;
-forward to a third-party tool for that. **UptimeRobot's free tier** (verified: generous free monitor count,
-5-minute check interval) pings the API and emails on downtime — the free, minimal
+**Uptime alerting — a real gap Railway itself admits to (historical).** Railway's own docs stated plainly:
+no built-in alerting; forward to a third-party tool for that. **UptimeRobot's free tier** (verified: generous
+free monitor count, 5-minute check interval) pings the API and emails on downtime — the free, minimal
 answer to "if the pilot's API goes down at 2am, does anyone find out." Not real-time, not enterprise-grade,
 proportionate to a 10-40 user pilot. **Point it at `/ready`, not `/health` (revised 2026-09-19):** `/health`
 is liveness only and stays green while Postgres is down; `/ready` runs a bounded, fail-closed database probe
+
+**Migrated to DigitalOcean App Platform, 2026-09-30 — correction, not a carryover.** Unlike Railway,
+DigitalOcean actually ships its own **Uptime** product natively (verified against
+`docs.digitalocean.com/products/uptime/`): downtime, latency-threshold, and SSL-expiry alerts via email or
+Slack. The "real gap" framing above no longer applies on this platform. Not switching away from UptimeRobot
+in this slice — it already works, is already free, and re-platforming the monitoring choice wasn't part of
+what was approved — but noting DigitalOcean's native option here so it isn't silently invisible next time
+this section gets revisited.
 (`OBSERVABILITY.md` §4).
 
 **Added 2026-09-19 (Observability Phase 1, `OBSERVABILITY.md`):** two scheduled GitHub Actions checks, both
@@ -274,10 +358,11 @@ version of a bigger system being deferred piece by piece.
 
 ```
 push to GitHub → Actions runs lint + pyright/tsc + tests (gate) → merge to main
-  → Railway detects push, builds Dockerfile, deploys
+  → DigitalOcean App Platform detects push (deploy_on_push), builds Dockerfile, deploys
   → Cloudflare sits in front of the resulting API domain
   → Tauri installer built and delivered separately (not part of this pipeline — a manual step, per §5)
 ```
+(Migrated 2026-09-30 — was Railway; deploy mechanics unchanged, see §2.)
 
 ## 8. Explicitly Deferred — stated as decisions, not gaps
 
@@ -289,20 +374,22 @@ Same discipline as `ARCHITECTURE.md` §10 (caching/async) — each of these has 
 | Tauri auto-update mechanism | Any rollout beyond this one firm |
 | Code-signing | Any rollout beyond this one firm |
 | Elevated Cloudflare tier | Real tenant traffic approaching free-tier rule limits |
-| APM/tracing, log aggregation, on-call paging (§6) | Team/scale grows past what Sentry + Railway logs + UptimeRobot can cover |
+| APM/tracing, log aggregation, on-call paging (§6) | Team/scale grows past what Sentry + a log-forward destination + UptimeRobot can cover |
+| Client-IP trust (Cloudflare Authenticated Origin Pulls / shared-secret header, §1) | Before any code ever trusts a client-IP header for an audit-log field, rate limiting, or any other security decision — not before, since nothing consumes it yet |
+| Runtime-log forwarding destination for DigitalOcean (§6 — Sentry is not viable, corrected 2026-09-30) | Before relying on searchable persisted logs past DigitalOcean's live-tail view; pick and verify one of DigitalOcean's actual supported destinations (Better Stack looks like the pilot-appropriate free option, not yet verified) |
 
 ## 9. Cost Summary — Phase 1 (pilot)
 
 | Item | Cost |
 |---|---|
-| Railway (Hobby, realistic usage) | ~$5/month |
+| DigitalOcean App Platform (Shared/Fixed CPU tier — corrected 2026-09-30, "Basic" tier name is retired; migrated from Railway ~$5/month) | ~$5/month |
 | Cloudflare | $0 (free tier) |
-| Sentry (Developer plan) | $0 (free tier, §6) |
+| Sentry (Developer plan — errors only; log forwarding is a separate, unresolved item, §6/§8) | $0 (free tier, §6) |
 | UptimeRobot | $0 (free tier, §6) |
 | Code-signing | $0 (deferred, §5) |
 | **Total, Phase 1** | **~$5/month** |
 
-Real cost jumps only when rolling out beyond the pilot firm: add code-signing (~$220/year, §5) and whatever Railway usage actually grows to at real tenant volume — not estimated here, since that depends on tenant count and usage patterns that don't exist yet to measure.
+Real cost jumps only when rolling out beyond the pilot firm: add code-signing (~$220/year, §5) and whatever DigitalOcean App Platform usage actually grows to at real tenant volume (migrated 2026-09-30 — was Railway) — not estimated here, since that depends on tenant count and usage patterns that don't exist yet to measure.
 
 ## 10. Security Requirements Applied
 
@@ -312,7 +399,7 @@ Per the standing instruction to check every component against the OWASP skills �
 |---|---|---|
 | CI/CD pipeline hardening | `CI_CD_Security_Cheat_Sheet.md` | Least-privilege access (contributors run pipelines, don't administer them); pipeline output must never leak secrets into logs; only an approved, reviewed process can create/modify pipeline config |
 | GitHub Actions specifically | `GitHub_Actions_Security_Cheat_Sheet.md` — **added 2026-09-04** | Branch protection as the actual merge gate (§4); `GITHUB_TOKEN` restricted to read-only by default; third-party Actions pinned to a commit SHA, never a mutable tag; gitleaks for secret scanning (GitHub's own push protection is paid-only on private repos) |
-| Secrets (Supabase connection string, JWKS config) | `Secrets_Management_Cheat_Sheet.md` | Stored in the CI/CD platform's own encrypted secrets store (GitHub Actions' built-in encrypted secrets for CI; Railway's environment variable UI for runtime, §2) — never committed to code, consistent with what §2 already said, now extended explicitly to CI itself, not just runtime. **Made concrete 2026-09-03**: §5.1 of that cheat sheet, quoted directly — *"secrets themselves should never be hardcoded using docker `ENV` or docker `ARG` commands, as these can easily leak with the container definitions."* Railway's env-var-UI approach (§2) already avoids this by construction (injected at container runtime, not build time) — but the Dockerfile itself (§1) must never declare the secret via `ARG`/`--build-arg` either, only ever read it from the process environment at runtime (`Settings(BaseSettings)`, already the planned pattern) — worth stating as a constraint on the Dockerfile's own shape, not just on where the value is stored |
+| Secrets (Supabase connection string, JWKS config) | `Secrets_Management_Cheat_Sheet.md` | Stored in the CI/CD platform's own encrypted secrets store (GitHub Actions' built-in encrypted secrets for CI; DigitalOcean App Platform's environment variable UI for runtime, §2 — **corrected 2026-09-30, this row still said Railway**, missed in the initial migration pass and caught by independent review) — never committed to code, consistent with what §2 already said, now extended explicitly to CI itself, not just runtime. **Made concrete 2026-09-03**: §5.1 of that cheat sheet, quoted directly — *"secrets themselves should never be hardcoded using docker `ENV` or docker `ARG` commands, as these can easily leak with the container definitions."* DigitalOcean's env-var-UI approach (§2) already avoids this by construction (injected at container runtime, not build time) — but the Dockerfile itself (§1) must never declare the secret via `ARG`/`--build-arg` either, only ever read it from the process environment at runtime (`Settings(BaseSettings)`, already the planned pattern) — worth stating as a constraint on the Dockerfile's own shape, not just on where the value is stored |
 | Dockerfile | `Docker_Security_Cheat_Sheet.md` | Non-root user inside the container, minimal base image — a real requirement for when the Dockerfile actually gets written, not implementation yet |
 | Dependencies (`uv`, npm) | `Software_Supply_Chain_Security_Cheat_Sheet.md` | Pinned versions, integrity verification — applies once `pyproject.toml`/`package.json` exist. **Made concrete 2026-09-03**: the skill's actual baseline mechanism is a committed lockfile (`uv.lock`, `package-lock.json`) — both must be committed to the repo, not gitignored, and CI (§4) installs from the lockfile exactly (`uv sync --frozen`, `npm ci` not `npm install`) rather than letting either resolve fresh versions on every run. Free, zero-infrastructure addition worth naming now: enable GitHub's built-in Dependabot alerts on the repo — no new tooling, just a setting |
 
@@ -376,8 +463,9 @@ Found 2026-09-07 during a Phase 4 checklist-backed audit pass: `frontend/src-tau
 https://*.supabase.co` — the `http://localhost:8000` entry is the local dev FastAPI backend
 (`tauri-official/chapters/security-capabilities.md`'s own suggested policy for this project names it
 as `https://<api-domain>`, explicitly flagged there as "fill in ... once those are fixed"). §2 above
-already places the real backend on Railway behind Cloudflare (`Full (strict)` TLS) — an HTTPS origin
-that doesn't exist in this CSP at all yet, since no real deployment has happened.
+already places the real backend on DigitalOcean App Platform behind Cloudflare (`Full (strict)` TLS,
+migrated 2026-09-30 — was Railway) — an HTTPS origin that doesn't exist in this CSP at all yet, since no
+real deployment has happened.
 
 **Not a live security hole today** (this is a desktop app not yet built for release, and
 `http://localhost:8000` can only ever resolve to something on the same machine running the app — no
@@ -388,8 +476,8 @@ build` compiles fine regardless — CSP violations are a runtime browser/webview
 error).
 
 **Required before the first production build** (Phase 6, Distribution, per `CODING_STRUCTURE.md` §4
-item 7): replace `http://localhost:8000` in `connect-src` with the real Railway/Cloudflare HTTPS origin
-once it exists. Verify by an actual failed-then-fixed request in a production-configured build, not by
+item 7): replace `http://localhost:8000` in `connect-src` with the real DigitalOcean/Cloudflare HTTPS
+origin (migrated 2026-09-30 — was Railway/Cloudflare) once it exists. Verify by an actual failed-then-fixed request in a production-configured build, not by
 inspection alone — a CSP violation is silent (no thrown error the app code can catch), so "the API call
 just doesn't work" is the only symptom without an explicit check.
 

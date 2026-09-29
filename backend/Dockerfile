@@ -19,7 +19,11 @@ USER app
 
 EXPOSE 80
 
-# --forwarded-allow-ips: this container's only ingress is Railway's own edge, not a fixed publishable
-# IP — see DEPLOYMENT.md §1 for the reasoning (not the generic --proxy-headers from the FastAPI tutorial,
-# which assumes a co-located proxy reachable at 127.0.0.1).
+# --forwarded-allow-ips: this container's only ingress is the hosting platform's own edge, not a fixed
+# publishable IP — see DEPLOYMENT.md §1 for the reasoning (not the generic --proxy-headers from the FastAPI
+# tutorial, which assumes a co-located proxy reachable at 127.0.0.1). Migrated Railway -> DigitalOcean App
+# Platform 2026-09-30: this flag stays "*" (DO containers are equally unreachable except via DO's own
+# ingress), but DEPLOYMENT.md §1 now flags that X-Forwarded-For on DO holds DO's own IP, not the client's —
+# currently unused (nothing in app/ reads a client-IP header), do not read it for anything security-relevant
+# without first reading that section's open gap.
 CMD ["uv", "run", "fastapi", "run", "app/main.py", "--port", "80", "--forwarded-allow-ips", "*"]
