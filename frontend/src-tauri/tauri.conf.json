@@ -23,7 +23,17 @@
       "capabilities": ["default"],
       "csp": {
         "default-src": "'self'",
-        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:8000 https://*.supabase.co https://*.ingest.sentry.io",
+        "connect-src": "'self' ipc: http://ipc.localhost https://api.workbeacon.tech https://*.supabase.co https://*.ingest.sentry.io",
+        "font-src": "https://fonts.gstatic.com",
+        "style-src": "'self' https://fonts.googleapis.com",
+        "img-src": "'self' asset: http://asset.localhost data:",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "frame-ancestors": "'none'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:8000 https://api.workbeacon.tech https://*.supabase.co https://*.ingest.sentry.io",
         "font-src": "https://fonts.gstatic.com",
         "style-src": "'self' https://fonts.googleapis.com",
         "img-src": "'self' asset: http://asset.localhost data:",
