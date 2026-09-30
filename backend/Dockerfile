@@ -4,6 +4,11 @@ FROM python:3.13-slim
 
 WORKDIR /code
 
+# The app user (created below) has no writable home directory, so uv's default
+# cache location (~/.cache/uv) fails with a permission error at container startup.
+# Redirect it somewhere already owned by app:app instead of giving app a home dir.
+ENV UV_CACHE_DIR=/code/.cache/uv
+
 # uv itself, pinned — not installed via curl|sh inside the image.
 COPY --from=ghcr.io/astral-sh/uv:0.12.9 /uv /usr/local/bin/uv
 
