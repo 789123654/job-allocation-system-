@@ -11,6 +11,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+COPY certs ./certs
 RUN uv sync --frozen --no-dev
 
 # Docker_Security_Cheat_Sheet.md — never run the app as root.
