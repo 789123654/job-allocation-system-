@@ -25,7 +25,7 @@ USER app
 
 EXPOSE 80
 
-# --forwarded-allow-ips: this container's only ingress is Railway's own edge, not a fixed publishable
-# IP — see DEPLOYMENT.md §1 for the reasoning (not the generic --proxy-headers from the FastAPI tutorial,
-# which assumes a co-located proxy reachable at 127.0.0.1).
+# --forwarded-allow-ips: this container's only ingress is Coolify's own local Traefik proxy, not a fixed
+# publishable IP — see DEPLOYMENT.md §1 for the reasoning (not the generic --proxy-headers from the FastAPI
+# tutorial, which assumes a co-located proxy reachable at 127.0.0.1).
 CMD ["uv", "run", "fastapi", "run", "app/main.py", "--port", "80", "--forwarded-allow-ips", "*"]
