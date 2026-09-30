@@ -2,37 +2,58 @@
 
 > Follows `docs/PRD.md`, `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`. Still no code — this document plans how what gets built eventually reaches a real machine.
 
-**Unlike the previous two documents, most of this isn't skill-verified — but a correction to that claim: the security practices around it are.** *Which* platforms to use (Docker, Railway, Cloudflare) isn't covered by any skill in this project's library — operational/product knowledge, not the kind of reference material this project's skills were built for. But *how to secure* a CI/CD pipeline, secrets, and containers genuinely is — see §9. Everything else below is general knowledge plus live research done in-conversation (Railway and code-signing pricing were both looked up directly, not recalled). Check platform-choice details against the platform's own current docs before relying on them for real money or a real deploy; the security requirements in §9 are cited against an actual file in this repo.
+**Unlike the previous two documents, most of this isn't skill-verified — but a correction to that claim: the security practices around it are.** *Which* platforms to use (Docker, Hostinger, Coolify, Cloudflare) isn't covered by any skill in this project's library — operational/product knowledge, not the kind of reference material this project's skills were built for. But *how to secure* a CI/CD pipeline, secrets, and containers genuinely is — see §9. Everything else below is general knowledge plus live research done in-conversation (Hostinger and code-signing pricing were both looked up directly, not recalled). Check platform-choice details against the platform's own current docs before relying on them for real money or a real deploy; the security requirements in §9 are cited against an actual file in this repo.
+
+**Migrated 2026-09-30 — originally planned for Railway, never actually landed there.** Railway, then DigitalOcean App Platform (the first fallback), then Render were all blocked by the same real-world wall: the debit card available for this project couldn't complete the 3D-Secure/OTP authentication step any of those platforms require for recurring foreign-merchant billing. Landed on a self-hosted path instead — **Hostinger VPS + Coolify** (open-source, self-hosted PaaS) + Cloudflare — which needs a one-time VPS payment, not a recurring card charge. Every section below is updated to match; any further mention of "Railway" past this point in the document is a stale leftover from the original plan, not a second platform actually in use.
 
 ## 1. Backend Containerization
 
-**Docker, with an explicit Dockerfile** — not Railway's Nixpacks auto-detection. Reasoning, restated from earlier: a Dockerfile is portable. If this ever moves off Railway (Fly.io, Render, AWS), the build definition travels with the repo instead of living in Railway's UI config — cheap to decide now, same logic applied to `firm_id`/RLS.
+**Docker, with an explicit Dockerfile** — not a platform's own auto-detected build strategy (Railway's Nixpacks, or Coolify's own "Railpack" option, which defaults on for a new app and has to be switched to "Dockerfile" explicitly — a real step this project's own deploy missed initially and had to fix in the Coolify UI). Reasoning, restated from earlier: a Dockerfile is portable. If this ever moves off Coolify (Fly.io, Render, AWS, back to a PaaS), the build definition travels with the repo instead of living in any platform's UI config — cheap to decide now, same logic applied to `firm_id`/RLS.
 
-Shape of the Dockerfile (not written yet — this is planning, not the file itself), **verified against `fastapi/guide/deployment/docker.md`, not memory**: Python base image → install dependencies via `uv` (§ tooling, decided earlier this session) → copy `app/` → expose the port → run via `CMD ["fastapi", "run", "app/main.py", "--port", "80"]` — the `fastapi` CLI's own `run` command, not raw `uvicorn` or `gunicorn`+`uvicorn`. **Correction to what this section said before verification:** I'd written "gunicorn managing uvicorn workers" from general recall — FastAPI's own docs state that pattern (the old `tiangolo/uvicorn-gunicorn-fastapi` image) is now explicitly deprecated, since Uvicorn itself can now manage and restart dead workers without Gunicorn's help. If multiple workers are ever needed (not a Phase 1 concern at 10 users, and per the same doc, not needed at all if Railway ever runs this behind its own multi-container/cluster scaling instead of one fat container), the current mechanism is `fastapi run app/main.py --port 80 --workers 4` — a flag on the same command, no second process manager.
+Shape of the Dockerfile (not written yet — this is planning, not the file itself), **verified against `fastapi/guide/deployment/docker.md`, not memory**: Python base image → install dependencies via `uv` (§ tooling, decided earlier this session) → copy `app/` → expose the port → run via `CMD ["fastapi", "run", "app/main.py", "--port", "80"]` — the `fastapi` CLI's own `run` command, not raw `uvicorn` or `gunicorn`+`uvicorn`. **Correction to what this section said before verification:** I'd written "gunicorn managing uvicorn workers" from general recall — FastAPI's own docs state that pattern (the old `tiangolo/uvicorn-gunicorn-fastapi` image) is now explicitly deprecated, since Uvicorn itself can now manage and restart dead workers without Gunicorn's help. If multiple workers are ever needed (not a Phase 1 concern at 10 users, and per the same doc, not needed at all if the hosting platform ever runs this behind its own multi-container/cluster scaling instead of one fat container), the current mechanism is `fastapi run app/main.py --port 80 --workers 4` — a flag on the same command, no second process manager.
 
 **Added 2026-09-04 — `--forwarded-allow-ips` is required on this same command, checked against
 `fastapi/guide/advanced/behind-a-proxy.md`.** By default FastAPI/Uvicorn won't trust `X-Forwarded-Proto`/
 `X-Forwarded-For` from anyone — correctly, since it has no way to know who actually sent them. Left unset,
 the app can't tell it's being reached over HTTPS at all (everything looks like plain HTTP internally), which
-matters for anything that depends on knowing the real scheme. **Honestly more nuanced for Railway
-specifically than "look up its IP range and trust it"** — this is Railway platform behavior, not covered by
-any skill here, checked live rather than left as a guess: Railway's edge runs Envoy and forwards the real
-client IP via its own `X-Envoy-External-Address` header, not a fixed, publishable proxy IP `--forwarded-allow-
-ips` can be pointed at directly. The container has no ingress path except through Railway's own routing layer
-(nothing else can reach it directly), which is exactly the condition FastAPI's own docs describe for when
-trusting the proxy broadly (`--forwarded-allow-ips '*'`) is reasonable rather than reckless — the risk that
-flag exists to prevent (an arbitrary client spoofing these headers directly) doesn't apply when the container
-genuinely has no direct-internet path. Recorded as the current best answer, not a settled fact: **re-verify
-against Railway's own current docs at actual deploy time** — same platform-research caveat this whole
-document already carries, not a new one.
+matters for anything that depends on knowing the real scheme. **Revised 2026-09-30 for the platform actually
+in use — Coolify, not Railway:** Coolify runs its own Traefik reverse proxy on the same VPS, in front of
+every container it manages — that Traefik instance is the only path into this container (the Docker port is
+published on the host, but nothing else routes to it). Traefik forwards the real client IP via standard
+`X-Forwarded-For`/`X-Forwarded-Proto` headers, itself fed by Cloudflare's connection to it (§3), rather than
+a single fixed IP this app could pin `--forwarded-allow-ips` to individually. Same condition FastAPI's own
+docs describe for when trusting broadly (`--forwarded-allow-ips '*'`) is reasonable rather than reckless: the
+container has no direct-internet ingress path, only through this host's own local proxy. Not a project-skill-
+verified platform behavior (Coolify isn't covered by any skill here) — **re-verify against Coolify's own
+current docs at actual deploy time**, same platform-research caveat this whole document already carries.
 
-## 2. Hosting — Railway
+## 2. Hosting — Hostinger VPS + Coolify
 
-Railway's GitHub integration builds from the Dockerfile on every push to `main` and deploys automatically — no custom deploy step needed in CI (§4).
+**Revised 2026-09-30, replacing the original Railway plan.** Real-money blocker, not a preference: Railway,
+DigitalOcean App Platform, and Render all require a card able to clear 3D-Secure/OTP authentication for
+recurring foreign-merchant billing — the debit card available here couldn't get past that step on any of the
+three. Coolify (open-source, self-hosted PaaS, one-line install:
+`curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash`) running on a plain Hostinger VPS sidesteps
+this entirely: a one-time VPS charge, no recurring foreign-merchant card authorization at all.
 
-**Actual current pricing, checked directly, not assumed:** Hobby plan is **$5/month**, which functions as a usage credit rather than a flat fee — if actual resource usage (CPU/RAM/egress) comes in under $5 worth, that's all you pay; usage beyond that is metered ($20/vCPU-month, $10/GB RAM-month, $0.05/GB egress, $0.15/GB-month volume storage). For a 10-user internal tool with light request volume, realistic usage should sit at or very near that $5 floor — this isn't a real budget line at Phase 1 scale.
+Coolify's own GitHub App integration builds from the Dockerfile on every push to `main` and deploys
+automatically — same no-custom-deploy-step shape §4 already assumed, just a different platform providing it.
+**Scoped to "Only select repositories," never "All repositories"** when connecting it — least privilege,
+same principle applied everywhere else a GitHub App touches this repo.
 
-Environment variables (Supabase connection string, JWKS/JWT config) live in Railway's environment variable UI, never committed to the repo.
+**Two Coolify defaults must be changed by hand per app, confirmed the hard way during the actual deploy:**
+Build strategy defaults to "Railpack" (Coolify's own Nixpacks-equivalent auto-detection) and silently ignores
+the repo's real Dockerfile until switched to "Dockerfile" explicitly; Ports Exposes defaults to `3000` and
+must be set to `80` to match this Dockerfile's `EXPOSE 80`/`CMD`. Also clear whatever default "Custom Docker
+options" string a fresh app starts with — Coolify's own default included `--cap-add SYS_ADMIN
+--security-opt apparmor:unconfined`, container flags this app has no reason to run with.
+
+**Pricing — not re-verified as part of this rewrite.** Railway's per-usage metering (~$5/month realistic
+floor) no longer applies; a VPS is a flat monthly fee regardless of request volume instead. Confirm the
+actual figure against the live Hostinger invoice before treating §9's cost table as current.
+
+Environment variables (Supabase connection string, JWKS/JWT config) live in Coolify's own per-application
+environment-variable UI, never committed to the repo — same handling Railway's UI would have provided.
 
 **Connection string requirement, carried over from `ARCHITECTURE.md` §5's resolved finding:** the connection string here must authenticate as the dedicated `fastapi_app` Postgres role, never the project's default `postgres` role — `postgres` carries `BYPASSRLS` on Supabase, which would silently defeat this project's entire RLS-based tenant isolation.
 
@@ -47,16 +68,17 @@ both env vars, neither ever the same value**: `DATABASE_URL` (`fastapi_app`, wha
 least-privilege, no `BYPASSRLS`) and `MIGRATIONS_DATABASE_URL` (Supabase's own `postgres` connection, used
 **only** by `alembic upgrade` — in CI's disposable `postgres:17` container this is just that container's own
 superuser, no distinction needed there; against the real Supabase project it's the project's default
-connection string from its dashboard). Neither is committed to the repo, both live in Railway's/CI's
+connection string from its dashboard). Neither is committed to the repo, both live in Coolify's/CI's
 environment variable store like every other secret here.
 
 **Pooling mode — resolved 2026-09-03: Supavisor session mode** (`ARCHITECTURE.md` §5, host:port
-`aws-[region].pooler.supabase.com:5432`, free tier). Not a direct connection: Railway (this section) has no
-default outbound IPv6, and Supabase's free-tier direct connection is IPv6-only — confirmed by web search of
-Railway's own support threads, not a project skill (Railway itself isn't covered by any skill here). Not
-transaction mode either: that's Supavisor's serverless/edge-function mode, and this is one persistent Docker
-container, not a fleet of transient functions — session mode is the pattern Supabase's own docs name for
-exactly this shape (`supabase/database/connecting-to-postgres.md`).
+`aws-[region].pooler.supabase.com:5432`, free tier). Not a direct connection: Supabase's free-tier direct
+connection is IPv6-only, and outbound IPv6 support isn't guaranteed on every VPS plan — **not re-verified for
+this specific Hostinger plan as part of this rewrite**, check before ever considering a switch off the
+pooler. Not transaction mode either: that's Supavisor's serverless/edge-function mode, and this is one
+persistent Docker container, not a fleet of transient functions — session mode is the pattern Supabase's own
+docs name for exactly this shape (`supabase/database/connecting-to-postgres.md`), independent of which
+hosting platform runs the container.
 
 **Single environment, no staging, this phase** — consistent with the single-firm-pilot framing throughout this project. Revisit once there's more than one firm depending on uptime.
 
@@ -80,13 +102,16 @@ Sits in front of the **FastAPI API domain specifically**, not a public website �
 before this got specified, not assumed:** "Cloudflare gives free TLS" only covers the client-facing leg.
 Three legs actually exist:
 - **Tauri app → Cloudflare**: TLS at Cloudflare's edge — covered by the line above.
-- **Cloudflare → Railway (the origin)**: **must be set to `Full (strict)`, never `Flexible`.** Checked against
+- **Cloudflare → Hostinger/Coolify (the origin)**: **must be set to `Full (strict)`, never `Flexible`.** Checked against
   Cloudflare's own docs directly: `Flexible` mode terminates TLS at Cloudflare and forwards to the origin over
   plain HTTP — a direct violation of ASVS 12.3.1/12.3.3 ("TLS for all inbound/outbound connections... no
   fallback to cleartext"), and `Flexible` is a real default some Cloudflare zones start on, not a hypothetical
-  misconfiguration. Railway's own domains carry valid TLS certs by default, so `Full (strict)` (encrypts *and*
-  validates the origin cert) has no blocker — this is a dashboard setting to check, not new infrastructure.
-- **Railway (FastAPI) → Supabase Postgres**: the connection string must include `sslmode=verify-full` —
+  misconfiguration. **Revised 2026-09-30:** unlike Railway, a bare VPS carries no TLS cert by default — Coolify's
+  built-in Traefik proxy provisions one automatically (Let's Encrypt) once a real domain is attached in the
+  app's Domains settings, which is what makes `Full (strict)` achievable here rather than falling back to
+  `Full` (encrypts, doesn't validate the origin cert). Attaching that domain and confirming the cert is the
+  live, in-progress step as of this revision.
+- **Hostinger/Coolify (FastAPI) → Supabase Postgres**: the connection string must include `sslmode=verify-full` —
   Supabase's own documented `psql` connection example uses exactly this (`supabase/database/psql.md`), and
   ASVS 12.3.2 requires the client actually validate the certificate, not just encrypt opportunistically.
   **Enforced 2026-09-11, not just documented:** `Settings._require_tls_to_remote_db`
@@ -171,7 +196,7 @@ nothing to configure.)
   above) are reviewed weekly, not left to accumulate. This is a policy statement, not a tool — the tool is
   Dependabot itself, which is what actually surfaces the "a dependency needs attention" signal in the first
   place.
-- **Deployment is not this pipeline's job** — Railway's own GitHub integration (§2) handles the actual build-and-deploy on green. Building a duplicate deploy step in Actions would just re-implement what the platform already does.
+- **Deployment is not this pipeline's job** — Coolify's own GitHub integration (§2) handles the actual build-and-deploy on green. Building a duplicate deploy step in Actions would just re-implement what the platform already does.
 
 ## 5. Desktop App Distribution — Tauri
 
@@ -202,13 +227,16 @@ Not previously resolved — worth deciding now rather than leaving it open. Two 
 Nothing about logging, error tracking, or uptime alerting existed anywhere in this project's docs before now
 — not under-specified, genuinely absent. Checked `owasp-cheatsheets/Logging_Cheat_Sheet.md` and
 `owasp-asvs-5/chapters/v16-security-logging-error-handling.md` directly, plus live-verified the actual free-
-tier numbers for the tools involved (same discipline as Railway/Cloudflare elsewhere in this document).
+tier numbers for the tools involved (same discipline as Hostinger/Cloudflare elsewhere in this document).
 
-**Application logs — Railway's own capture, no new infrastructure.** Verified directly against Railway's
-docs: anything written to stdout/stderr is automatically captured, searchable, 7-day retention on the Hobby
-plan. Structured logging (Python stdlib `logging` with a JSON formatter — no new dependency) is enough to make
-that searchable output actually useful, per the Logging Cheat Sheet's "when, where, who, what" attribute
-guidance. **What actually gets logged, applied proportionately rather than as a blind checklist** (the cheat
+**Application logs — Docker's own stdout/stderr capture, read via Coolify or direct SSH. Revised 2026-09-30:**
+unlike Railway's confirmed searchable 7-day log UI, Coolify's own log retention/search wasn't specifically
+verified as part of this rewrite — what's actually confirmed working, used repeatedly during the real deploy
+to diagnose a live startup crash, is `docker logs <container>` over SSH/Coolify's own Web Terminal. Structured
+logging (Python stdlib `logging` with a JSON formatter — no new dependency) is enough to make that output
+actually useful, per the Logging Cheat Sheet's "when, where, who, what" attribute guidance. Treat any
+retention/search claim beyond "logs exist and are readable via `docker logs`" as unverified until actually
+checked against Coolify's own current docs. **What actually gets logged, applied proportionately rather than as a blind checklist** (the cheat
 sheet's own explicit warning against "alarm fog"): authentication successes/failures, authorization
 failures (403/404s), workflow-state-violation attempts (409s — the exact "out-of-order execution" case
 `API_SPEC.md` §1 already names), and unhandled exceptions. Admin actions already have a home
@@ -217,7 +245,7 @@ failures (403/404s), workflow-state-violation attempts (409s — the exact "out-
 **Reconciled 2026-09-05, after `access_denials` (`DATA_MODEL.md`) was built without cross-checking
 this section first — a real process gap, caught on self-audit, not a design conflict once checked.**
 Same relationship as `audit_log` above, not a duplication: this section's "authorization failures
-(403/404s)" line still stands as-is for Railway/Sentry — it's the real-time, catch-all layer, and it
+(403/404s)" line still stands as-is for stdout logging/Sentry — it's the real-time, catch-all layer, and it
 covers cases `access_denials` structurally can't (genuine 404s with no denial to log, 401s, anything
 not tied to an authenticated actor). `access_denials` is the narrower, durable, tenant-scoped,
 permanently-retained counterpart for one specific subset of that same category — same-tenant IDOR and
@@ -250,8 +278,10 @@ close that; the trade-off (no variable snapshot on an event) is in `OBSERVABILIT
 "structured JSON logs" promised above are implemented (same date): tenant-tagged, injection-safe,
 allowlisted fields, database-echoed values redacted.
 
-**Uptime alerting — a real gap Railway itself admits to.** Its own docs state plainly: no built-in alerting;
-forward to a third-party tool for that. **UptimeRobot's free tier** (verified: generous free monitor count,
+**Uptime alerting — same gap, different platform.** Neither Coolify nor a plain VPS has built-in
+"page someone when this is down" alerting (Coolify has deployment-failure notifications, not uptime
+monitoring) — same conclusion the original Railway research reached, reached independently here for the
+platform actually in use rather than carried over unchecked. **UptimeRobot's free tier** (verified: generous free monitor count,
 5-minute check interval) pings the API and emails on downtime — the free, minimal
 answer to "if the pilot's API goes down at 2am, does anyone find out." Not real-time, not enterprise-grade,
 proportionate to a 10-40 user pilot. **Point it at `/ready`, not `/health` (revised 2026-09-19):** `/health`
@@ -274,7 +304,7 @@ version of a bigger system being deferred piece by piece.
 
 ```
 push to GitHub → Actions runs lint + pyright/tsc + tests (gate) → merge to main
-  → Railway detects push, builds Dockerfile, deploys
+  → Coolify detects push (via its GitHub App), builds Dockerfile, deploys
   → Cloudflare sits in front of the resulting API domain
   → Tauri installer built and delivered separately (not part of this pipeline — a manual step, per §5)
 ```
@@ -289,20 +319,23 @@ Same discipline as `ARCHITECTURE.md` §10 (caching/async) — each of these has 
 | Tauri auto-update mechanism | Any rollout beyond this one firm |
 | Code-signing | Any rollout beyond this one firm |
 | Elevated Cloudflare tier | Real tenant traffic approaching free-tier rule limits |
-| APM/tracing, log aggregation, on-call paging (§6) | Team/scale grows past what Sentry + Railway logs + UptimeRobot can cover |
+| APM/tracing, log aggregation, on-call paging (§6) | Team/scale grows past what Sentry + Coolify/server logs + UptimeRobot can cover |
 
 ## 9. Cost Summary — Phase 1 (pilot)
 
 | Item | Cost |
 |---|---|
-| Railway (Hobby, realistic usage) | ~$5/month |
+| Hostinger VPS (flat monthly fee, not usage-metered like Railway) | confirm against the actual invoice — not re-verified as part of this rewrite |
+| Coolify | $0 (open-source, self-hosted, no license fee) |
 | Cloudflare | $0 (free tier) |
 | Sentry (Developer plan) | $0 (free tier, §6) |
 | UptimeRobot | $0 (free tier, §6) |
 | Code-signing | $0 (deferred, §5) |
-| **Total, Phase 1** | **~$5/month** |
+| **Total, Phase 1** | **the VPS's flat monthly fee** — no usage-scaling risk Railway's metered pricing carried |
 
-Real cost jumps only when rolling out beyond the pilot firm: add code-signing (~$220/year, §5) and whatever Railway usage actually grows to at real tenant volume — not estimated here, since that depends on tenant count and usage patterns that don't exist yet to measure.
+Real cost jumps only when rolling out beyond the pilot firm: add code-signing (~$220/year, §5), and a larger
+VPS plan if resource usage ever actually exceeds the current one — a step function (upgrade the plan), not a
+gradually-climbing usage curve the way Railway's metering was.
 
 ## 10. Security Requirements Applied
 
@@ -312,13 +345,13 @@ Per the standing instruction to check every component against the OWASP skills �
 |---|---|---|
 | CI/CD pipeline hardening | `CI_CD_Security_Cheat_Sheet.md` | Least-privilege access (contributors run pipelines, don't administer them); pipeline output must never leak secrets into logs; only an approved, reviewed process can create/modify pipeline config |
 | GitHub Actions specifically | `GitHub_Actions_Security_Cheat_Sheet.md` — **added 2026-09-04** | Branch protection as the actual merge gate (§4); `GITHUB_TOKEN` restricted to read-only by default; third-party Actions pinned to a commit SHA, never a mutable tag; gitleaks for secret scanning (GitHub's own push protection is paid-only on private repos) |
-| Secrets (Supabase connection string, JWKS config) | `Secrets_Management_Cheat_Sheet.md` | Stored in the CI/CD platform's own encrypted secrets store (GitHub Actions' built-in encrypted secrets for CI; Railway's environment variable UI for runtime, §2) — never committed to code, consistent with what §2 already said, now extended explicitly to CI itself, not just runtime. **Made concrete 2026-09-03**: §5.1 of that cheat sheet, quoted directly — *"secrets themselves should never be hardcoded using docker `ENV` or docker `ARG` commands, as these can easily leak with the container definitions."* Railway's env-var-UI approach (§2) already avoids this by construction (injected at container runtime, not build time) — but the Dockerfile itself (§1) must never declare the secret via `ARG`/`--build-arg` either, only ever read it from the process environment at runtime (`Settings(BaseSettings)`, already the planned pattern) — worth stating as a constraint on the Dockerfile's own shape, not just on where the value is stored |
+| Secrets (Supabase connection string, JWKS config) | `Secrets_Management_Cheat_Sheet.md` | Stored in the CI/CD platform's own encrypted secrets store (GitHub Actions' built-in encrypted secrets for CI; Coolify's environment variable UI for runtime, §2) — never committed to code, consistent with what §2 already said, now extended explicitly to CI itself, not just runtime. **Made concrete 2026-09-03**: §5.1 of that cheat sheet, quoted directly — *"secrets themselves should never be hardcoded using docker `ENV` or docker `ARG` commands, as these can easily leak with the container definitions."* Coolify's env-var-UI approach (§2) already avoids this by construction (injected at container runtime, not build time) — but the Dockerfile itself (§1) must never declare the secret via `ARG`/`--build-arg` either, only ever read it from the process environment at runtime (`Settings(BaseSettings)`, already the planned pattern) — worth stating as a constraint on the Dockerfile's own shape, not just on where the value is stored |
 | Dockerfile | `Docker_Security_Cheat_Sheet.md` | Non-root user inside the container, minimal base image — a real requirement for when the Dockerfile actually gets written, not implementation yet |
 | Dependencies (`uv`, npm) | `Software_Supply_Chain_Security_Cheat_Sheet.md` | Pinned versions, integrity verification — applies once `pyproject.toml`/`package.json` exist. **Made concrete 2026-09-03**: the skill's actual baseline mechanism is a committed lockfile (`uv.lock`, `package-lock.json`) — both must be committed to the repo, not gitignored, and CI (§4) installs from the lockfile exactly (`uv sync --frozen`, `npm ci` not `npm install`) rather than letting either resolve fresh versions on every run. Free, zero-infrastructure addition worth naming now: enable GitHub's built-in Dependabot alerts on the repo — no new tooling, just a setting |
 
 ---
 
-Reminder, stated once more since it applies to this whole document outside §9: nothing above is a skill citation. It's current-as-of-today research (Railway and code-signing pricing pulled directly this session) plus general infrastructure reasoning — worth an independent check against Railway's/Cloudflare's/Apple's/Microsoft's own current pricing pages before this becomes a real bill, since none of that is pinned to a source document the way `ARCHITECTURE.md`/`DATA_MODEL.md` are.
+Reminder, stated once more since it applies to this whole document outside §9: nothing above is a skill citation. It's current-as-of-today research (Hostinger and code-signing pricing pulled directly this session) plus general infrastructure reasoning — worth an independent check against Hostinger's/Cloudflare's/Apple's/Microsoft's own current pricing pages before this becomes a real bill, since none of that is pinned to a source document the way `ARCHITECTURE.md`/`DATA_MODEL.md` are.
 
 ## 11. Supabase Auth Dashboard Settings — Required Before Go-Live
 
@@ -376,8 +409,13 @@ Found 2026-09-07 during a Phase 4 checklist-backed audit pass: `frontend/src-tau
 https://*.supabase.co` — the `http://localhost:8000` entry is the local dev FastAPI backend
 (`tauri-official/chapters/security-capabilities.md`'s own suggested policy for this project names it
 as `https://<api-domain>`, explicitly flagged there as "fill in ... once those are fixed"). §2 above
-already places the real backend on Railway behind Cloudflare (`Full (strict)` TLS) — an HTTPS origin
-that doesn't exist in this CSP at all yet, since no real deployment has happened.
+already places the real backend on Hostinger (via Coolify) behind Cloudflare (`Full (strict)` TLS) — an
+HTTPS origin that doesn't exist in this CSP at all yet.
+
+**Status as of 2026-09-30:** the backend is live on Hostinger, currently reachable only at a temporary
+Coolify-assigned `sslip.io` address with an untrusted cert. The real custom domain is being connected through
+Cloudflare right now (§3) — this `connect-src` update still hasn't been made, it's blocked on that domain
+actually resolving first.
 
 **Not a live security hole today** (this is a desktop app not yet built for release, and
 `http://localhost:8000` can only ever resolve to something on the same machine running the app — no
@@ -388,7 +426,7 @@ build` compiles fine regardless — CSP violations are a runtime browser/webview
 error).
 
 **Required before the first production build** (Phase 6, Distribution, per `CODING_STRUCTURE.md` §4
-item 7): replace `http://localhost:8000` in `connect-src` with the real Railway/Cloudflare HTTPS origin
+item 7): replace `http://localhost:8000` in `connect-src` with the real Hostinger/Cloudflare HTTPS origin
 once it exists. Verify by an actual failed-then-fixed request in a production-configured build, not by
 inspection alone — a CSP violation is silent (no thrown error the app code can catch), so "the API call
 just doesn't work" is the only symptom without an explicit check.
