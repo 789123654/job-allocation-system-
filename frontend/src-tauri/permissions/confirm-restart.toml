@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "confirm-restart"
+description = "Allows the webview to trigger an app restart, only after an update has already been downloaded and installed by the backend's own automatic check — never triggers the install itself."
+commands.allow = ["confirm_restart"]
