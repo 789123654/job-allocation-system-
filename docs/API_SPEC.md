@@ -20,8 +20,13 @@
 
 **Added 2026-09-03 — CORS was never addressed anywhere in this project's docs, checked across all of them.**
 A Tauri webview's requests to the FastAPI backend are cross-origin in the browser-security sense (the
-webview's own scheme origin — `tauri://localhost` or `https://tauri.localhost` depending on platform — is not
-the Railway-hosted API's origin), so FastAPI's CORS policy is a real, active setting, not a no-op to skip.
+webview's own scheme origin — `tauri://localhost` on macOS/Linux, **`http://tauri.localhost` (not https) on
+Windows** — is not the API's own origin), so FastAPI's CORS policy is a real, active setting, not a no-op to
+skip. **Corrected 2026-10-01, found the hard way:** this line originally said `https://tauri.localhost` for
+Windows — checked against Tauri's own documented behavior after a real production login-then-data-load
+failure traced back to exactly this mismatch (`CORS_ORIGINS` had the wrong scheme, so the browser's real
+`http://tauri.localhost` origin was silently rejected). Windows genuinely serves the packaged app over plain
+HTTP at this internal address, not HTTPS — not a typo to "fix" back.
 Checked against `owasp-cheatsheets/REST_Security_Cheat_Sheet.md`'s CORS section directly: *"Disable CORS
 headers if cross-domain calls are not supported/expected... be as specific as possible."* This project's
 calls *are* expected, from exactly one client — so the fix is a specific allowlist (the Tauri app's own
