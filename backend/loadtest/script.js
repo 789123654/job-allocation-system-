@@ -563,13 +563,20 @@ function claimMismatchProbe(identity) {
     // Real sub, but firm_id claims the SAME firm that owns foreign_task_id (seed.py ties these
     // together deliberately) — requesting exactly that task is the one shape that would reveal
     // whether a forged firm_id claim is ever honored over the profile's real, seeded firm.
+    //
+    // Corrected 2026-10-01, found via a real run's own access logs (not guessed): expects 401, not
+    // 404. api/deps.py's get_current_profile looks up `profiles WHERE id = sub AND firm_id =
+    // <claimed firm_id>` — a forged firm_id never matches the real row, so this fails at
+    // authentication itself (401 "Account inactive or not found"), before the request ever reaches
+    // the task lookup that would 404. Both are "denied"; 401 is actually the earlier, safer
+    // rejection point. The original 404 expectation was never verified against a real run.
     const res = http.get(`${BASE_URL}/tasks/${identity.foreign_task_id}`, {
       headers: { Authorization: `Bearer ${identity.mismatched_claim_token}` },
-      responseCallback: http.expectedStatuses(404),
+      responseCallback: http.expectedStatuses(401),
     });
     check(
       res,
-      { "forged firm_id claim never grants access to that firm's task": (r) => r.status === 404 },
+      { "forged firm_id claim never grants access to that firm's task": (r) => r.status === 401 },
       { isolation: "critical" },
     );
     assertCleanProblemDetails(res);
@@ -666,7 +673,15 @@ function resetPasswordProbe(identity, headers) {
     assertCleanProblemDetails(res);
     return;
   }
-  if (identity.reset_target_employee_id) {
+  // Corrected 2026-10-01, found via a real run's own access logs (not guessed): this endpoint
+  // calls Supabase's real Admin API (crud.reset_employee_password -> admin_auth.update_user_by_id)
+  // to actually rotate the login password — the CI-only JWKS stub (generate_keys.py/README.md) only
+  // fakes token issuance, there is no real Supabase behind it, so this always 500s there. Not an
+  // app bug: the backend correctly catches the failure and returns a clean 500 rather than crashing
+  // unhandled. Gated behind REAL_SUPABASE_AUTH (unset/false in CI) so the stub run doesn't report a
+  // false failure for an endpoint it structurally cannot exercise; set REAL_SUPABASE_AUTH=1 when
+  // running against an actual Supabase project (sandbox or otherwise).
+  if (identity.reset_target_employee_id && __ENV.REAL_SUPABASE_AUTH) {
     const key = pseudoUuid();
     const first = http.post(
       `${BASE_URL}/employees/${identity.reset_target_employee_id}/reset-password`,
