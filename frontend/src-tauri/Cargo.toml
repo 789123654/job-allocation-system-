@@ -24,6 +24,7 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-store = "2"
+tauri-plugin-updater = "2"
 
 # Embedded WebDriver server for the Phase 6 E2E harness (WebdriverIO + @wdio/tauri-service).
 # Optional + feature-gated, NEVER a default/unconditional dependency: this plugin's own README
@@ -55,3 +56,8 @@ e2e-testing = ["dep:tauri-plugin-wdio-webdriver"]
 # equivalents are added, before either platform is ever distributed to.
 [target.'cfg(windows)'.dependencies]
 windows-dpapi = "0.2"
+
+# Test-only — parses permissions/confirm-restart.toml in the regression test guarding its scope.
+# Never shipped in the real app (dev-dependencies aren't linked into release builds).
+[dev-dependencies]
+toml = "0.8"
