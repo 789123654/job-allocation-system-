@@ -1,0 +1,102 @@
+name: Release
+
+# Slice 4 of the auto-update pipeline (2026-10-02). Builds, signs, and publishes a real desktop
+# release whenever a version tag is pushed -- the GitHub Release this produces (and its `latest.json`
+# manifest) is exactly what `tauri.conf.json`'s `plugins.updater.endpoints` already points at (Slice 3).
+#
+# Deliberately `push: tags` only -- never `pull_request`/`workflow_run`. This repo is public, so those
+# trigger types would hand a fork-originated PR access to this job's GITHUB_TOKEN write permission and
+# signing secrets (owasp-cheatsheets/GitHub_Actions_Security_Cheat_Sheet.md). A tag-push cannot
+# originate from a fork PR -- it requires push access to this repo -- so this workflow is not
+# fork-reachable by construction. Do not add a PR-triggering event to this same file; see the `release`
+# GitHub Environment (tag-restricted, required-reviewer gated) for the second layer that holds even if
+# that happens anyway.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Every other workflow in this repo defaults to read-only at the top level and grants narrow,
+# job-scoped elevation with an inline reason (see ci.yml). This is the first job ever needing
+# `contents: write` (to create the GitHub Release) -- scoped to exactly this one job, not here.
+permissions: {}
+
+# A cancelled mid-publish run could leave `latest.json` pointing at a release whose assets never
+# finished uploading -- the already-shipped auto-updater (frontend/src-tauri/src/lib.rs) would then
+# fetch that manifest and either fail signature verification or serve a mismatched version. Same
+# reasoning as isolation-canary.yml/ops-db-check.yml's own `cancel-in-progress: false`.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    # Windows-only matrix: this project's own tauri-official skill note (read this session) states
+    # the real pilot target is Windows, optionally macOS later -- not Linux. Add a macOS leg when an
+    # actual pilot firm is on Mac, not speculatively.
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      # `package-manager-cache: false` deliberately -- owasp-cheatsheets/GitHub_Actions_Security_Cheat_Sheet.md
+      # names cache poisoning in release/publish pipelines as a real risk, and zizmor's own
+      # cache-poisoning audit (run locally against this exact file, confirmed via its real docs, not
+      # guessed) flags actions/setup-node's cache as enabled by default even with no `cache:` input
+      # set -- omitting the input isn't enough on this version. The ordinary CI jobs cache freely,
+      # this one does not.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # Phase 9 catch (2026-10-02): tauri-action reads the app's actual version FROM
+      # tauri.conf.json (confirmed directly in its real source, src/index.ts's
+      # `core.setOutput('appVersion', info.version)`) -- it never writes the pushed tag back into
+      # that file. Without this guard, pushing e.g. `v1.2.0` while tauri.conf.json still says
+      # "0.1.0" would silently publish a release NAMED v1.2.0 whose actual signed installer and
+      # updater manifest still report 0.1.0 -- confusing, and the auto-updater would never
+      # recognize it as a real update. Fail loudly here instead of discovering this on a real
+      # release.
+      - name: Verify the pushed tag matches tauri.conf.json's version
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          conf_version=$(node -p "require('./frontend/src-tauri/tauri.conf.json').version")
+          if [ "$TAG" != "v$conf_version" ]; then
+            echo "::error::Tag '$TAG' does not match tauri.conf.json's version 'v$conf_version' -- bump tauri.conf.json's version field to match before tagging."
+            exit 1
+          fi
+
+      # Builds the Windows installer, signs it and the updater manifest with the minisign keypair
+      # from these secrets (real env var names confirmed directly against Tauri's own bundler source,
+      # frontend/src-tauri's Cargo.lock-pinned tauri-plugin-updater version, `bundle.rs`'s
+      # `sign_file(&secret_key, path, Some(settings.version_string()))` call -- not assumed from
+      # docs), creates the GitHub Release, and uploads `latest.json` (uploadUpdaterJson defaults to
+      # true) -- the same manifest `tauri.conf.json`'s real endpoint already points at.
+      - name: Build, sign, and publish the release
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: frontend
+          tagName: ${{ github.ref_name }}
+          releaseName: 'CA Practice Manager ${{ github.ref_name }}'
+          releaseDraft: false
+          prerelease: false
