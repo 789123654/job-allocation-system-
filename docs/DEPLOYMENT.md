@@ -214,13 +214,50 @@ Restating the earlier call plainly, now that it's in the actual planning doc rat
 | macOS | Apple Developer Program | $99/year flat, includes notarization |
 | **Combined, when needed** | | **≈ $220/year** |
 
-### Update mechanism — applying the same pilot-scale reasoning, made explicit here
+### Update mechanism — superseded 2026-10-02, decision reversed from manual to automatic
 
-Not previously resolved — worth deciding now rather than leaving it open. Two options: build Tauri's updater plugin (auto-update from a hosted manifest) now, or handle it manually for the pilot (you personally rebuild and resend the installer on the rare update, same 10 people reinstall by hand).
+The original call below (manual redistribution, tied to the same boundary as code-signing) is kept for
+history; it no longer holds. Reopened when the target build scope moved to 2-4 firms (see the project's own
+scope memory) — "any rollout beyond this one firm" was itself a trigger written for a one-firm assumption
+that the current target already exceeds, even though no real firm is live yet. Re-examined 2026-10-02 against
+`owasp-tcasvs` (`v2-build-deployment-hardening.md` 2.3.3/2.3.4, `v1-architecture-threat-modeling.md` 1.3.4,
+`v6-network-communication.md` 6.1.2) before reversing it, not dropped casually.
 
-**Decision: manual redistribution for the pilot**, same reasoning as code-signing — you're already the one delivering installers directly to a known, small group, so a manual update is a text message and a re-download, not a real burden at this scale. Building the auto-update plugin now would be infrastructure for a distribution model (public/unattended updates) that doesn't exist yet.
+**The original paired reasoning ("unsigned + auto-updating is worse than unsigned + hand-delivered") conflated
+two different mechanisms, caught on review:**
+- **Update integrity** (is a downloaded update genuine, not tampered) — Tauri's updater plugin signs every
+  release with a dedicated ed25519/minisign keypair (generated and stored outside the repo) and verifies that
+  signature against a pubkey embedded in `tauri.conf.json` — independent of the download itself (TCASVS 2.3.3)
+  — before ever applying an update. This is a real cryptographic check, already built, unaffected by whether
+  OS-level code-signing exists.
+- **OS trust-chain recognition** (does Windows/macOS itself vouch for the publisher) — this is what
+  code-signing (§5 above) actually buys: no SmartScreen/Gatekeeper warning. It is cosmetic/reputation, not an
+  integrity check.
 
-**Same hard boundary as code-signing:** required before any rollout beyond this one firm — at that point, nobody can be manually walked through a reinstall, and shipping a security fix without an update mechanism would be a real gap, not a convenience gap.
+Automating the update flow does not weaken the first (already covered). It only means the second — the
+SmartScreen/Gatekeeper warning — now appears on a silently-installed update instead of a manually-run
+installer, which is a UX question, not a new security hole. **Code-signing's own deferral (§5 above, ~$220/year
+when needed) stands on its own merits and is not reversed by this** — still revisit it before a non-technical
+user base would be confused by warnings appearing with no human in the loop to reassure them, which is a real,
+separate trigger from the one named below.
+
+**Decision: fully automatic update, no button** — check runs once per app launch (Rust-side only, never
+exposed to the webview — see `capabilities_do_not_grant_updater_permission` in `src-tauri/src/lib.rs`), update
+downloads and installs automatically, and the user is shown a "Restart Now / Later" dialog only for the
+restart itself (never for the install) — see the auto-update pipeline's Slices 1-2 (merged, PR #74).
+
+**Update trust chain (closing TCASVS 1.3.4's "describe the design" requirement, previously missing):**
+1. Release artifacts and a manifest (`latest.json`) are signed with the project's own minisign keypair at
+   build time.
+2. The app fetches the manifest over HTTPS only — Tauri enforces TLS in production and refuses an insecure
+   transport unless `dangerousInsecureTransportProtocol` is explicitly set (it is not, here).
+3. The app verifies the manifest/artifact signature against the pubkey baked into `tauri.conf.json` — a trust
+   anchor independent of the download itself — before installing anything.
+4. **Rollback / partial-failure handling**: not yet designed — if `download_and_install` fails partway, Tauri
+   leaves the previous installed version in place (the old binary isn't touched until the new one is verified
+   and ready), but there is no explicit retry/rollback UX built. Flagged honestly as a real gap, not silently
+   closed — worth a real look once Slice 5 proves a real update round-trip and failure modes can be observed
+   directly rather than reasoned about in the abstract.
 
 ## 6. Observability — resolved 2026-09-05, previously completely open
 
