@@ -24,7 +24,7 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-store = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "2.12"
 
 # Embedded WebDriver server for the Phase 6 E2E harness (WebdriverIO + @wdio/tauri-service).
 # Optional + feature-gated, NEVER a default/unconditional dependency: this plugin's own README

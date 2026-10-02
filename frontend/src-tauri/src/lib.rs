@@ -46,10 +46,14 @@ pub fn run() {
           .build(),
       )?;
 
-      // Auto-update pipeline, Slice 2 — wiring only. The endpoint in tauri.conf.json is a
-      // placeholder (`example.invalid`, never resolves), so `check()` always errors harmlessly
-      // right now; this becomes a real, fully-automatic (no button, no prompt) check+install once
-      // a later slice points `plugins.updater.endpoints` at a real hosted manifest.
+      // Auto-update pipeline, Slice 3 (2026-10-02) — `plugins.updater.endpoints` now points at a
+      // real, live GitHub Releases manifest (`tauri.conf.json`), so this `check()` call is live:
+      // fully-automatic (no button, no prompt) check+download+install on every launch, gated only
+      // by the pubkey signature check and `requireSignedVersion` (also set in tauri.conf.json,
+      // closing CVE-2026-95625 — an unsigned manifest `version` field can no longer be paired with
+      // an older release's genuinely-signed binary to force a downgrade). Slice 4 (CI build/sign/
+      // publish) and Slice 5 (a real end-to-end update round-trip) are still needed before any real
+      // release exists for this endpoint to actually serve.
       #[cfg(desktop)]
       {
         app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -195,5 +199,44 @@ mod tests {
     ready.store(true, Ordering::SeqCst);
     assert!(try_claim_restart(&ready, &triggered), "update staged, first call — must be allowed");
     assert!(!try_claim_restart(&ready, &triggered), "second call must no-op, never restart twice");
+  }
+
+  // Regression guard for Slice 3 (2026-10-02): `tauri.conf.json`'s updater block is never parsed
+  // anywhere else in this crate, so nothing would have noticed a silent revert to the dead
+  // placeholder endpoint, a scheme downgrade to `http://`, a wrong-repo/owner typo, or
+  // `requireSignedVersion` being dropped — all would stay fully green through `cargo test` and CI,
+  // surfacing only in the field (test-critic review finding). `requireSignedVersion: true` closes
+  // CVE-2026-95625 (an unsigned manifest `version` field pairing an inflated version number with an
+  // older release's genuinely-signed binary to force a downgrade) — confirmed against the real
+  // `tauri-plugin-updater` v2.12.0 source (`require_signed_version: bool`, serde camelCase), not
+  // assumed from a skill, since `tauri-official`'s own scope note excludes the updater entirely.
+  #[test]
+  fn updater_config_is_https_pinned_to_the_real_repo_and_requires_signed_version() {
+    let raw = include_str!("../tauri.conf.json");
+    let json: serde_json::Value = serde_json::from_str(raw).expect("valid JSON");
+    let updater = &json["plugins"]["updater"];
+
+    let endpoints = updater["endpoints"].as_array().expect("endpoints is an array");
+    assert_eq!(
+      endpoints,
+      &vec![serde_json::Value::String(
+        "https://github.com/789123654/job-allocation-system-/releases/latest/download/latest.json"
+          .to_string()
+      )],
+      "updater endpoint changed — must stay the real https GitHub releases URL, not a placeholder, \
+       an http:// downgrade, or a different repo/owner"
+    );
+
+    assert_eq!(
+      updater["requireSignedVersion"],
+      serde_json::Value::Bool(true),
+      "requireSignedVersion must stay true — disabling it reopens CVE-2026-95625's manifest-version \
+       downgrade attack"
+    );
+
+    assert!(
+      updater.get("dangerousInsecureTransportProtocol").is_none(),
+      "updater config must not opt into insecure transport"
+    );
   }
 }
