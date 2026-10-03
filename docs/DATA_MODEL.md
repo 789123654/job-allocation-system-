@@ -130,6 +130,22 @@ Kept separate from `tasks.status` specifically so history survives a task cyclin
 
 RLS: `tenant_isolation` pattern.
 
+### `task_edits` — owner edits to a task before the employee starts, append-only (added 2026-10-03)
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid, PK | |
+| `firm_id` | uuid, FK → `firms.id` | |
+| `task_id` | uuid, composite FK → `tasks` | |
+| `edited_by` | uuid, composite FK `(firm_id, edited_by) → profiles(firm_id, id)` | |
+| `changed_fields` | jsonb, object of `{field: {old, new}}` | only fields whose value actually changed |
+| `created_at` | timestamptz | |
+
+Why not `audit_log`: its `action` CHECK only allows employee/password actions, its `target_id` FK points at `profiles`, and it has no payload for old/new values. Only `SELECT, INSERT` is granted to the app role, so history rows are never edited or removed.
+
+Edit rule (owner, `PATCH /tasks/{id}`): title, description, and assignee can change only while status is `created` or `assigned`. Assignee can never be cleared. Changing the assignee notifies the new assignee (`task_assigned`) and the old one (`task_reassigned`). Deadline is changed through its own endpoint and is not covered by this rule (a known gap, tracked separately).
+
+RLS: `tenant_isolation` pattern.
+
 ### `issues` — employee-raised issues (PRD §2.7/§4.3)
 | Column | Type | Notes |
 |---|---|---|

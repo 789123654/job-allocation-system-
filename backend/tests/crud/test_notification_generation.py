@@ -112,7 +112,8 @@ def test_submit_task_notifies_all_owners(session: Session) -> None:
     session.add(task)
     session.commit()
 
-    crud.submit_task(session, task)
+    assert task.assigned_to is not None
+    crud.submit_task(session, task, task.assigned_to)
     session.commit()
 
     for owner in (owner1, owner2):
