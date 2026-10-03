@@ -47,6 +47,7 @@ from app.models import (
     Notification,
     Profile,
     Task,
+    TaskEdit,
     TaskReview,
 )
 
@@ -555,6 +556,52 @@ def update_task_deadline(session: Session, task: Task, deadline: datetime) -> Ta
     return task
 
 
+def _jsonable(value: Any) -> Any:
+    return str(value) if isinstance(value, UUID) else value
+
+
+def edit_task(session: Session, actor: Profile, task: Task, changes: dict[str, Any]) -> Task:
+    """Owner edit before the employee starts. Lock, state gate, change, history row, notifications,
+    and one commit — all in one transaction, so a failure anywhere leaves no partial change and no
+    orphan history row. A request that changes nothing writes no history row, so a retry is a no-op.
+    """
+    locked = _lock_task(session, task.firm_id, task.id)
+    if locked.status not in ("created", "assigned"):
+        raise InvalidTaskStateError
+    if "assigned_to" in changes:
+        _validate_assignee(session, actor.firm_id, changes["assigned_to"])
+
+    before = {f: getattr(locked, f) for f in changes if getattr(locked, f) != changes[f]}
+    if not before:
+        return locked
+
+    now = datetime.now(UTC)
+    changed_fields = {
+        f: {"old": _jsonable(before[f]), "new": _jsonable(changes[f])} for f in before
+    }
+    for f in before:
+        setattr(locked, f, changes[f])
+    locked.updated_at = now
+    session.add(locked)
+    session.add(
+        TaskEdit(
+            firm_id=locked.firm_id,
+            task_id=locked.id,
+            edited_by=actor.id,
+            changed_fields=changed_fields,
+            created_at=now,
+        )
+    )
+    if "assigned_to" in before:
+        _notify(session, locked.firm_id, changes["assigned_to"], "task_assigned", locked.id, None)
+        if before["assigned_to"] is not None:
+            _notify(
+                session, locked.firm_id, before["assigned_to"], "task_reassigned", locked.id, None
+            )
+    session.commit()
+    return locked
+
+
 def _lock_task(session: Session, firm_id: UUID, task_id: UUID) -> Task:
     """Business_Logic_Security_Cheat_Sheet.md "Use Database Transactions and Locks" — checked
     directly 2026-09-04, not assumed covered by the Idempotency-Key mechanism (that only dedupes
@@ -580,12 +627,14 @@ def _lock_task(session: Session, firm_id: UUID, task_id: UUID) -> Task:
     ).one()
 
 
-def submit_task(session: Session, task: Task) -> Task:
+def submit_task(session: Session, task: Task, actor_id: UUID) -> Task:
     """No `session.commit()` — wrapped in `with_idempotency` by the route, same reasoning as
-    create_task.
+    create_task. The assignee check runs HERE, under the row lock, not only on the route's earlier
+    unlocked read: otherwise an owner reassign committed in between would let the old assignee
+    submit a task that now belongs to someone else.
     """
     locked = _lock_task(session, task.firm_id, task.id)
-    if locked.status not in ("assigned", "in_progress"):
+    if locked.status not in ("assigned", "in_progress") or locked.assigned_to != actor_id:
         raise InvalidTaskStateError
     locked.status = "submitted"
     locked.updated_at = datetime.now(UTC)

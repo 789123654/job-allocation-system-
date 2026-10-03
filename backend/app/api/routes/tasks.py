@@ -76,6 +76,23 @@ class TaskDeadlineUpdate(BaseModel):
     deadline: datetime
 
 
+class TaskEditUpdate(BaseModel):
+    title: NoNulStr | None = Field(default=None, max_length=300)
+    description: NoNulStr | None = Field(default=None, max_length=5000)
+    assigned_to: UUID | None = None
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "TaskEditUpdate":
+        provided = self.model_fields_set
+        if not provided & {"title", "description", "assigned_to"}:
+            raise ValueError("nothing to change")
+        if "assigned_to" in provided and self.assigned_to is None:
+            raise ValueError("a task cannot be left without an assignee")
+        if "title" in provided and (self.title is None or not self.title.strip()):
+            raise ValueError("title cannot be empty")
+        return self
+
+
 class TaskReviewCreate(BaseModel):
     outcome: Literal["approved", "reassigned", "billing"]
     notes: NoNulStr | None = Field(default=None, max_length=2000)
@@ -226,6 +243,25 @@ def update_task_deadline(
     return TaskOut.from_task(task)
 
 
+@router.patch("/{task_id}")
+def edit_task(
+    task_id: UUID, body: TaskEditUpdate, actor: RequireOwnerDep, session: SessionDep
+) -> TaskOut:
+    task = _get_task_or_404(session, actor, task_id)
+    try:
+        updated = crud.edit_task(session, actor, task, body.model_dump(exclude_unset=True))
+    except crud.InvalidTaskStateError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Task can only be edited before the employee starts"
+        ) from exc
+    except crud.UnknownAssigneeError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "assigned_to must be an active employee of this firm",
+        ) from exc
+    return TaskOut.from_task(updated)
+
+
 @router.post("/{task_id}/submit")
 def submit_task(
     task_id: UUID,
@@ -238,7 +274,7 @@ def submit_task(
 
     def _handler() -> tuple[int, dict[str, Any]]:
         try:
-            updated = crud.submit_task(session, task)
+            updated = crud.submit_task(session, task, actor.id)
         except crud.InvalidTaskStateError as exc:
             raise HTTPException(
                 status.HTTP_409_CONFLICT, "Task cannot be submitted from its current status"

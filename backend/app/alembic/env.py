@@ -17,6 +17,7 @@ from app.models import (
     Notification,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     Profile,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     Task,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+    TaskEdit,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     TaskReview,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
 

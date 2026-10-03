@@ -105,6 +105,17 @@ class TaskReview(SQLModel, table=True):
     created_at: datetime
 
 
+class TaskEdit(SQLModel, table=True):
+    __tablename__ = "task_edits"  # type: ignore[assignment]  # known SQLModel/pyright interaction
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    firm_id: UUID = Field(primary_key=True, foreign_key=_FIRMS_FK)
+    task_id: UUID
+    edited_by: UUID
+    changed_fields: dict[str, Any] = Field(sa_type=JSON)
+    created_at: datetime
+
+
 class Issue(SQLModel, table=True):
     __tablename__ = "issues"  # type: ignore[assignment]  # known SQLModel/pyright interaction
 

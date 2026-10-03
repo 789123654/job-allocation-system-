@@ -51,7 +51,8 @@ def _task(session: Session, **overrides: object) -> Task:
 def test_submit_task_transitions_from_assigned(session: Session) -> None:
     task = _task(session, status="assigned")
 
-    updated = crud.submit_task(session, task)
+    assert task.assigned_to is not None
+    updated = crud.submit_task(session, task, task.assigned_to)
 
     assert updated.status == "submitted"
 
@@ -60,7 +61,8 @@ def test_submit_task_wrong_state_raises(session: Session) -> None:
     task = _task(session, status="completed")
 
     with pytest.raises(crud.InvalidTaskStateError):
-        crud.submit_task(session, task)
+        assert task.assigned_to is not None
+        crud.submit_task(session, task, task.assigned_to)
 
 
 def test_mark_task_billed_requires_billing_type(session: Session) -> None:

@@ -177,8 +177,9 @@ def _racer(
                 select(Task).where(Task.firm_id == firm_id, Task.id == task_id)
             ).one()
             barrier.wait(timeout=5)  # both racers hit crud.submit_task's FOR UPDATE at once
+            assert task.assigned_to is not None
             try:
-                crud.submit_task(session, task)
+                crud.submit_task(session, task, task.assigned_to)
                 session.flush()  # send the UPDATE now — the `with` block commits it at exit
                 time.sleep(0.3)  # hold the lock long enough for the other racer to observably block
                 outcomes.append("submitted")
