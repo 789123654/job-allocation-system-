@@ -239,4 +239,22 @@ mod tests {
       "updater config must not opt into insecure transport"
     );
   }
+
+  // Regression guard for Slice 5 (2026-10-02): a per-machine (admin-elevated) install can make the
+  // silent in-app auto-update hang waiting for a UAC prompt nobody is watching for. Set to
+  // currentUser so the whole flow (lib.rs's `download_and_install`) never needs elevation. Real
+  // schema value confirmed by `cargo build` itself rejecting an initial wrong guess ("perUser") with
+  // "unknown variant `perUser`, expected one of `currentUser`, `perMachine`, `both`" -- not taken
+  // from docs alone. If this silently reverts to Tauri's default (perMachine), nothing else in this
+  // test suite would catch it before a real user hit a frozen update.
+  #[test]
+  fn windows_installer_uses_current_user_mode_to_avoid_uac_during_silent_update() {
+    let raw = include_str!("../tauri.conf.json");
+    let json: serde_json::Value = serde_json::from_str(raw).expect("valid JSON");
+    assert_eq!(
+      json["bundle"]["windows"]["nsis"]["installMode"],
+      serde_json::Value::String("currentUser".to_string()),
+      "installMode must stay currentUser — a per-machine install can require UAC elevation mid silent update"
+    );
+  }
 }
