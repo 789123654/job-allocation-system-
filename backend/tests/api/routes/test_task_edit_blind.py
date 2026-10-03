@@ -707,7 +707,11 @@ def test_c13_reassign_vs_old_assignee_submit_never_produces_forbidden_state(
         assert len(results) == 2, f"round {round_no}: a request never completed: {results}"
         patch_code, submit_code = results["patch"], results["submit"]
         assert patch_code in (200, 409), f"round {round_no}: patch={patch_code}"
-        assert submit_code in (200, 403, 409), f"round {round_no}: submit={submit_code}"
+        # 404: once the reassign commits, the old assignee can no longer see the task at all
+        # (get_task's own-assignments rule), so the route answers 404 (API_SPEC: not 403).
+        # 409: submit reached the row after the reassign but before its own lock.
+        # 403: the assignee check ran after the reassign. Only 200 is the forbidden commit.
+        assert submit_code in (200, 403, 404, 409), f"round {round_no}: submit={submit_code}"
 
         patch_won = patch_code == 200
         submit_won = submit_code == 200
