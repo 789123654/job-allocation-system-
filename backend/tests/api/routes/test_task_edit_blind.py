@@ -198,11 +198,16 @@ def _denial_count(admin: Engine, firm_id: UUID) -> int:
 def _wipe(admin: Engine, firm_ids: list[UUID]) -> None:
     with admin.begin() as conn:
         for fid in firm_ids:
+            # Dependents first: every table holding an FK into tasks, issues, job_types or profiles.
             for stmt in (
                 "DELETE FROM notifications WHERE firm_id = :fid",
                 "DELETE FROM task_edits WHERE firm_id = :fid",
+                "DELETE FROM task_reviews WHERE firm_id = :fid",
+                "DELETE FROM issues WHERE firm_id = :fid",
+                "DELETE FROM idempotency_keys WHERE firm_id = :fid",
                 "DELETE FROM access_denials WHERE firm_id = :fid",
                 "DELETE FROM audit_log WHERE firm_id = :fid",
+                "DELETE FROM job_types WHERE firm_id = :fid",
             ):
                 conn.execute(text(stmt), {"fid": fid})
             conn.execute(text("DELETE FROM tasks WHERE firm_id = :fid"), {"fid": fid})
@@ -307,12 +312,21 @@ def test_c2_cross_firm_and_unknown_id_are_indistinguishable(world: SimpleNamespa
     client = _client()
 
     cross = client.patch(f"/tasks/{task_id}", json={"title": "x"}, headers=_bearer(world.owner_b))
-    unknown = client.patch(f"/tasks/{uuid4()}", json={"title": "x"}, headers=_bearer(world.owner_b))
+    unknown_id = uuid4()
+    unknown = client.patch(
+        f"/tasks/{unknown_id}", json={"title": "x"}, headers=_bearer(world.owner_b)
+    )
 
     assert cross.status_code == 404
     assert unknown.status_code == 404
     assert cross.status_code == unknown.status_code
-    assert cross.json() == unknown.json()
+    # RFC 9457 "instance" echoes the request path, i.e. the id the caller itself sent; it is not
+    # an existence signal. Compare everything else, and check each echoes its own requested path.
+    cross_body = cross.json()
+    unknown_body = unknown.json()
+    assert cross_body.pop("instance") == f"/tasks/{task_id}"
+    assert unknown_body.pop("instance") == f"/tasks/{unknown_id}"
+    assert cross_body == unknown_body
 
 
 # ---------------------------------------------------------------------------
