@@ -560,11 +560,16 @@ def _jsonable(value: Any) -> Any:
     return str(value) if isinstance(value, UUID) else value
 
 
+_EDITABLE_TASK_FIELDS = frozenset({"title", "description", "assigned_to"})
+
+
 def edit_task(session: Session, actor: Profile, task: Task, changes: dict[str, Any]) -> Task:
     """Owner edit before the employee starts. Lock, state gate, change, history row, notifications,
     and one commit — all in one transaction, so a failure anywhere leaves no partial change and no
     orphan history row. A request that changes nothing writes no history row, so a retry is a no-op.
     """
+    if not set(changes) <= _EDITABLE_TASK_FIELDS:
+        raise ValueError(f"not editable: {sorted(set(changes) - _EDITABLE_TASK_FIELDS)}")
     locked = _lock_task(session, task.firm_id, task.id)
     if locked.status not in ("created", "assigned"):
         raise InvalidTaskStateError
