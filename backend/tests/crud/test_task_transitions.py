@@ -152,3 +152,16 @@ def test_create_task_rejects_cross_firm_employee(session: Session) -> None:
 
     with pytest.raises(crud.UnknownAssigneeError):
         crud.create_task(session, owner, "Do the thing", None, None, other_firm_employee.id, None)
+
+
+def test_edit_task_refuses_fields_outside_the_allowlist(session: Session) -> None:
+    # The route's schema already drops extra fields, but crud.edit_task must not rely on that:
+    # a direct caller changing status must be refused and leave the row untouched.
+    owner = _profile(session, role="owner")
+    task = _task(session, status="assigned")
+
+    with pytest.raises(ValueError, match="not editable"):
+        crud.edit_task(session, owner, task, {"status": "completed"})
+
+    session.refresh(task)
+    assert task.status == "assigned"

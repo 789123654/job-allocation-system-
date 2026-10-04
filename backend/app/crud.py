@@ -579,13 +579,20 @@ def edit_task(session: Session, actor: Profile, task: Task, changes: dict[str, A
     before = {f: getattr(locked, f) for f in changes if getattr(locked, f) != changes[f]}
     if not before:
         return locked
+    # Same rule as create_task: a task with an assignee is "assigned", never "created". Recorded in
+    # the history row too, so the status change is auditable like every other change.
+    new_values = dict(changes)
+    gets_assignee = "assigned_to" in before and changes.get("assigned_to") is not None
+    if gets_assignee and locked.status == "created":
+        before["status"] = locked.status
+        new_values["status"] = "assigned"
 
     now = datetime.now(UTC)
     changed_fields = {
-        f: {"old": _jsonable(before[f]), "new": _jsonable(changes[f])} for f in before
+        f: {"old": _jsonable(before[f]), "new": _jsonable(new_values[f])} for f in before
     }
     for f in before:
-        setattr(locked, f, changes[f])
+        setattr(locked, f, new_values[f])
     locked.updated_at = now
     session.add(locked)
     session.add(
