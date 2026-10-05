@@ -1,5 +1,6 @@
 """Blind tests for PATCH /tasks/{task_id}: a title-only edit must not depend on the assignee's
-current active status. Written from the contract only (scratchpad edit-unchanged-assignee-contract.md).
+current active status. Written from the contract only (scratchpad
+edit-unchanged-assignee-contract.md).
 The implementation was not read. Helpers are copied from test_task_edit_blind.py (not modified).
 Real Postgres required; no skips.
 """
