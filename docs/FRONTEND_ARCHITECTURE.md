@@ -264,6 +264,40 @@ Kebab-case file naming, enforced via the same `check-file` ESLint plugin the sou
   open `Issues` per task in `crud.list_tasks`/`get_task`), then a small badge next to Status on
   both My Tasks and the Owner Dashboard's All Tasks table. Deferred because it's a schema/API
   change, not a frontend-only patch like the confirmation dialog was.
+- **Update prompt before install — deferred to Phase 2.** Reported 2026-10-05: the app currently
+  downloads and installs an update on its own at startup, with only a "Restart Now / Later" prompt
+  afterward. Owners expected to be asked first. Kept automatic for now, per the 2026-10-02 decision
+  in `DEPLOYMENT.md` §5. Phase 2 change, if we decide to switch: check for the update at startup,
+  show "Install now / Later" before downloading, then the existing restart prompt. Roughly a day of
+  work plus one release. Apps already on the release that makes this change still auto-install that
+  one update, since the prompt only exists from the next release onward.
+- **Desktop alert when the app is closed or hidden — deferred to Phase 2.** Reported 2026-10-05:
+  notifications are shown only inside the app, so an Employee or Owner who doesn't open the app never
+  sees them. Today closing the window quits the app (no tray), and the 45-second notification check
+  pauses while the window is hidden (`get-notifications.ts`, `refetchIntervalInBackground: false`).
+  Options: (1) keep the app in the tray, hide on close, and show a Windows notification for each new
+  notification while the app runs (about 2–3 days; recommended first); (2) full push alerts when the
+  app is fully closed (a week or more, needs a push service); (3) email as a backup. Option 1 moves
+  the background check to the Rust side. Verified against Tauri's official notification docs: Windows
+  support and the `notification:allow-notify` permission. Close-to-tray behavior comes from community
+  sources ([Tauri discussion #2684](https://github.com/tauri-apps/tauri/discussions/2684),
+  [issue #13511](https://github.com/tauri-apps/tauri/issues/13511)) and must be checked against the
+  official reference before building. Not yet verified: whether notifications show while the window is
+  hidden.
+- **Phase 3 — product expansion for small and medium businesses (label is "Phase 3" for this list
+  only; the earlier Phase 3 in `CODING_STRUCTURE.md` is the completed backend build).** Reported 2026-10-06
+  from a review of what the platform already does (PRD §1, §1.1; `DATA_MODEL.md` billing fields) against
+  the 2026 MSME research. In order:
+  1. **Billing becomes receivables:** billing tasks grow into invoices with due dates, payment status and
+     overdue reminders, using the existing notifications. This is the planned Phase 2 billing work and the
+     closest match to the cash-flow pain.
+  2. **Customers and suppliers as records:** linked to tasks, so an invoice or supplier follow-up is a
+     normal task with an owner and a deadline.
+  3. **Agent layer:** turns a bill, email or message into a draft task or invoice follow-up. The owner
+     confirms every write. Matches the second-stage AI item in PRD §6.
+  4. **Desktop alerts** (the Phase 2 item above), so reminders reach people when the app isn't open.
+  5. **Outside data last:** GST filing data and marketplace orders (such as ONDC).
+  Not built yet: no AI code, no customer or supplier records, no market validation with real owners.
 
 ---
 
