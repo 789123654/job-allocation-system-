@@ -8,8 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useCreateTaskReview } from "@/features/tasks/api/create-task-review";
 import { useTask } from "@/features/tasks/api/get-task";
+import { EditTaskDialog } from "@/features/tasks/components/edit-task-dialog";
 import { taskReviewSchema, type TaskReviewInput } from "@/features/tasks/types";
 import { ApiError } from "@/lib/api-client";
+import { useSession } from "@/stores/session-store";
 
 // PRD §2.6/§2.8: three review outcomes; the "billing" outcome's 5 fields (assignee, deadline,
 // description, amount, recipient) are collected inline here rather than as a genuinely separate
@@ -18,8 +20,14 @@ import { ApiError } from "@/lib/api-client";
 // tasks.py's review_task fresh this pass, not assumed from the screen inventory's naming).
 export function OwnerTaskReviewPage({
   employeeOptions,
+  employees = [],
 }: {
   employeeOptions: { id: string; label: string }[];
+  // Employees with active flags, for the owner's Edit dialog. Only the first page of GET /employees
+  // (20 rows, deferred paging gap) — the same list employeeOptions is built from. Passed in by the route wrapper
+  // (features/tasks cannot import features/employees — see amendment 1 of the page contract).
+  // Optional so the existing review-page tests that render without it keep working.
+  employees?: { id: string; fullName: string; isActive: boolean }[];
 }) {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
@@ -46,6 +54,8 @@ export function OwnerTaskReviewPage({
     shouldUnregister: true,
   });
   const outcome = useWatch({ control, name: "outcome" });
+  const { role } = useSession();
+  const [editOpen, setEditOpen] = useState(false);
 
   if (!taskId) return null;
   if (isPending) return <p className="text-sm text-(--color-ledger-text-muted)">Loading…</p>;
@@ -84,6 +94,28 @@ export function OwnerTaskReviewPage({
           <dt className="text-(--color-ledger-text-muted)">Deadline</dt>
           <dd>{task.deadline ? new Date(task.deadline).toLocaleDateString() : "—"}</dd>
         </dl>
+        {/* Owner edit before the employee starts. The page decides whether the button shows; the
+            dialog only performs the edit. Server rules (owner-only, status created/assigned) are
+            enforced again by PATCH /tasks/{id}. */}
+        {role === "owner" && (task.status === "created" || task.status === "assigned") && (
+          <div>
+            <Button type="button" onClick={() => setEditOpen(true)}>
+              Edit task
+            </Button>
+            <EditTaskDialog
+              task={{
+                id: task.id,
+                title: task.title,
+                description: task.description,
+                assignedTo: task.assignedTo,
+                status: task.status,
+              }}
+              employees={employees}
+              open={editOpen}
+              onOpenChange={setEditOpen}
+            />
+          </div>
+        )}
         <p className="text-sm text-(--color-ledger-danger)">
           This task isn't awaiting review yet — it becomes reviewable once the employee submits
           it.

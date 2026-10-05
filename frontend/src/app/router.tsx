@@ -182,8 +182,8 @@ function TaskDetailRoute() {
 }
 
 // Same key-remount reasoning as TaskDetailRoute above, applied to IssueDetailPage — a plain read
-// view (no per-instance Idempotency-Key to worry about, unlike TaskDetailPage/OwnerTaskReviewRoute
-// et al.), but keying it still avoids a stale query-cache render if the raiser navigates from one
+// view (it holds no Idempotency-Key; the write pages keep theirs inside the page component), but
+// keying it still avoids a stale query-cache render if the raiser navigates from one
 // resolved issue's notification straight to another's without an intervening full page load.
 function IssueDetailRoute() {
   const { issueId } = useParams<{ issueId: string }>();
@@ -193,9 +193,8 @@ function IssueDetailRoute() {
 // Same key-remount reasoning as TaskDetailRoute above, applied to OwnerTaskReviewPage's own
 // per-task Idempotency-Key. Also the composition point FRONTEND_ARCHITECTURE.md §2's "features
 // cannot import each other" requires: features/tasks can't import features/employees directly,
-// so this app/-level wrapper fetches the employee list and passes it down as plain {id,label}
-// options — not the Dashboard yet (deferred, this session's scoping decision), just enough to
-// make Task Review's reassign/billing employee picker functional and testable now.
+// so this app/-level wrapper fetches the employee list and passes it down as plain data: {id,label}
+// options for the reassign/billing picker, and {id,fullName,isActive} for the Edit dialog.
 function OwnerTaskReviewRoute() {
   const { taskId } = useParams<{ taskId: string }>();
   const { data: employees } = useEmployees();
@@ -205,7 +204,20 @@ function OwnerTaskReviewRoute() {
     id: e.id,
     label: `${e.fullName} (${e.pendingTaskCount} pending)`,
   }));
-  return <OwnerTaskReviewPage key={taskId} employeeOptions={employeeOptions} />;
+  // Active flags for the owner's Edit dialog (same composition point, same reason). Same first page
+  // of GET /employees as employeeOptions above — the paging gap is shared, not introduced here.
+  const editableEmployees = (employees ?? []).map((e) => ({
+    id: e.id,
+    fullName: e.fullName,
+    isActive: e.isActive,
+  }));
+  return (
+    <OwnerTaskReviewPage
+      key={taskId}
+      employeeOptions={employeeOptions}
+      employees={editableEmployees}
+    />
+  );
 }
 
 // Same reasoning as OwnerTaskReviewRoute above, applied to IssueResolutionPage's reassign
